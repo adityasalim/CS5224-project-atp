@@ -1,0 +1,77 @@
+{
+  "name": "search_transfers",
+  "description": "Find ways to travel between two cities on a multi-city trip on the moving day: real one-way flights (when both airports are given and the cities are far apart) and a train/bus/ferry estimate with a timetable-search link. Returns options with transferId, mode, departAt, arriveAt, durationMinutes, overnight, 'matches' and total price in SGD. Call once per hop, on the day the traveller leaves the earlier city. Use 'prefer' for wishes like 'scenic train', 'no flying' or 'as fast as possible'.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "from": {
+        "type": "object",
+        "description": "Departure city",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "City or area, e.g. Copenhagen"
+          },
+          "airport": {
+            "type": "string",
+            "description": "Nearest 3-letter IATA airport, e.g. CPH (optional)"
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "city"
+        ]
+      },
+      "to": {
+        "type": "object",
+        "description": "Arrival city",
+        "properties": {
+          "city": {
+            "type": "string",
+            "description": "City or area, e.g. Lofoten"
+          },
+          "airport": {
+            "type": "string",
+            "description": "Nearest 3-letter IATA airport, e.g. BOO (optional)"
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "city"
+        ]
+      },
+      "date": {
+        "type": "string",
+        "description": "Travel date as YYYY-MM-DD"
+      },
+      "pax": {
+        "type": "integer",
+        "description": "Number of travellers (1-9)"
+      },
+      "prefer": {
+        "type": "string",
+        "description": "'cheapest' (default), 'fastest', 'ground' (trains, buses, ferries: scenic routes, 'flight-free' or eco-minded travellers) or 'flight'."
+      },
+      "avoidOvernight": {
+        "type": "boolean",
+        "description": "Default true: overnight or very late arrivals go last. Set false if the traveller is happy with night trains or late arrivals."
+      }
+    },
+    "required": [
+      "from",
+      "to",
+      "date",
+      "pax"
+    ]
+  }
+}

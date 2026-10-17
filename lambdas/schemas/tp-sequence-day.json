@@ -1,0 +1,62 @@
+{
+  "name": "sequence_day",
+  "description": "Order one day's chosen places into a feasible timed schedule starting from the hotel, respecting opening hours and real travel times. Returns stops with arriveAt/departAt, travel minutes, free time and any places that did not fit. Call once per day after choosing that day's placeIds.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "date": {
+        "type": "string",
+        "description": "Date as YYYY-MM-DD"
+      },
+      "stayId": {
+        "type": "string",
+        "description": "Hotel stayId from search_stays (the day starts and ends here). Use start instead for a day trip."
+      },
+      "placeIds": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "2-8 placeIds from find_places for this day"
+      },
+      "dayStart": {
+        "type": "string",
+        "description": "Time as HH:MM (24h)"
+      },
+      "dayEnd": {
+        "type": "string",
+        "description": "Time as HH:MM (24h)"
+      },
+      "mode": {
+        "type": "string",
+        "description": "Allowed values: walk, car."
+      },
+      "lunch": {
+        "type": "boolean",
+        "description": "Place a restaurant or cafe around lunchtime (default true)"
+      },
+      "start": {
+        "type": "object",
+        "description": "Start point instead of stayId, e.g. the station of a day-trip town: {name, lat, lng}. Set dayStart to when you arrive there.",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "lat": {
+            "type": "number"
+          },
+          "lng": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "required": [
+      "date",
+      "placeIds"
+    ]
+  }
+}

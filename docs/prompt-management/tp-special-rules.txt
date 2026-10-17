@@ -1,0 +1,6 @@
+- pinned: places the traveller asked for BY NAME (pool items with "requested"). Every pinned placeId MUST be in
+  the plan, on a full day that fits its city and opening hours. Never drop one to fix another problem.
+- A hotel with matches "requested hotel" or "already booked" is the traveller's own choice: use it.
+- dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (not the arrival,
+  departure or a moving day): set "dayTrip": "<town>" on that day and use only that town's places (2-3 incl. food).
+  Never mix day-trip places into other days.

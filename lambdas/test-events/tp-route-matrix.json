@@ -1,0 +1,20 @@
+{
+  "points": [
+    {
+      "id": "tokyo-station",
+      "lat": 35.6812,
+      "lng": 139.7671
+    },
+    {
+      "id": "senso-ji",
+      "lat": 35.7148,
+      "lng": 139.7967
+    },
+    {
+      "id": "meiji-jingu",
+      "lat": 35.6764,
+      "lng": 139.6993
+    }
+  ],
+  "mode": "walk"
+}

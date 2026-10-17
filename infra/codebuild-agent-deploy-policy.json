@@ -1,0 +1,31 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAgentDeployConfig",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::<plans-bucket>/deploy-config/*"
+    },
+    {
+      "Sid": "StarterToolkitLaunch",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:*",
+        "ecr:*",
+        "codebuild:StartBuild", "codebuild:BatchGetBuilds", "codebuild:BatchGetProjects",
+        "codebuild:CreateProject", "codebuild:UpdateProject",
+        "s3:CreateBucket", "s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:PutLifecycleConfiguration",
+        "s3:GetBucketLocation", "logs:*", "iam:GetRole", "sts:GetCallerIdentity"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassAgentRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": ["arn:aws:iam::<account-id>:role/AmazonBedrockAgentCore*",
+                   "arn:aws:iam::<account-id>:role/*agentcore*"]
+    }
+  ]
+}

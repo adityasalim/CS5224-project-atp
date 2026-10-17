@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Trip Planner</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --surface: #ffffff; --surface-2: #efede6; --text: #1d1d1b; --muted: #6b6a65;
+    --line: #e3e1da; --accent: #b4442f; --accent-ink: #ffffff; --user: #1f3a5f; --user-ink: #ffffff;
+    --ok: #2f7a4f; --warn: #a86a12; --bad: #b3261e; --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151513; --surface: #1f1f1c; --surface-2: #2a2a26; --text: #ecebe6; --muted: #a09f98;
+            --line: #34332f; --accent: #e0745d; --accent-ink: #151513; --user: #3d6aa3; --user-ink: #ffffff;
+            --ok: #6cc08f; --warn: #e2a547; --bad: #f2867c; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); display: flex; flex-direction: column;
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+           padding: 12px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: -0.01em; }
+  header h1 span { color: var(--accent); }
+  .user { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); flex-wrap: wrap; }
+  button { font: inherit; border-radius: 999px; padding: 7px 14px; border: 1px solid var(--line);
+           background: var(--surface); color: var(--text); cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .badge { font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .badge.demo { color: var(--warn); border-color: var(--warn); }
+  .badge.live, .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .hidden { display: none !important; }
+
+  main { flex: 1; display: flex; flex-direction: column; width: 100%; max-width: 860px; margin: 0 auto; min-height: 0; }
+  #chat { flex: 1; overflow-y: auto; padding: 20px 16px 8px; display: flex; flex-direction: column; gap: 14px; }
+  .row { display: flex; }
+  .row.me { justify-content: flex-end; }
+  .bubble { max-width: 85%; padding: 10px 14px; border-radius: var(--radius); white-space: pre-wrap; word-wrap: break-word; }
+  .me .bubble { background: var(--user); color: var(--user-ink); border-bottom-right-radius: 4px; }
+  .bot .bubble { background: var(--surface); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bot .bubble.error { border-color: var(--bad); color: var(--bad); }
+  .who { font-size: 12px; color: var(--muted); margin: 0 4px 3px; }
+
+  .work { background: var(--surface-2); border: 1px dashed var(--line); color: var(--muted); font-size: 14px; }
+  .work .now { display: flex; align-items: center; gap: 8px; }
+  .spin { width: 12px; height: 12px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--accent);
+          animation: spin 0.8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  .work details { margin-top: 4px; }
+  .work summary { cursor: pointer; font-size: 12px; }
+  .work ol { margin: 6px 0 0; padding-left: 20px; font-size: 13px; }
+  .work.done { padding: 4px 12px; }
+  .work.done details { margin: 0; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px;
+          width: min(100%, 720px); white-space: normal; }
+  .card h2 { font-size: 18px; margin: 0 0 4px; }
+  .card .meta { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .card .totals { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; font-size: 14px; margin: 10px 0; }
+  .card .totals strong { font-variant-numeric: tabular-nums; }
+  .card .route { font-size: 14px; margin: 4px 0 2px; }
+  .card .pdf { display: inline-block; margin: 2px 0 10px; font-weight: 600; }
+  .day { border-top: 1px solid var(--line); padding: 10px 0 6px; }
+  .day h3 { margin: 0 0 2px; font-size: 15px; }
+  .day .note { font-size: 13px; color: var(--muted); margin: 0 0 6px; }
+  .stop { display: grid; grid-template-columns: 54px 1fr; gap: 8px; font-size: 14px; padding: 2px 0; }
+  .stop time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stop small { color: var(--muted); }
+  .notes { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; margin: 6px 0 0; }
+  .notes li { margin: 2px 0; }
+  .fb { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; font-size: 14px; }
+  .fb .q { font-weight: 600; margin: 0 0 6px; }
+  .fb .stars { display: flex; gap: 4px; align-items: center; }
+  .fb .stars button { width: 36px; height: 36px; padding: 0; font-size: 20px; line-height: 1; background: var(--surface-2);
+                      color: var(--muted); }
+  .fb .stars button.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  .fb .stars .lbl { margin-left: 8px; font-size: 13px; color: var(--muted); }
+  .fb details { margin: 8px 0 0; }
+  .fb summary { cursor: pointer; font-size: 13px; color: var(--muted); }
+  .fb .dims { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 10px; align-items: center; margin: 8px 0 0; }
+  .fb .dims .scale { display: flex; gap: 3px; }
+  .fb .dims .scale button { width: 30px; height: 30px; padding: 0; font-size: 13px; background: var(--surface-2); }
+  .fb .dims .scale button.on { background: var(--user); color: var(--user-ink); border-color: var(--user); }
+  .fb textarea { width: 100%; min-height: 60px; margin: 8px 0 0; font-size: 14px; }
+  .fb .actions { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  .fb .status { font-size: 13px; color: var(--muted); }
+  .fb.sent .thanks { color: var(--muted); font-size: 13px; }
+
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; padding: 0 16px 8px; }
+  .chips button { font-size: 13px; padding: 5px 12px; background: var(--surface-2); }
+  footer.composer { padding: 10px 16px calc(14px + env(safe-area-inset-bottom)); border-top: 1px solid var(--line);
+                    background: var(--bg); }
+  .composer form { display: flex; gap: 8px; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 46px; max-height: 180px; padding: 11px 14px; border-radius: 14px;
+             border: 1px solid var(--line); background: var(--surface); color: var(--text); font: inherit; }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
+  .composer .hint { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  .welcome { margin: auto; text-align: center; padding: 40px 18px; max-width: 520px; }
+  .welcome h2 { font-size: 22px; margin: 0 0 8px; }
+  .welcome p { color: var(--muted); margin: 0 0 18px; }
+  @media (max-width: 560px) { .bubble { max-width: 92%; } .stop { grid-template-columns: 48px 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Trip<span>Planner</span></h1>
+  <div class="user">
+    <span id="modeBadge" class="badge demo">Demo mode</span>
+    <span id="userEmail"></span>
+    <button id="newTripBtn" title="Start a new conversation">New trip</button>
+    <button id="signOutBtn" class="hidden">Sign out</button>
+  </div>
+</header>
+
+<main>
+  <section id="signedOut" class="welcome hidden">
+    <h2>Plan a trip by chatting</h2>
+    <p>Describe where you want to go. The planner searches real flights, hotels and places, checks the budget and timings, and you can ask for changes until it's right.</p>
+    <button id="signInBtn" class="primary">Sign in</button>
+  </section>
+
+  <div id="app" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
+    <div id="chat" aria-live="polite"></div>
+    <div id="chips" class="chips"></div>
+    <footer class="composer">
+      <form id="composer">
+        <textarea id="input" rows="1" placeholder="Describe your trip, or ask for a change…" aria-label="Message"></textarea>
+        <button id="sendBtn" class="primary" type="submit">Send</button>
+      </form>
+      <div class="hint" id="hint">Enter to send · Shift+Enter for a new line</div>
+    </footer>
+  </div>
+</main>
+
+<script>
+/* ============================================================
+   CONFIG — fill these in. Leave a value "" to keep that part off.
+   ============================================================ */
+const CONFIG = {
+  REGION: "ap-southeast-1",
+  // Cognito (Phase 3.4). Domain is the full URL from Branding → Domain,
+  // e.g. "https://ap-southeast-1abcd123.auth.ap-southeast-1.amazoncognito.com"
+  COGNITO_DOMAIN: "",
+  COGNITO_CLIENT_ID: "",
+  // Agent (Phase 6.3). Leave "" to use built-in demo data.
+  AGENT_RUNTIME_ARN: "",
+  // REST API (Phase 5), e.g. "https://abc123.execute-api.ap-southeast-1.amazonaws.com/dev"
+  API_URL: ""
+};
+const REDIRECT_URI = window.location.origin + "/";
+const AUTH_ON = !!(CONFIG.COGNITO_DOMAIN && CONFIG.COGNITO_CLIENT_ID);
+const LIVE_AGENT = !!CONFIG.AGENT_RUNTIME_ARN;
+const STARTERS = [
+  "We are planning a six-day honeymoon in Tokyo for two people, 10 to 15 December 2026, with a budget of SGD 5,000. We prefer a romantic hotel, cultural attractions, Japanese food, and some free time to enjoy the scenery.",
+  "4 days in Seoul for 3 friends next month, SGD 4,500 total, we love markets, cafes and K-pop spots",
+  "Copenhagen 3 nights, Lofoten 4 nights, Abisko 4 nights, 10-21 Dec, 2 people, SGD 14,000. Hiking, northern lights and good food",
+];
+const FOLLOW_UPS = ["Make day 3 more relaxed", "Find a cheaper hotel", "Add a sushi dinner", "What's near our hotel?"];
+
+const $ = (id) => document.getElementById(id);
+const store = {
+  get: (k) => { try { return sessionStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} },
+  del: (k) => { try { sessionStorage.removeItem(k); } catch {} }
+};
+
+/* ---------- helpers ---------- */
+function b64url(bytes) {
+  return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function randomString(len) { const a = new Uint8Array(len); crypto.getRandomValues(a); return b64url(a).slice(0, len); }
+function decodeJwt(token) {
+  try { const p = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/"); return JSON.parse(decodeURIComponent(escape(atob(p)))); }
+  catch { return {}; }
+}
+function safeUrl(u) { return /^https:\/\//.test(u || "") ? u : null; }
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function sgd(n) { return "SGD " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+
+/* ---------- auth (Cognito Hosted UI, authorization code + PKCE) ---------- */
+async function signIn() {
+  const verifier = randomString(64), state = randomString(24);
+  store.set("pkce_verifier", verifier); store.set("oauth_state", state);
+  const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+  const url = new URL(CONFIG.COGNITO_DOMAIN + "/oauth2/authorize");
+  url.search = new URLSearchParams({ response_type: "code", client_id: CONFIG.COGNITO_CLIENT_ID, redirect_uri: REDIRECT_URI,
+    scope: "openid email profile", state, code_challenge_method: "S256", code_challenge: challenge });
+  window.location.assign(url.toString());
+}
+async function handleCallback() {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code"); if (!code) return;
+  history.replaceState({}, "", REDIRECT_URI);
+  if (params.get("state") !== store.get("oauth_state")) { alert("Sign-in failed: state mismatch. Try again."); return; }
+  const res = await fetch(CONFIG.COGNITO_DOMAIN + "/oauth2/token", { method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "authorization_code", client_id: CONFIG.COGNITO_CLIENT_ID, code,
+      redirect_uri: REDIRECT_URI, code_verifier: store.get("pkce_verifier") || "" }) });
+  if (!res.ok) { alert("Sign-in failed (" + res.status + "). Check the Cognito return URL matches " + REDIRECT_URI); return; }
+  const t = await res.json();
+  store.set("id_token", t.id_token); store.set("access_token", t.access_token);
+  store.set("expires_at", String(Date.now() + t.expires_in * 1000));
+  store.del("pkce_verifier"); store.del("oauth_state");
+}
+function currentUser() {
+  const idt = store.get("id_token"), exp = Number(store.get("expires_at") || 0);
+  if (!idt || Date.now() > exp) return null;
+  return decodeJwt(idt);
+}
+function signOut() {
+  ["id_token", "access_token", "expires_at", "session_id", "transcript"].forEach(store.del);
+  if (AUTH_ON) {
+    const url = new URL(CONFIG.COGNITO_DOMAIN + "/logout");
+    url.search = new URLSearchParams({ client_id: CONFIG.COGNITO_CLIENT_ID, logout_uri: REDIRECT_URI });
+    window.location.assign(url.toString());
+  } else location.reload();
+}
+
+/* ---------- conversation state (kept for this browser tab) ---------- */
+let transcript = [];          // [{kind: "me"|"bot"|"error"|"itinerary", data}]
+function sessionId() {
+  let s = store.get("session_id");
+  if (!s) { s = "tp-" + crypto.randomUUID() + "-" + Date.now(); store.set("session_id", s); }   // 33+ chars
+  return s;
+}
+function saveTranscript() { store.set("transcript", JSON.stringify(transcript.slice(-60))); }
+function newTrip() {
+  if (busy) return;
+  store.del("session_id"); store.del("transcript"); transcript = [];
+  $("chat").innerHTML = ""; greet(); showChips(STARTERS.map((s) => s.length > 60 ? s : s), true);
+  $("input").focus();
+}
+
+/* ---------- rendering ---------- */
+function scrollDown() { const c = $("chat"); c.scrollTop = c.scrollHeight; }
+function renderMe(text) {
+  const row = el("div", "row me"); row.append(el("div", "bubble", text)); $("chat").append(row); scrollDown();
+}
+function renderBot(text, cls) {
+  const row = el("div", "row bot"); const wrap = el("div");
+  wrap.append(el("div", "who", "Planner"), el("div", "bubble" + (cls ? " " + cls : ""), text));
+  row.append(wrap); $("chat").append(row); scrollDown();
+}
+function renderItinerary(it) {
+  const row = el("div", "row bot"); const card = el("div", "card");
+  card.append(el("h2", null, it.title || "Your itinerary"));
+  const meta = [];
+  if (it.version) meta.push("Version " + it.version);
+  if (it.repairRounds) meta.push(it.repairRounds + " improvement round" + (it.repairRounds > 1 ? "s" : ""));
+  if (meta.length) card.append(el("div", "meta", meta.join(" · ")));
+  if (it.route) {
+    const r = el("div", "route"); r.append(el("strong", null, "Route: ")); r.append(it.route);
+    card.append(r);
+    if (it.hotels && (it.hotels.length > 1 || it.hotels.some(h => h.booked)))
+      card.append(el("div", "meta", (it.hotels.length > 1 ? "Hotels: " : "Hotel: ") + it.hotels.map(h =>
+        (h.city ? h.city + " — " : "") + (h.name || "?") + (h.booked ? " (your booking)" : "")).join(" · ")));
+  }
+  if (it.summary) card.append(el("p", null, it.summary));
+  if (it.totals) {
+    const t = el("div", "totals");
+    const a = el("span"); a.append("Estimated total "); a.append(el("strong", null, sgd(it.totals.total)));
+    const b = el("span"); b.append("Budget "); b.append(el("strong", null, sgd(it.totals.budget)));
+    t.append(a, b);
+    if (it.verified !== undefined) t.append(el("span", "badge " + (it.verified ? "ok" : "demo"), it.verified ? "All checks passed" : "See notes"));
+    card.append(t);
+  }
+  const pdf = safeUrl(it.pdfUrl);
+  if (pdf || (CONFIG.API_URL && it.tripId)) {
+    const l = el("a", "pdf", "Download PDF plan ↓"); l.href = pdf || "#"; l.target = "_blank"; l.rel = "noopener";
+    l.onclick = (e) => { e.preventDefault(); openPdf(it, l); };
+    card.append(l);
+  }
+  (it.days || []).forEach((d) => {
+    const day = el("div", "day"); day.append(el("h3", null, d.title));
+    if (d.note) day.append(el("p", "note", d.note));
+    if (!(d.stops || []).length) day.append(el("div", "note", "Free time / travel"));
+    (d.stops || []).forEach((s) => {
+      const r = el("div", "stop"); r.append(el("time", null, s.time || ""));
+      const name = el("span"); const url = safeUrl(s.url);
+      if (url) { const a = el("a", null, s.name); a.href = url; a.target = "_blank"; a.rel = "noopener"; name.append(a); }
+      else name.append(s.name);
+      if (s.note) { name.append(" "); name.append(el("small", null, "· " + s.note)); }
+      r.append(name); day.append(r);
+    });
+    card.append(day);
+  });
+  if ((it.caveats || []).length) {
+    const ul = el("ul", "notes"); it.caveats.forEach((c) => ul.append(el("li", null, c))); card.append(ul);
+  }
+  if (CONFIG.API_URL && it.tripId) card.append(feedbackBox(it));
+  row.append(card); $("chat").append(row); scrollDown();
+}
+
+/* ---------- feedback (POST /trips/{tripId}/feedback -> tp-dev-feedback) ----------
+   A 1-5 star rating, optional detail ratings for the user study (§5.2) and an optional comment. */
+const FB_DIMS = [["usefulness", "Useful for planning my trip"], ["personalization", "Fits my preferences"],
+                 ["trust", "I trust the prices and times"], ["easeOfUse", "Easy to use"],
+                 ["satisfaction", "Overall satisfaction"]];
+const STAR_WORDS = ["", "Poor", "Fair", "Good", "Very good", "Excellent"];
+function feedbackBox(it) {
+  const box = el("div", "fb");
+  if (it.feedbackSent) {
+    box.classList.add("sent");
+    box.append(el("div", "thanks", "Thanks for your feedback (" + it.feedbackSent + "/5)."));
+    return box;
+  }
+  const state = { rating: 0, dims: {} };
+  box.append(el("p", "q", "How good is this plan?"));
+  const stars = el("div", "stars"); const lbl = el("span", "lbl", "Tap a star");
+  const starBtns = [1, 2, 3, 4, 5].map((n) => {
+    const b = el("button", null, "★"); b.type = "button";
+    b.setAttribute("aria-label", n + " star" + (n > 1 ? "s" : "") + " – " + STAR_WORDS[n]);
+    b.onclick = () => { state.rating = n; starBtns.forEach((x, i) => x.classList.toggle("on", i < n));
+                        lbl.textContent = STAR_WORDS[n]; send.disabled = false; };
+    return b;
+  });
+  stars.append(...starBtns, lbl); box.append(stars);
+
+  const det = el("details"); det.append(el("summary", null, "Rate in more detail (optional)"));
+  const dims = el("div", "dims");
+  FB_DIMS.forEach(([key, text]) => {
+    dims.append(el("span", null, text));
+    const sc = el("div", "scale"); const btns = [];
+    for (let n = 1; n <= 5; n++) {
+      const b = el("button", null, String(n)); b.type = "button"; b.setAttribute("aria-label", text + ": " + n + " of 5");
+      b.onclick = () => { state.dims[key] = n; btns.forEach((x, i) => x.classList.toggle("on", i === n - 1)); };
+      btns.push(b); sc.append(b);
+    }
+    dims.append(sc);
+  });
+  det.append(dims); box.append(det);
+
+  const ta = el("textarea"); ta.placeholder = "Anything we should improve? (optional)"; ta.maxLength = 1000;
+  ta.setAttribute("aria-label", "Comments"); box.append(ta);
+  const actions = el("div", "actions"); const send = el("button", "primary", "Send feedback");
+  send.type = "button"; send.disabled = true; const status = el("span", "status");
+  actions.append(send, status); box.append(actions);
+
+  send.onclick = async () => {
+    if (!state.rating) return;
+    if (AUTH_ON && !currentUser()) { status.textContent = "Please sign in again to send feedback."; return; }
+    send.disabled = true; status.textContent = "Sending…";
+    try {
+      const r = await fetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/feedback`, {
+        method: "POST", headers: { "Authorization": store.get("id_token") || "", "Content-Type": "application/json" },
+        body: JSON.stringify({ rating: state.rating, comments: ta.value.trim(), version: it.version || null,
+                               ...state.dims })
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.message || ("API error " + r.status));
+      it.feedbackSent = state.rating; saveTranscript();
+      box.replaceWith(feedbackBox(it));
+    } catch (e) {
+      status.textContent = "Couldn't send: " + e.message + ". Please try again.";
+      send.disabled = false;
+    }
+  };
+  return box;
+}
+function render(item) {
+  if (item.kind === "me") renderMe(item.data);
+  else if (item.kind === "bot") renderBot(item.data);
+  else if (item.kind === "error") renderBot(item.data, "error");
+  else if (item.kind === "itinerary") renderItinerary(item.data);
+}
+function add(kind, data) { const item = { kind, data }; transcript.push(item); saveTranscript(); render(item); }
+
+/* progress bubble for the current turn */
+function startWork() {
+  const row = el("div", "row bot"); const box = el("div", "bubble work");
+  const now = el("div", "now"); now.append(el("span", "spin"), el("span", "label", "Working…"));
+  const det = el("details"); const sum = el("summary", null, "Show steps"); const ol = el("ol");
+  det.append(sum, ol); box.append(now, det); row.append(box); $("chat").append(row); scrollDown();
+  let n = 0;
+  return {
+    step(text) { n++; now.querySelector(".label").textContent = text; ol.append(el("li", null, text)); sum.textContent = "Show steps (" + n + ")"; scrollDown(); },
+    done(ok) {
+      if (!n) { row.remove(); return; }
+      box.classList.add("done"); now.remove();
+      sum.textContent = (ok ? "✓ " : "") + n + " step" + (n > 1 ? "s" : "") + " · show";
+    }
+  };
+}
+
+function showChips(list, starters) {
+  const c = $("chips"); c.innerHTML = "";
+  list.forEach((text) => {
+    const b = el("button", null, starters && text.length > 60 ? text.slice(0, 58) + "…" : text);
+    b.type = "button"; b.title = text;
+    b.onclick = () => { $("input").value = text; autosize(); send(); };
+    c.append(b);
+  });
+  scrollDown();
+}
+function greet() {
+  const msg = LIVE_AGENT
+    ? "Hi! Tell me about the trip you'd like: where, when, how many people and your budget in SGD. After I make a plan you can ask me to change anything."
+    : "Hi! This is demo mode with sample data. Describe a trip and I'll show what the planner looks like. Connect the agent (AGENT_RUNTIME_ARN) for real plans.";
+  renderBot(msg);
+}
+
+/* ---------- PDF links ----------
+   The link inside the itinerary is a presigned S3 URL that only works for 15 minutes. On click we ask the
+   REST API (GET /trips/{id}/pdf?version=N) for a fresh one, and fall back to the original if it's still new. */
+const PDF_LINK_MS = 14 * 60 * 1000;
+async function openPdf(it, link) {
+  const fresh = it.pdfUrl && it.receivedAt && Date.now() - it.receivedAt < PDF_LINK_MS;
+  if (CONFIG.API_URL && it.tripId && (!AUTH_ON || currentUser())) {
+    const win = window.open("", "_blank");          // open now (inside the click) so popup blockers allow it
+    const old = link.textContent; link.textContent = "Preparing PDF…";
+    try {
+      const r = await fetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/pdf` +
+                            (it.version ? `?version=${encodeURIComponent(it.version)}` : ""),
+                            { headers: { "Authorization": store.get("id_token") || "" } });
+      const body = await r.json().catch(() => ({}));
+      const url = r.ok && safeUrl(body.url);
+      if (url) { if (win) win.location = url; else window.location = url; return; }
+      if (win) win.close();
+      if (fresh) { window.open(it.pdfUrl, "_blank", "noopener"); return; }
+      add("error", "Couldn't get the PDF (" + (body.message || ("API error " + r.status)) + ").");
+    } catch (e) {
+      if (win) win.close();
+      if (fresh) { window.open(it.pdfUrl, "_blank", "noopener"); return; }
+      add("error", "Couldn't reach the API for the PDF: " + e.message);
+    } finally { link.textContent = old; }
+    return;
+  }
+  if (fresh) { window.open(it.pdfUrl, "_blank", "noopener"); return; }
+  add("bot", "That PDF link has expired (links last 15 minutes). Set API_URL in the page settings so I can fetch a " +
+             "fresh link, or ask me for any small change to get a new version with a new PDF.");
+}
+
+/* ---------- talking to the agent ---------- */
+let busy = false;
+function setBusy(b) { busy = b; $("sendBtn").disabled = b; $("newTripBtn").disabled = b; $("input").disabled = b; if (!b) $("input").focus(); }
+
+async function send() {
+  const text = $("input").value.trim();
+  if (!text || busy) return;
+  $("input").value = ""; autosize(); showChips([]);
+  add("me", text);
+  setBusy(true);
+  const work = startWork();
+  let gotPlan = false, ok = true;
+  const handle = (ev) => {
+    if (ev.type === "status") work.step(ev.message);
+    else if (ev.type === "question" || ev.type === "message") add("bot", ev.message);
+    else if (ev.type === "itinerary") { add("itinerary", { ...ev.itinerary, receivedAt: Date.now() }); gotPlan = true; }
+    else if (ev.type === "error") { add("error", ev.message); ok = false; }
+  };
+  try { LIVE_AGENT ? await runAgent(text, handle) : await runDemo(text, handle); }
+  catch (e) { ok = false; add("error", "Couldn't reach the planner: " + e.message); }
+  finally {
+    work.done(ok); setBusy(false);
+    if (gotPlan || transcript.some((t) => t.kind === "itinerary")) showChips(FOLLOW_UPS);
+  }
+}
+
+async function runAgent(prompt, handle) {
+  if (AUTH_ON && !currentUser()) { handle({ type: "error", message: "Your sign-in has expired. Please sign in again." }); return; }
+  const url = `https://bedrock-agentcore.${CONFIG.REGION}.amazonaws.com/runtimes/` +
+              `${encodeURIComponent(CONFIG.AGENT_RUNTIME_ARN)}/invocations?qualifier=DEFAULT`;
+  const res = await fetch(url, { method: "POST",
+    headers: { "Authorization": "Bearer " + store.get("access_token"), "Content-Type": "application/json",
+               "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": sessionId() },
+    body: JSON.stringify({ prompt }) });
+  if (!res.ok) { handle({ type: "error", message: "Agent error " + res.status + ": " + (await res.text()).slice(0, 300) }); return; }
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "", raw = "", any = false;
+  const take = (line) => {
+    line = line.trim(); if (!line) return;
+    if (line.startsWith("data:")) line = line.slice(5).trim();
+    try {
+      let ev = JSON.parse(line);
+      if (typeof ev === "string") ev = JSON.parse(ev);   // some runtimes double-encode streamed JSON
+      if (ev && ev.type) { handle(ev); any = true; } else raw += line + "\n";
+    } catch { raw += line + "\n"; }
+  };
+  while (true) {
+    const { value, done } = await reader.read(); if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n"); buf = lines.pop(); lines.forEach(take);
+  }
+  if (buf.trim()) take(buf);
+  if (!any && raw.trim()) handle({ type: "message", message: raw.trim().slice(0, 4000) });
+}
+
+/* ---------- demo mode (no backend yet) ---------- */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function runDemo(text, handle) {
+  const hasPlan = transcript.some((t) => t.kind === "itinerary");
+  if (hasPlan) {
+    for (const s of ["Reading your message…", "Updating your plan…", "Checking budget, dates and timings…"]) { handle({ type: "status", message: s }); await sleep(450); }
+    handle({ type: "message", message: "In demo mode I can't change the plan. Once the live agent is connected, I'll revise it for you (for example a cheaper hotel or a more relaxed day) and show the new version here." });
+    return;
+  }
+  for (const s of ["Understanding your request…", "Searching flights…", "Searching hotels…", "Finding attractions and restaurants…",
+                   "Drafting your itinerary…", "Checking budget, dates and timings…", "Reviewing how well it fits your preferences…"]) {
+    handle({ type: "status", message: s }); await sleep(450);
+  }
+  handle({ type: "itinerary", itinerary: {
+    title: "Tokyo honeymoon (demo)", version: 1, summary: "Sample plan to show the layout. Prices and places are not real.",
+    totals: { total: 4350, budget: 5000 }, verified: true,
+    caveats: ["Demo data only — not real prices or availability. Connect the agent to see live results."],
+    days: [
+      { title: "Day 1 — Arrive and settle in", stops: [{ time: "17:30", name: "Check in, evening stroll" }] },
+      { title: "Day 2 — Temples and old Tokyo", note: "A gentle start in Asakusa.", stops: [
+        { time: "09:30", name: "Senso-ji, Asakusa" }, { time: "12:00", name: "Lunch nearby", note: "15 min walk" },
+        { time: "15:00", name: "Free time by the Sumida River" }] },
+      { title: "Day 3 — Gardens and views", stops: [{ time: "10:00", name: "A traditional garden" }, { time: "17:30", name: "Sunset observation deck" }] }
+    ] } });
+  handle({ type: "message", message: "Here's a sample plan. In the live version you can now ask for changes, like “make day 3 more relaxed” or “find a cheaper hotel”." });
+}
+
+/* ---------- composer ---------- */
+function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 180) + "px"; }
+$("input").addEventListener("input", autosize);
+$("input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+});
+$("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+
+/* ---------- start ---------- */
+(async function init() {
+  $("modeBadge").textContent = LIVE_AGENT ? "Live agent" : "Demo mode";
+  $("modeBadge").className = "badge " + (LIVE_AGENT ? "live" : "demo");
+  $("signInBtn").onclick = signIn; $("signOutBtn").onclick = signOut; $("newTripBtn").onclick = newTrip;
+
+  if (AUTH_ON) {
+    await handleCallback();
+    const user = currentUser();
+    if (!user) { $("signedOut").classList.remove("hidden"); $("newTripBtn").classList.add("hidden"); return; }
+    $("userEmail").textContent = user.email || ""; $("signOutBtn").classList.remove("hidden");
+  }
+  $("app").classList.remove("hidden");
+
+  try { transcript = JSON.parse(store.get("transcript") || "[]"); } catch { transcript = []; }
+  greet();
+  if (transcript.length) {
+    transcript.forEach(render);
+    showChips(transcript.some((t) => t.kind === "itinerary") ? FOLLOW_UPS : []);
+  } else {
+    store.del("session_id");   // fresh page, fresh conversation
+    showChips(STARTERS, true);
+  }
+  $("input").focus();
+})();
+</script>
+</body>
+</html>

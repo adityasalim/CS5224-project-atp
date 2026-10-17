@@ -1,0 +1,9 @@
+{
+  "httpMethod": "GET",
+  "resource": "/trips",
+  "path": "/trips",
+  "headers": {"origin": "https://d1xdiycimlc3a.cloudfront.net"},
+  "pathParameters": null,
+  "body": null,
+  "requestContext": {"authorizer": {"claims": {"sub": "test-user-1", "email": "test@example.com"}}}
+}

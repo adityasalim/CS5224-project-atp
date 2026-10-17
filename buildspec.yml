@@ -1,0 +1,22 @@
+# CodeBuild instructions, run by CodePipeline on every push to main.
+# 1) offline tests (no AWS calls)  2) deploy what changed. If the tests fail, nothing is deployed.
+version: 0.2
+
+env:
+  variables:
+    AWS_DEFAULT_REGION: ap-southeast-1
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --quiet --upgrade boto3 requests
+  pre_build:
+    commands:
+      - echo "Commit ${CODEBUILD_RESOLVED_SOURCE_VERSION}"
+      - python -m compileall -q lambdas agent tests scripts
+      - bash tests/offline/run_all.sh
+  build:
+    commands:
+      - python scripts/deploy.py

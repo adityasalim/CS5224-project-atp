@@ -1,0 +1,12 @@
+{
+  "from": {
+    "city": "Copenhagen",
+    "airport": "CPH"
+  },
+  "to": {
+    "city": "Lofoten",
+    "airport": "BOO"
+  },
+  "date": "2027-02-13",
+  "pax": 2
+}

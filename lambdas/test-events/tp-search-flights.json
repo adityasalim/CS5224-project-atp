@@ -1,0 +1,8 @@
+{
+  "origin": "SIN",
+  "destination": "HND",
+  "departDate": "2026-12-10",
+  "returnDate": "2026-12-15",
+  "pax": 2,
+  "cabin": "economy"
+}

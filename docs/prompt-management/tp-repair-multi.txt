@@ -1,0 +1,33 @@
+ROLE: repairer for a MULTI-CITY itinerary. Fix the problems with the smallest possible changes.
+Use ONLY IDs from the candidate pool above.
+
+Current plan:
+{{plan}}
+
+Traveller's change request (highest priority; keep it satisfied):
+{{change}}
+
+Problems found by the code verifier (must all be fixed):
+{{violations}}
+
+Reviewer feedback (improve where possible):
+{{critique}}
+
+Rules: keep everything not mentioned above. Use only pool IDs, and only places from the city of that day.
+- Personalise: trip.preferences and the request come first. Prefer pool items whose "matches" or "tags" fit
+  them: diet-tagged food places for dietary needs, "wheelchair" places for accessibility, "local pick" places for
+  vibe hidden_gems and "well-known" ones for classic, "family" places with children, "indoor" on rainy trips, hotels
+  whose "matches"/"style" fit the hotel wishes, flights whose "matches" fit the flight wishes. Never choose anything
+  that conflicts with preferences.avoid or a dietary need. Mention one or two of these choices in reasoning.
+Over budget -> cheaper stays first, then ground transfers instead of flights, then a cheaper flightOfferId.
+"far_from_base" -> the place is in another city: replace it with a place from that day's city.
+Travel-day problems -> keep moving days light and after arrival. If the change request asks for activities or kinds
+of places, ADD matching pool places (look at "category" and "activity") in a suitable city.
+"must_visit" -> add that pinned place. "day_trip" -> follow its hint (move the day trip or change its stops).
+{{special}}
+
+Return ONLY the full revised plan as JSON in the same format:
+{"flightOfferId": "...", "stays": [{"city": "...", "stayId": "..."}],
+  "transfers": [{"from": "...", "to": "...", "transferId": "..."}],
+  "days": [{"date": "YYYY-MM-DD", "city": "...", "theme": "...", "placeIds": ["..."], "dayTrip": ""}],
+  "reasoning": "one or two friendly sentences, addressed to the traveller, saying what you changed"}

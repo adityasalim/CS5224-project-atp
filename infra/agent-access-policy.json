@@ -1,0 +1,57 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "Models",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:*:<account-id>:inference-profile/*",
+        "arn:aws:bedrock:*::foundation-model/*"
+      ]
+    },
+    {
+      "Sid": "GuardrailsAndPrompts",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:ApplyGuardrail",
+        "bedrock:GetPrompt"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:ap-southeast-1:<account-id>:guardrail/*",
+        "arn:aws:bedrock:ap-southeast-1:<account-id>:prompt/*"
+      ]
+    },
+    {
+      "Sid": "GatewaySecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-southeast-1:<account-id>:secret:tp/dev/gateway-client-*"
+    },
+    {
+      "Sid": "Memory",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateEvent",
+        "bedrock-agentcore:RetrieveMemoryRecords",
+        "bedrock-agentcore:ListMemoryRecords",
+        "bedrock-agentcore:ListEvents"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:ap-southeast-1:<account-id>:memory/*"
+    },
+    {
+      "Sid": "SaveTrips",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:ap-southeast-1:<account-id>:table/tp-dev-trips",
+        "arn:aws:dynamodb:ap-southeast-1:<account-id>:table/tp-dev-itineraries"
+      ]
+    }
+  ]
+}

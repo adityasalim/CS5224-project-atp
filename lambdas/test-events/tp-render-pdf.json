@@ -1,0 +1,71 @@
+{
+  "tripId": "trip_test_001",
+  "version": 1,
+  "title": "Tokyo honeymoon (test)",
+  "tripSpec": {
+    "startDate": "2026-12-10",
+    "endDate": "2026-12-15",
+    "pax": 2,
+    "budgetSGD": 5000,
+    "hardConstraints": {
+      "maxStopsPerDay": 6,
+      "minFreeMinutesPerDay": 60
+    }
+  },
+  "itinerary": {
+    "flightOfferId": "mock_off_1",
+    "stayId": "mock:stay_1@2026-12-10_5n_2p",
+    "days": [
+      {
+        "date": "2026-12-10",
+        "stops": []
+      },
+      {
+        "date": "2026-12-11",
+        "stops": [
+          {
+            "placeId": "mock:35.68,139.77:temple_1",
+            "arriveAt": "09:30",
+            "departAt": "10:30",
+            "travelMinutesFromPrev": 20
+          },
+          {
+            "placeId": "mock:35.68,139.77:restaurant_1",
+            "arriveAt": "12:00",
+            "departAt": "13:15",
+            "travelMinutesFromPrev": 25
+          }
+        ]
+      },
+      {
+        "date": "2026-12-12",
+        "stops": [
+          {
+            "placeId": "mock:35.68,139.77:museum_1",
+            "arriveAt": "10:00",
+            "departAt": "12:00",
+            "travelMinutesFromPrev": 20
+          }
+        ]
+      },
+      {
+        "date": "2026-12-13",
+        "stops": []
+      },
+      {
+        "date": "2026-12-14",
+        "stops": []
+      },
+      {
+        "date": "2026-12-15",
+        "stops": []
+      }
+    ]
+  },
+  "narrative": {
+    "summary": "Six relaxed days in Tokyo with temples, museums and plenty of free time."
+  },
+  "caveats": [
+    "Test run with mock data."
+  ]
+}

@@ -1,0 +1,190 @@
+{
+  "name": "verify_itinerary",
+  "description": "Check a draft itinerary against hard constraints: IDs exist, total cost within budget (recomputed from real prices), dates, flight and hotel dates, duplicates, opening hours, travel times, pacing, free time, places the user asked for (mustVisit) and day trips. Returns passed, per-check results, totals in SGD and violations with repair hints. Always call before presenting a plan.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "tripSpec": {
+        "type": "object",
+        "description": "The parsed trip request",
+        "properties": {
+          "startDate": {
+            "type": "string",
+            "description": "Date as YYYY-MM-DD"
+          },
+          "endDate": {
+            "type": "string",
+            "description": "Date as YYYY-MM-DD"
+          },
+          "pax": {
+            "type": "integer"
+          },
+          "budgetSGD": {
+            "type": "number"
+          },
+          "dayStart": {
+            "type": "string",
+            "description": "Time as HH:MM (24h)"
+          },
+          "dayEnd": {
+            "type": "string",
+            "description": "Time as HH:MM (24h)"
+          },
+          "hardConstraints": {
+            "type": "object",
+            "properties": {
+              "maxStopsPerDay": {
+                "type": "integer"
+              },
+              "minFreeMinutesPerDay": {
+                "type": "integer"
+              }
+            }
+          },
+          "mustVisit": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "placeIds of places the traveller asked for by name; each must appear in some day."
+          }
+        },
+        "required": [
+          "startDate",
+          "endDate",
+          "pax",
+          "budgetSGD"
+        ]
+      },
+      "itinerary": {
+        "type": "object",
+        "description": "Chosen IDs and the day-by-day schedule (use sequence_day output for times)",
+        "properties": {
+          "flightOfferId": {
+            "type": "string"
+          },
+          "stayId": {
+            "type": "string"
+          },
+          "days": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string",
+                  "description": "Date as YYYY-MM-DD"
+                },
+                "stops": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "placeId": {
+                        "type": "string"
+                      },
+                      "arriveAt": {
+                        "type": "string",
+                        "description": "Time as HH:MM (24h)"
+                      },
+                      "departAt": {
+                        "type": "string",
+                        "description": "Time as HH:MM (24h)"
+                      },
+                      "travelMinutesFromPrev": {
+                        "type": "integer"
+                      },
+                      "travelBy": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "placeId"
+                    ]
+                  }
+                },
+                "dayTrip": {
+                  "type": "object",
+                  "description": "Set when this day is spent in another town and you return to the same hotel at night. Stops are then in that town; the day starts travelMinutes after dayStart.",
+                  "properties": {
+                    "place": {
+                      "type": "string",
+                      "description": "Town or area, e.g. 'Nikko'"
+                    },
+                    "lat": {
+                      "type": "number"
+                    },
+                    "lng": {
+                      "type": "number"
+                    },
+                    "travelMinutes": {
+                      "type": "integer",
+                      "description": "One-way travel time from the hotel, minutes"
+                    },
+                    "travelBy": {
+                      "type": "string",
+                      "description": "e.g. train, bus, ferry"
+                    }
+                  }
+                },
+                "city": {
+                  "type": "string",
+                  "description": "City for this day (multi-city)"
+                }
+              },
+              "required": [
+                "date",
+                "stops"
+              ]
+            }
+          },
+          "stays": {
+            "type": "array",
+            "description": "Multi-city: one entry per hotel, in order (use instead of stayId).",
+            "items": {
+              "type": "object",
+              "properties": {
+                "stayId": {
+                  "type": "string"
+                },
+                "checkIn": {
+                  "type": "string",
+                  "description": "Date as YYYY-MM-DD"
+                },
+                "checkOut": {
+                  "type": "string",
+                  "description": "Date as YYYY-MM-DD"
+                }
+              }
+            }
+          },
+          "transfers": {
+            "type": "array",
+            "description": "Multi-city: one transfer per change of city.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "transferId": {
+                  "type": "string"
+                },
+                "date": {
+                  "type": "string",
+                  "description": "Date as YYYY-MM-DD"
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "flightOfferId",
+          "stayId",
+          "days"
+        ]
+      }
+    },
+    "required": [
+      "tripSpec",
+      "itinerary"
+    ]
+  }
+}

@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build output (made by scripts/build_zips.sh; upload these, don't commit them)
+dist/
+
+# AgentCore starter toolkit state and your real launch script (account-specific)
+.bedrock_agentcore.yaml
+.bedrock_agentcore/
+agent/launch.sh
+
+# Secrets: never commit these
+.env
+*.pem
+secrets*.json
+credentials*
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
+
+# Layer build output
+build/

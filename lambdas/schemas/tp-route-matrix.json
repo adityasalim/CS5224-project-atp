@@ -1,0 +1,37 @@
+{
+  "name": "route_matrix",
+  "description": "Get travel times in minutes between every pair of points (walking or car/taxi). sequence_day already calls this internally; use it directly only to compare locations, e.g. which hotel is closest to the chosen places.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "points": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "lat": {
+              "type": "number"
+            },
+            "lng": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "lat",
+            "lng"
+          ]
+        }
+      },
+      "mode": {
+        "type": "string",
+        "description": "Allowed values: walk, car."
+      }
+    },
+    "required": [
+      "points"
+    ]
+  }
+}

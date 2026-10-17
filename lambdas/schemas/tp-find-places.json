@@ -1,0 +1,92 @@
+{
+  "name": "find_places",
+  "description": "Find real places to visit, eat or do near a city, neighbourhood or point, matched to the traveller's personal style. Returns placeId, name, category, coordinates, opening hours, links, plus 'tags' (e.g. local pick, well-known, wheelchair, vegetarian, halal, free entry, indoor, family), 'matches' (which of the requested preferences the place meets) and a short description when known. Translate EVERY preference in the request into these parameters, not just the interests: diet, mobility, kids, weather, budget, 'like a local' and things to avoid. Call it separately for different areas or day trips (pass the day-trip town as city). When the traveller names a specific place, put it in 'names' so the real place is in the pool. Only placeIds returned here may be used in a plan.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "city": {
+        "type": "string",
+        "description": "Where to search: a city ('Kyoto'), or a neighbourhood or landmark plus city for a specific area ('Gion, Kyoto', 'Nyhavn, Copenhagen', 'near Shinjuku Station, Tokyo'). Use this OR lat/lng."
+      },
+      "lat": {
+        "type": "number",
+        "description": "Latitude of a search centre, e.g. the chosen hotel, to find places close to it."
+      },
+      "lng": {
+        "type": "number",
+        "description": "Longitude of the search centre."
+      },
+      "categories": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Kinds of places. Allowed: temple, shrine, church, museum, gallery, attraction, viewpoint, park, garden, zoo, aquarium, theme_park, historic (castles, ruins, monuments), market, shopping, bookshop, restaurant, cafe, bar, nightlife, dessert, street_food, spa, onsen, climbing, hiking, nature, beach, playground. Map loosely: 'art' -> gallery, museum; 'history' -> historic, museum, temple; 'foodie' -> restaurant, street_food, market, dessert; 'nightlife' -> bar, nightlife; 'relaxing' -> spa, onsen, garden, park; 'kids' -> zoo, aquarium, theme_park, playground, park. Include restaurant or cafe on almost every call."
+      },
+      "keywords": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Free-text searches for anything the categories don't cover, as short phrases (max 5): 'bouldering gym', 'cooking class', 'kayaking', 'jazz bar', 'tea ceremony', 'vintage shops', 'night market', 'sunset spot', 'northern lights viewing'. Use the traveller's own words for unusual wishes."
+      },
+      "cuisine": {
+        "type": "string",
+        "description": "Cuisine filter for restaurants, as OpenStreetMap cuisine words: japanese, ramen, sushi, korean, thai, italian, indian, seafood, vegan... Several with '|', e.g. 'ramen|udon'."
+      },
+      "vibe": {
+        "type": "string",
+        "description": "How well-known the places should be. 'classic' = famous must-sees first (first visit, 'the highlights'); 'hidden_gems' = lesser-known local places first ('off the beaten path', 'like a local', 'not touristy', 'avoid crowds', 'been there before'); 'balanced' (default) = a mix."
+      },
+      "dietary": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Dietary needs, from: vegetarian, vegan, halal, kosher, gluten_free. Food places tagged with them come first and a wider search for them is added. Set whenever the traveller mentions a diet, religion-based food rule or allergy-like restriction."
+      },
+      "accessibility": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Mobility needs: ['wheelchair'] for wheelchair users, elderly travellers, prams or 'can't walk much'. Removes places marked not accessible and puts accessible ones first."
+      },
+      "audience": {
+        "type": "string",
+        "description": "Who is travelling: 'family' (children: kid-friendly places first, no bars or nightlife), 'adults', or 'any' (default)."
+      },
+      "indoorOnly": {
+        "type": "boolean",
+        "description": "true for rainy-season, very hot or very cold trips or a 'rainy day' plan: only indoor kinds of places are returned."
+      },
+      "freeOnly": {
+        "type": "boolean",
+        "description": "true for tight budgets or 'free things to do': drops places known to charge entry, free ones first."
+      },
+      "avoid": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Words to exclude, matched against the place's name, category, cuisine and description, e.g. ['casino'], ['seafood'], ['zoo'], ['chain']. Use for stated dislikes, allergies and 'no ...' requests."
+      },
+      "radiusKm": {
+        "type": "number",
+        "description": "Search radius in km (default 4). Food stays within 1.5 km; city sights up to 15 km; outdoor categories and keywords search up to 50 km automatically for day trips."
+      },
+      "maxPerCategory": {
+        "type": "integer",
+        "description": "Results per category or keyword, 1-20 (default 8). Use 10-12 for long trips."
+      },
+      "names": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Specific places the traveller mentioned by name (max 6), e.g. ['teamLab Planets', 'Ichiran Shibuya', 'Fushimi Inari']. Each found one comes back first with 'requested' set and is never filtered by the preferences; names not found are listed in 'notFound'. Pass only names (no categories) for a quick lookup, or together with categories."
+      }
+    },
+    "required": []
+  }
+}

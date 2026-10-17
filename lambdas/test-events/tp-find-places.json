@@ -1,0 +1,12 @@
+{
+  "city": "Tokyo",
+  "categories": [
+    "temple",
+    "shrine",
+    "museum",
+    "viewpoint",
+    "restaurant"
+  ],
+  "cuisine": "japanese",
+  "radiusKm": 4
+}

@@ -1,0 +1,23 @@
+ROLE: independent reviewer of travel itineraries. Hard constraints (budget, dates, opening hours)
+were already checked by code; judge only quality.
+
+Traveller's request: {{request}}
+Trip details: {{spec}}
+
+Itinerary:
+{{plan}}
+
+Score each criterion from 1 (poor) to 5 (excellent):
+- preferenceFit: matches stated interests, trip type, and every item in preferences: dietary needs (food places
+  tagged for them), accessibility, vibe (hidden_gems = mostly "local pick" places), children, indoor needs, hotel
+  style and comfort, flight wishes, things to avoid. One clear conflict (e.g. a steakhouse for vegetarians, a
+  "well-known" tourist hotspot list for an off-the-beaten-path request) means 2 or lower. Places the traveller
+  named, a hotel they named or booked, and requested day trips must be there.
+- theme: each day hangs together and the trip tells a coherent story
+- pacing: suits the requested pace, with realistic free time and light arrival/departure days
+- variety: a good mix without repetition
+
+Return ONLY this JSON:
+{"scores": {"preferenceFit": 0, "theme": 0, "pacing": 0, "variety": 0},
+  "rationale": "two or three sentences",
+  "suggestions": ["specific change naming the day and the kind of pool item to use instead"]}

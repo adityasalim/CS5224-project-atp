@@ -1,0 +1,81 @@
+{
+  "name": "search_flights",
+  "description": "Search flights and return offers with offerId, airline, departure/arrival times per slice, stops, total travel minutes, 'matches' and the total price in SGD for all passengers. Turn the traveller's flight wishes into the filters below (direct only, no red-eyes, a late flight home, an airline they like or avoid). Filters that would leave nothing are relaxed and noted in 'filterNote'. For multi-city trips set returnFrom to the last city's airport (open-jaw).",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "origin": {
+        "type": "string",
+        "description": "3-letter IATA code of the home airport, e.g. SIN"
+      },
+      "destination": {
+        "type": "string",
+        "description": "3-letter IATA code of the arrival airport, e.g. HND or NRT for Tokyo, CPH for Copenhagen"
+      },
+      "departDate": {
+        "type": "string",
+        "description": "Outbound date as YYYY-MM-DD"
+      },
+      "returnDate": {
+        "type": "string",
+        "description": "Return date as YYYY-MM-DD; omit for one-way"
+      },
+      "returnFrom": {
+        "type": "string",
+        "description": "3-letter IATA code of the airport to fly home FROM for multi-city trips, e.g. KRN. Defaults to the destination."
+      },
+      "pax": {
+        "type": "integer",
+        "description": "Number of adult passengers (1-9)"
+      },
+      "cabin": {
+        "type": "string",
+        "description": "economy (default), premium_economy, business or first. Use business/first only if asked or the budget is clearly generous."
+      },
+      "maxStops": {
+        "type": "integer",
+        "description": "Maximum stops on each way: 0 for 'direct' or 'non-stop', 1 for 'at most one stop'."
+      },
+      "departAfter": {
+        "type": "string",
+        "description": "Earliest outbound departure time HH:MM (24h). 'No early flights' -> 08:00; 'no red-eye' -> 07:00."
+      },
+      "departBefore": {
+        "type": "string",
+        "description": "Latest outbound departure time HH:MM. 'Arrive in time for dinner' or 'fly in the morning' -> 12:00; 'no red-eye' -> 21:00."
+      },
+      "returnDepartAfter": {
+        "type": "string",
+        "description": "Earliest return departure HH:MM. 'Make the most of the last day' -> 17:00."
+      },
+      "returnDepartBefore": {
+        "type": "string",
+        "description": "Latest return departure HH:MM, e.g. 14:00 to be home by evening."
+      },
+      "preferredAirlines": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Airlines the traveller likes (name or 2-letter code), e.g. ['Singapore Airlines', 'SQ']. Matching offers come first."
+      },
+      "avoidAirlines": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Airlines to leave out (name or 2-letter code)."
+      },
+      "sortBy": {
+        "type": "string",
+        "description": "'price' (default), 'duration' (shortest first, e.g. travelling with kids or elderly) or 'best' (balances price and travel time)."
+      }
+    },
+    "required": [
+      "origin",
+      "destination",
+      "departDate",
+      "pax"
+    ]
+  }
+}

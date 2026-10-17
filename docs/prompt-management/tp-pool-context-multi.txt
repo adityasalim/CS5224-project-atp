@@ -1,0 +1,6 @@
+TRIP: {{spec}}
+Daily spending estimate (food, local transport, entry fees): SGD {{daily}} per person per day, already
+reserved by the system. Money left for flights, hotels and transfers together: about SGD {{bookable}}.
+
+Candidate pool, grouped by city in travel order (the only valid IDs):
+{{pool}}

@@ -1,0 +1,12 @@
+{
+  "date": "2026-12-11",
+  "stayId": "mock:stay_1@2026-12-10_5n_2p",
+  "placeIds": [
+    "mock:35.68,139.77:temple_1",
+    "mock:35.68,139.77:museum_1",
+    "mock:35.68,139.77:restaurant_1"
+  ],
+  "dayStart": "09:00",
+  "dayEnd": "21:00",
+  "mode": "walk"
+}

@@ -1,0 +1,77 @@
+{
+  "name": "search_stays",
+  "description": "Search places to stay for given dates and return options with stayId, name, star rating, review score, style (hotel, ryokan, boutique, hostel, apartment, guesthouse, resort, cabin, capsule), 'matches', location and the total price in SGD for the whole stay. Turn the traveller's wishes into filters: the kind of place, the area, comfort level and what to optimise. Filters that would leave nothing are relaxed and noted in 'filterNote'. For multi-city trips call once per city with that city's dates.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "city": {
+        "type": "string",
+        "description": "City, or neighbourhood plus city when the traveller wants a particular area or to be near something: 'Gion, Kyoto', 'near Tokyo Station, Tokyo', 'Old Town, Stockholm'. Use this OR lat/lng."
+      },
+      "lat": {
+        "type": "number",
+        "description": "Latitude to search around, e.g. near the main sights already found."
+      },
+      "lng": {
+        "type": "number",
+        "description": "Longitude to search around."
+      },
+      "checkIn": {
+        "type": "string",
+        "description": "Date as YYYY-MM-DD (trip or leg start)"
+      },
+      "checkOut": {
+        "type": "string",
+        "description": "Date as YYYY-MM-DD (trip or leg end)"
+      },
+      "guests": {
+        "type": "integer",
+        "description": "Number of adult guests (1-8)"
+      },
+      "style": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Kinds of stay wanted, from: hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin. Examples: 'traditional Japanese inn' -> ryokan; 'design hotel' or 'unique stay' -> boutique; 'backpacking' -> hostel; 'family with kids' or 'need a kitchen' -> apartment; 'cosy local B&B' -> guesthouse; 'Lofoten rorbu' or 'cabin in nature' -> cabin. Matching stays come first."
+      },
+      "minStars": {
+        "type": "number",
+        "description": "Minimum star rating 0-5. Honeymoon, anniversary or 'luxury' -> 4 or 5; 'comfortable' -> 3."
+      },
+      "minReviewScore": {
+        "type": "number",
+        "description": "Minimum guest review score 0-10, e.g. 8.5 for 'well reviewed'."
+      },
+      "maxPricePerNightSGD": {
+        "type": "number",
+        "description": "Nightly price cap in SGD. Set it when the budget is tight so flights and daily spending still fit."
+      },
+      "sortBy": {
+        "type": "string",
+        "description": "What to optimise: 'price' (default, cheapest first), 'rating' (best reviewed first, for special occasions or 'best hotel we can afford'), 'value' (cheap AND well rated)."
+      },
+      "radiusKm": {
+        "type": "number",
+        "description": "Search radius around the city or point, 1-25 km (default 5). Smaller for a specific neighbourhood."
+      },
+      "name": {
+        "type": "string",
+        "description": "A specific hotel the traveller named ('Park Hyatt Tokyo', 'the ryokan I found, Hoshinoya Kyoto'). The search is centred on it and it is returned first (matches 'requested hotel') when a provider can price it; it is kept even if over the price or star filters."
+      },
+      "alreadyBooked": {
+        "type": "boolean",
+        "description": "true when the traveller says they have ALREADY booked this hotel (needs name). No search is done; one stay 'booked:...' is returned so the plan uses it."
+      },
+      "bookedPriceSGD": {
+        "type": "number",
+        "description": "With alreadyBooked: what the booking costs in SGD if the traveller wants it counted in the budget. Omit or 0 when already paid / not to be counted."
+      }
+    },
+    "required": [
+      "checkIn",
+      "checkOut",
+      "guests"
+    ]
+  }
+}

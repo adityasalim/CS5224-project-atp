@@ -1,0 +1,42 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadGitHubSource",
+      "Effect": "Allow",
+      "Action": ["codestar-connections:UseConnection", "codeconnections:UseConnection"],
+      "Resource": "<connection-arn>"
+    },
+    {
+      "Sid": "UpdateLambdaCode",
+      "Effect": "Allow",
+      "Action": ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionCode"],
+      "Resource": "arn:aws:lambda:ap-southeast-1:<account-id>:function:tp-*"
+    },
+    {
+      "Sid": "UpdateGatewaySchemas",
+      "Effect": "Allow",
+      "Action": ["bedrock-agentcore:ListGatewayTargets", "bedrock-agentcore:GetGatewayTarget",
+                 "bedrock-agentcore:UpdateGatewayTarget"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "UploadWebsite",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::<web-bucket>/index.html"
+    },
+    {
+      "Sid": "InvalidateCloudFront",
+      "Effect": "Allow",
+      "Action": "cloudfront:CreateInvalidation",
+      "Resource": "arn:aws:cloudfront::<account-id>:distribution/<distribution-id>"
+    },
+    {
+      "Sid": "RememberLastDeploy",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParameter", "ssm:PutParameter"],
+      "Resource": "arn:aws:ssm:ap-southeast-1:<account-id>:parameter/tp/dev/last-deployed-commit"
+    }
+  ]
+}

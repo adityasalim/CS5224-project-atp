@@ -1,0 +1,23 @@
+name: offline-tests
+# Runs on every push and pull request. No AWS account or API keys needed: everything runs in MOCK_MODE
+# against a fake Gateway, with the model calls stubbed.
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install requests
+      - name: Syntax check
+        run: python -m compileall -q lambdas agent tests
+      - name: Offline tests (Lambdas, agent single + multi-city, Gateway smoke test)
+        run: bash tests/offline/run_all.sh
+      - name: Build upload zips
+        run: bash scripts/build_zips.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: upload-zips
+          path: dist/
