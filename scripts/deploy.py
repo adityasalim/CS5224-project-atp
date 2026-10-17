@@ -216,7 +216,8 @@ def fill_config(html):
 def deploy_web(changed, commit, report):
     if not touched(changed, "web/"):
         return
-    bucket = env("WEB_BUCKET")
+    # accept "tp-dev-web-x", "s3://tp-dev-web-x" or "s3://tp-dev-web-x/" (only the bucket name is used)
+    bucket = env("WEB_BUCKET").removeprefix("s3://").split("/")[0]
     if not bucket:
         report.append("SKIPPED website: WEB_BUCKET is not set")
         return
@@ -231,7 +232,7 @@ def deploy_web(changed, commit, report):
     aws("s3").put_object(Bucket=bucket, Key="index.html", Body=html.encode("utf-8"),
                          ContentType="text/html; charset=utf-8", CacheControl="no-cache")
     report.append(f"uploaded index.html to s3://{bucket}/")
-    dist = env("CLOUDFRONT_DISTRIBUTION_ID")
+    dist = env("CLOUDFRONT_DISTRIBUTION_ID").split("/")[-1]   # an ARN or the plain ID both work
     if dist:
         aws("cloudfront").create_invalidation(DistributionId=dist, InvalidationBatch={
             "Paths": {"Quantity": 1, "Items": ["/index.html"]},
