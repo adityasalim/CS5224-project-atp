@@ -16,8 +16,8 @@ Browser (web/index.html on CloudFront + S3, Cognito sign-in)
    ▼                                      ▼
 AgentCore Runtime: agent/            API Gateway + Lambda tp-api-trips
    │  Intake → Gather → Propose → Sequence → Verify → Judge → Repair (≤3) → Deliver
-   │  models: Claude Sonnet 5.5 (planner, adaptive thinking) · Haiku 5.5 (intake, chat, writing) ·
-   │          Nova 2 Lite (judge) · automatic fallback to older models · prompt caching
+   │  models: Claude Sonnet 4.6 (planner, adaptive thinking) · Haiku 4.5 (intake, chat, writing) ·
+   │          Amazon Nova 2 Lite (judge) · automatic fallback to older models · prompt caching
    │  AgentCore Memory: remembers traveller preferences across trips
    ▼ MCP
 AgentCore Gateway → 8 Lambda tools: lambdas/
