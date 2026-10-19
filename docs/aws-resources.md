@@ -17,7 +17,7 @@ Fill in the blanks once, so teammates can find everything. None of these values 
 | Cognito user pool (website + Gateway) | `<pool-id>`, domain `https://ap-southeast-1ehnwin5g2.auth.ap-southeast-1.amazoncognito.com` |
 | REST API | `tp-dev-api`, invoke URL `https://0v6ssfawm8.execute-api.ap-southeast-1.amazonaws.com/dev` |
 | AgentCore Gateway | `tp-dev-gateway` (MCP URL ends in `/mcp`) |
-| AgentCore Runtime | agent ARN `arn:aws:bedrock-agentcore:ap-southeast-1:<account>:runtime/<id>` |
+| AgentCore Runtime | agent ARN `arn:aws:bedrock-agentcore:ap-southeast-1:890876258093:runtime/tp_travel_agent-BqUc5XA1Tx` |
 | AgentCore Memory | `tp_dev_memory` (ID `<memory-id>`) |
 | Models | `global.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-haiku-4-5-20251001-v1:0`, `global.amazon.nova-2-lite-v1:0` |
 | Budget alert | Billing → Budgets → `<name>` |
