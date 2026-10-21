@@ -11,6 +11,9 @@ Environment variables:
   ITINERARIES_TABLE  optional (e.g. tp-dev-itineraries) — if set, the PDF's S3 key is recorded there
   DAILY_SPEND_SGD_PER_PERSON  default 100 (must match tp-verify-itinerary)
   LINK_EXPIRY_SECONDS         default 900 (15 min)
+  FONT_DIR       optional, default /opt/fonts (the tp-fonts layer). With DejaVuSans*.ttf there, names in any
+                 Latin, Greek or Cyrillic script print correctly; with TPCJK-*.ttf too, Japanese, Chinese and
+                 Korean do as well. Without the fonts the PDF falls back to Helvetica (Latin-1 only, others -> '?').
 
 Input event:
   {"tripId": "trip_123", "version": 1, "title": "Tokyo honeymoon",
@@ -37,10 +40,41 @@ def _err(code, message, **extra):
     return {"ok": False, "error": code, "message": message, "source": "render-pdf", **extra}
 
 
+_FAMILY = "Helvetica"   # switched to "TPSans" by _setup_fonts() when the Unicode fonts are present
+_SANS = {"": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf", "I": "DejaVuSans-Oblique.ttf",
+         "BI": "DejaVuSans-BoldOblique.ttf"}
+_CJK = {"": "TPCJK-Regular.ttf", "B": "TPCJK-Bold.ttf"}
+
+
+def _setup_fonts(pdf):
+    """Register the Unicode fonts from the tp-fonts layer, with the CJK font as a fallback for characters
+    DejaVu doesn't have. Returns the family to use; Helvetica if the fonts are missing or fail to load."""
+    global _FAMILY
+    d = os.environ.get("FONT_DIR", "/opt/fonts")
+    if not all(os.path.isfile(os.path.join(d, f)) for f in _SANS.values()):
+        print(f"no Unicode fonts in {d}; non-Latin names will print as '?'. Add the tp-fonts layer.")
+        _FAMILY = "Helvetica"
+        return _FAMILY
+    try:
+        for style, f in _SANS.items():
+            pdf.add_font("TPSans", style, os.path.join(d, f))
+        if all(os.path.isfile(os.path.join(d, f)) for f in _CJK.values()):
+            for style, f in _CJK.items():
+                pdf.add_font("TPCJK", style, os.path.join(d, f))
+            pdf.set_fallback_fonts(["TPCJK"], exact_match=False)
+        _FAMILY = "TPSans"
+    except Exception as e:  # never fail the PDF because of a font
+        print("Unicode font setup failed, using Helvetica:", repr(e))
+        _FAMILY = "Helvetica"
+    return _FAMILY
+
+
 def _t(s):
-    """Built-in PDF fonts are Latin-1 only. Non-Latin text (e.g. Japanese) becomes '?'.
-    To support it, add a Unicode TTF (e.g. Noto Sans JP) to the layer and use pdf.add_font()."""
+    """Text for the PDF. With the Unicode fonts everything is kept as is. The built-in Helvetica font is
+    Latin-1 only, so then dashes/quotes are simplified and other characters become '?'."""
     s = "" if s is None else str(s)
+    if _FAMILY != "Helvetica":
+        return s
     for k, v in _REPLACE.items():
         s = s.replace(k, v)
     return s.encode("latin-1", "replace").decode("latin-1")
@@ -68,7 +102,7 @@ def _pool_get(ids):
 class PlanPDF(FPDF):
     def footer(self):
         self.set_y(-14)
-        self.set_font("Helvetica", "I", 8)
+        self.set_font(_FAMILY, "I", 8)
         self.set_text_color(120, 120, 120)
         self.cell(0, 6, _t(f"Prices from provider data at planning time; this is a plan, not a booking.  "
                            f"Page {self.page_no()}"), align="C")
@@ -87,16 +121,17 @@ def build_pdf(event, pool, daily_spend):
     narrative = event.get("narrative") or {}
 
     pdf = PlanPDF(format="A4")
+    _setup_fonts(pdf)
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.set_margins(18, 18, 18)
     pdf.add_page()
     accent = (180, 68, 47)
 
     # Title
-    pdf.set_font("Helvetica", "B", 20)
+    pdf.set_font(_FAMILY, "B", 20)
     pdf.set_text_color(*accent)
     pdf.cell(0, 10, _t(event.get("title") or "Your travel plan"), new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("Helvetica", "", 11)
+    pdf.set_font(_FAMILY, "", 11)
     pdf.set_text_color(90, 90, 90)
     pdf.cell(0, 6, _t(f"{start:%a %d %b %Y} - {end:%a %d %b %Y}  |  {n_days} days  |  {pax} traveller(s)"),
              new_x="LMARGIN", new_y="NEXT")
@@ -104,7 +139,7 @@ def build_pdf(event, pool, daily_spend):
 
     if narrative.get("summary"):
         pdf.set_text_color(30, 30, 30)
-        pdf.set_font("Helvetica", "", 11)
+        pdf.set_font(_FAMILY, "", 11)
         pdf.multi_cell(0, 5.5, _t(narrative["summary"]), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
 
@@ -118,7 +153,7 @@ def build_pdf(event, pool, daily_spend):
 
     def section(title):
         pdf.ln(2)
-        pdf.set_font("Helvetica", "B", 13)
+        pdf.set_font(_FAMILY, "B", 13)
         pdf.set_text_color(*accent)
         pdf.cell(0, 8, _t(title), new_x="LMARGIN", new_y="NEXT")
         pdf.set_draw_color(*accent)
@@ -127,7 +162,7 @@ def build_pdf(event, pool, daily_spend):
         pdf.set_text_color(30, 30, 30)
 
     def cost_row(label, detail, amount, bold=False, link=None):
-        pdf.set_font("Helvetica", "B" if bold else "", 10.5)
+        pdf.set_font(_FAMILY, "B" if bold else "", 10.5)
         pdf.cell(40, 6.5, _t(label))
         if link:
             pdf.set_text_color(30, 90, 170)
@@ -154,7 +189,7 @@ def build_pdf(event, pool, daily_spend):
     cost_row("Total", f"Budget SGD {budget:,.2f}  ({'within' if total <= budget else 'over'} budget)",
              f"{total:,.2f}", bold=True)
     if any(t.get("estimate") for t in transfers):
-        pdf.set_font("Helvetica", "I", 8.5)
+        pdf.set_font(_FAMILY, "I", 8.5)
         pdf.set_text_color(110, 110, 110)
         pdf.multi_cell(0, 4.5, _t("* Train/bus/ferry prices and times are estimates from distance; use the link "
                                   "to check real timetables."), new_x="LMARGIN", new_y="NEXT")
@@ -164,19 +199,19 @@ def build_pdf(event, pool, daily_spend):
     section("Day by day")
     for i, d in enumerate(it.get("days") or []):
         dt = date.fromisoformat(d["date"])
-        pdf.set_font("Helvetica", "B", 11.5)
+        pdf.set_font(_FAMILY, "B", 11.5)
         city = f' - {d["city"]}' if d.get("city") else ""
         pdf.cell(0, 7, _t(f"Day {i + 1} - {dt:%A %d %B}{city}"), new_x="LMARGIN", new_y="NEXT")
         t = transfer_on.get(d["date"])
         if t:
-            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_font(_FAMILY, "B", 10)
             pdf.set_text_color(30, 90, 170)
             pdf.cell(0, 6, _t(f'{str(t.get("departAt", ""))[11:16]}-{str(t.get("arriveAt", ""))[11:16]}  '
                               f'{t.get("summary")}'), link=t.get("bookingUrl") or "", new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
         trip = d.get("dayTrip") if isinstance(d.get("dayTrip"), dict) else None
         if trip and trip.get("place"):
-            pdf.set_font("Helvetica", "B", 10)
+            pdf.set_font(_FAMILY, "B", 10)
             pdf.set_text_color(30, 90, 170)
             mins = trip.get("travelMinutes")
             how = f' ({trip.get("travelBy") or "train/bus"}, about {mins} min each way)' if mins else ""
@@ -185,20 +220,20 @@ def build_pdf(event, pool, daily_spend):
             pdf.set_text_color(30, 30, 30)
         note = (narrative.get("dayNotes") or {}).get(d["date"])
         if note:
-            pdf.set_font("Helvetica", "I", 10)
+            pdf.set_font(_FAMILY, "I", 10)
             pdf.set_text_color(90, 90, 90)
             pdf.multi_cell(0, 5, _t(note), new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
         stops = d.get("stops") or []
         if not stops and not t:
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(_FAMILY, "", 10)
             pdf.cell(0, 6, "Free day", new_x="LMARGIN", new_y="NEXT")
         for s in stops:
             p = pool.get(s.get("placeId"), {})
             name = p.get("name") or s.get("name") or s.get("placeId")
             when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
             travel = s.get("travelMinutesFromPrev")
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(_FAMILY, "", 10)
             pdf.set_text_color(110, 110, 110)
             pdf.cell(26, 6, _t(when))
             pdf.set_text_color(30, 90, 170)
@@ -213,12 +248,12 @@ def build_pdf(event, pool, daily_spend):
     caveats = event.get("caveats") or []
     if caveats:
         section("Notes")
-        pdf.set_font("Helvetica", "", 10)
+        pdf.set_font(_FAMILY, "", 10)
         for c in caveats:
             pdf.multi_cell(0, 5.5, _t(f"- {c}"), new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(3)
-    pdf.set_font("Helvetica", "I", 8.5)
+    pdf.set_font(_FAMILY, "I", 8.5)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 4.5, _t(f"Generated {datetime.utcnow():%d %b %Y %H:%M} UTC. Place data may include "
                               f"OpenStreetMap contributors' data. Check opening hours before you go."),

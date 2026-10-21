@@ -29,7 +29,7 @@ providers, never from the model. That is the report's "prices are never generate
 | `tp-route-matrix` | no | 30 s | 256 MB | `CACHE_TABLE`, `MOCK_MODE` |
 | `tp-sequence-day` | no | 30 s | 256 MB | `CACHE_TABLE`, optional `ROUTE_MATRIX_FUNCTION=tp-route-matrix` |
 | `tp-verify-itinerary` | no | 15 s | 256 MB | `CACHE_TABLE`, optional `DAILY_SPEND_SGD_PER_PERSON=100` |
-| `tp-render-pdf` | yes | 60 s | 512 MB | `CACHE_TABLE`, `PLANS_BUCKET`, optional `ITINERARIES_TABLE=tp-dev-itineraries`, `DAILY_SPEND_SGD_PER_PERSON=100` |
+| `tp-render-pdf` | yes, plus `tp-fonts` | 60 s | 1024 MB | `CACHE_TABLE`, `PLANS_BUCKET`, optional `ITINERARIES_TABLE=tp-dev-itineraries`, `DAILY_SPEND_SGD_PER_PERSON=100` |
 
 Values: `CACHE_TABLE=tp-dev-api-cache`, `MOCK_MODE=true` to start, `SECRET_ARN` = your
 Secrets Manager ARN, `PLANS_BUCKET` = your `tp-dev-plans-<suffix>` bucket.
