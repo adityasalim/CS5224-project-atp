@@ -231,14 +231,55 @@ def _pool_put(offers, q):
                               "expiresAt": exp, "tool": "search_flights"})
 
 
+# ---------------------------------------------------------------- time budget
+# All upstream calls share one budget, set per invocation from the Lambda's remaining time, so a slow provider
+# can never use up the Lambda timeout: the function always answers (a clear error or a fallback) instead of
+# being cut off with nothing.
+_DEADLINE = None
+REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "20"))   # one HTTP request, at most
+
+
+def _time_left():
+    return float("inf") if _DEADLINE is None else _DEADLINE - time.time()
+
+
+def _wait(cap=25):
+    """Seconds the next request may wait: its cap, REQUEST_TIMEOUT_S or the budget left (0 = don't start)."""
+    w = min(cap, REQUEST_TIMEOUT_S, _time_left() - 1)
+    return w if w >= 3 else 0
+
+
+def _pause(attempt):
+    """Back off before a retry; False when there is no time left for one."""
+    p = 1.5 * (attempt + 1)
+    if _time_left() - p < 4:
+        return False
+    time.sleep(p)
+    return True
+
+
+def _start_budget(context, default_s):
+    global _DEADLINE
+    budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", str(default_s)))
+    try:   # stop 6 s before the Lambda timeout so caching and the reply still happen
+        budget = min(budget, context.get_remaining_time_in_millis() / 1000 - 6)
+    except Exception:  # noqa: BLE001 - no context in tests
+        pass
+    _DEADLINE = time.time() + max(budget, 0)
+
+
 # ---------------------------------------------------------------- SerpApi Google Flights
 def _serp_get(params):
     """One SerpApi search. Returns (json, error)."""
     last = None
     for attempt in range(2):
+        wait = _wait()
+        if not wait:
+            last = last or _err("upstream_timeout", "Google Flights (SerpApi) did not answer in time", "serpapi")
+            break
         try:
-            r = requests.get(SERPAPI_URL, params=params, timeout=25)
-        except requests.Timeout:
+            r = requests.get(SERPAPI_URL, params=params, timeout=wait)
+        except requests.RequestException:
             last = _err("upstream_timeout", "Google Flights (SerpApi) did not answer in time", "serpapi")
         else:
             if r.status_code in (429, 500, 502, 503, 504):
@@ -251,7 +292,8 @@ def _serp_get(params):
                 if data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
                     return None, _err("no_results", f"Google Flights: {data['error'][:200]}", "serpapi")
                 return data, None
-        time.sleep(1.5 * (attempt + 1))
+        if not _pause(attempt):
+            break
     return None, last
 
 
@@ -324,6 +366,8 @@ def _call_serpapi(q, key):
             break
     offers = []
     for out in picks:
+        if offers and _time_left() < 8:   # enough round trips already; don't risk the timeout
+            break
         back, err = _serp_get({**params, "departure_token": out["departure_token"]})
         if err:
             print("return lookup failed:", err)
@@ -350,10 +394,14 @@ def _call_duffel(q):
 
     last_error = None
     for attempt in range(3):  # 1 try + 2 retries on rate limits / server errors
+        wait = _wait()
+        if not wait:
+            last_error = last_error or _err("upstream_timeout", "Duffel did not answer in time")
+            break
         try:
             r = requests.post(DUFFEL_URL, params={"return_offers": "true", "supplier_timeout": "10000"},
-                              headers=headers, json=body, timeout=25)
-        except requests.Timeout:
+                              headers=headers, json=body, timeout=wait)
+        except requests.RequestException:
             last_error = _err("upstream_timeout", "Duffel did not answer in time")
         else:
             if r.status_code in (429, 500, 502, 503, 504):
@@ -362,7 +410,8 @@ def _call_duffel(q):
                 return None, _err("upstream_rejected", f"Duffel returned {r.status_code}", detail=r.text[:300])
             else:
                 return r.json()["data"].get("offers", []), None
-        time.sleep(1.5 * (attempt + 1))
+        if not _pause(attempt):
+            break
     return None, last_error
 
 
@@ -408,6 +457,7 @@ def _mock(q):
 
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    _start_budget(context, 35)
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})
