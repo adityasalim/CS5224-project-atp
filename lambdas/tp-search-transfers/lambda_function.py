@@ -67,6 +67,43 @@ _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
 
 
+
+# ---------------------------------------------------------------- time budget
+# All upstream calls share one budget, set per invocation from the Lambda's remaining time, so a slow provider
+# can never use up the Lambda timeout: the function always answers (a clear error or a fallback) instead of
+# being cut off with nothing.
+_DEADLINE = None
+REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "20"))   # one HTTP request, at most
+
+
+def _time_left():
+    return float("inf") if _DEADLINE is None else _DEADLINE - time.time()
+
+
+def _wait(cap=25):
+    """Seconds the next request may wait: its cap, REQUEST_TIMEOUT_S or the budget left (0 = don't start)."""
+    w = min(cap, REQUEST_TIMEOUT_S, _time_left() - 1)
+    return w if w >= 3 else 0
+
+
+def _pause(attempt):
+    """Back off before a retry; False when there is no time left for one."""
+    p = 1.5 * (attempt + 1)
+    if _time_left() - p < 4:
+        return False
+    time.sleep(p)
+    return True
+
+
+def _start_budget(context, default_s):
+    global _DEADLINE
+    budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", str(default_s)))
+    try:   # stop 6 s before the Lambda timeout so caching and the reply still happen
+        budget = min(budget, context.get_remaining_time_in_millis() / 1000 - 6)
+    except Exception:  # noqa: BLE001 - no context in tests
+        pass
+    _DEADLINE = time.time() + max(budget, 0)
+
 def _err(code, message, **extra):
     return {"ok": False, "error": code, "message": message, "source": "transfers", **extra}
 
@@ -195,8 +232,12 @@ def _google_flights(q):
               "hl": "en", "gl": "sg", "travel_class": 1}
     last = None
     for attempt in range(2):
+        wait = _wait()
+        if not wait:
+            last = last or "serpapi time budget used up"
+            break
         try:
-            r = requests.get(SERPAPI_URL, params=params, timeout=25)
+            r = requests.get(SERPAPI_URL, params=params, timeout=wait)
         except requests.RequestException as e:
             last = f"serpapi {type(e).__name__}"
         else:
@@ -231,7 +272,8 @@ def _google_flights(q):
                 if not out and data.get("error"):
                     return [], f"google flights: {str(data['error'])[:200]}"
                 return sorted(out, key=lambda x: x["priceTotalSGD"])[:MAX_FLIGHTS], None
-        time.sleep(1.5 * (attempt + 1))
+        if not _pause(attempt):
+            break
     return [], last
 
 
@@ -245,9 +287,13 @@ def _duffel(q):
                "Content-Type": "application/json"}
     last = None
     for attempt in range(2):
+        wait = _wait()
+        if not wait:
+            last = last or "duffel time budget used up"
+            break
         try:
             r = requests.post(DUFFEL_URL, params={"return_offers": "true", "supplier_timeout": "10000"},
-                              headers=headers, json=body, timeout=25)
+                              headers=headers, json=body, timeout=wait)
         except requests.RequestException as e:
             last = f"duffel {type(e).__name__}"
         else:
@@ -259,7 +305,8 @@ def _duffel(q):
                 offers = [_flight_option(o, q) for o in r.json()["data"].get("offers", [])]
                 offers = [o for o in offers if o["priceTotalSGD"] is not None]
                 return sorted(offers, key=lambda o: o["priceTotalSGD"])[:MAX_FLIGHTS], None
-        time.sleep(1.5 * (attempt + 1))
+        if not _pause(attempt):
+            break
     return [], last
 
 
@@ -316,6 +363,7 @@ def _order(options, q):
 
 
 def lambda_handler(event, context):
+    _start_budget(context, 45)
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})
