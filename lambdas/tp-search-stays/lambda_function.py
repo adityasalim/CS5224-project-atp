@@ -8,6 +8,8 @@ Environment variables:
   SECRET_ARN   Secrets Manager secret with {"DUFFEL_TOKEN": "...", "LITEAPI_KEY": "..."}
   CACHE_TABLE  DynamoDB cache table (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = sample data only, no API calls (default "true")
+  PROVIDER_TIME_BUDGET_S  optional, default 35: total seconds for Duffel + liteAPI before falling back to mock
+  REQUEST_TIMEOUT_S       optional, default 20: longest wait for one HTTP request
   CACHE_TTL_SECONDS  default 21600 (6 h);  POOL_TTL_SECONDS  default 86400 (24 h)
 
 Input event:
@@ -211,20 +213,37 @@ def _pool_put(stays, q):
                               "expiresAt": exp, "tool": "search_stays"})
 
 
+# All provider calls share one time budget, so a slow provider can never use up the Lambda's timeout:
+# when the budget runs out the function still returns (mock fallback) instead of being killed with no answer.
+_DEADLINE = None
+
+
+def _time_left():
+    return float("inf") if _DEADLINE is None else _DEADLINE - time.time()
+
+
 def _post_with_retry(url, headers, body, timeout=25):
-    """Returns (response, error). Retries twice on 429/5xx/timeouts."""
+    """Returns (response, error). Retries twice on 429/5xx/timeouts, within the shared time budget."""
     last = None
     for attempt in range(3):
+        wait = min(timeout, float(os.environ.get("REQUEST_TIMEOUT_S", "20")), _time_left() - 1)
+        if wait < 3:
+            return None, last or "time budget used up"
         try:
-            r = requests.post(url, headers=headers, json=body, timeout=timeout)
+            r = requests.post(url, headers=headers, json=body, timeout=wait)
         except requests.Timeout:
             last = "timeout"
+        except requests.RequestException as e:
+            last = f"network error: {e.__class__.__name__}"
         else:
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"http {r.status_code}"
             else:
                 return r, None
-        time.sleep(1.5 * (attempt + 1))
+        pause = 1.5 * (attempt + 1)
+        if _time_left() - pause < 4:
+            break
+        time.sleep(pause)
     return None, last
 
 
@@ -387,6 +406,13 @@ def _finish(stays, q):
 
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    global _DEADLINE
+    budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", "35"))
+    try:   # never closer than 8 s to the Lambda timeout, so the mock fallback and cache writes still run
+        budget = min(budget, context.get_remaining_time_in_millis() / 1000 - 8)
+    except Exception:  # noqa: BLE001 — no context when called from tests
+        pass
+    _DEADLINE = time.time() + max(budget, 0)
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})
@@ -412,6 +438,9 @@ def lambda_handler(event, context):
 
     attempts = []
     for provider in (_duffel, _liteapi):
+        if _time_left() < 4:
+            attempts.append(f"{provider.__name__.strip('_')} skipped: time budget used up")
+            continue
         stays, err = provider(q)
         if err:
             attempts.append(err)
