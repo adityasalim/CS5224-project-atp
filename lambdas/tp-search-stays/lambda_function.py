@@ -226,7 +226,7 @@ def _post_with_retry(url, headers, body, timeout=25):
     """Returns (response, error). Retries twice on 429/5xx/timeouts, within the shared time budget."""
     last = None
     for attempt in range(3):
-        wait = min(timeout, float(os.environ.get("REQUEST_TIMEOUT_S", "20")), _time_left() - 1)
+        wait = min(timeout, float(os.environ.get("REQUEST_TIMEOUT_S", "60")), _time_left() - 1)
         if wait < 3:
             return None, last or "time budget used up"
         try:
@@ -407,7 +407,7 @@ def _finish(stays, q):
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
     global _DEADLINE
-    budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", "35"))
+    budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", "60"))
     try:   # never closer than 8 s to the Lambda timeout, so the mock fallback and cache writes still run
         budget = min(budget, context.get_remaining_time_in_millis() / 1000 - 8)
     except Exception:  # noqa: BLE001 — no context when called from tests
