@@ -126,8 +126,9 @@ class PriceQuote:
         return amount,self.rate_basis
 
 class BudgetLedger:
-    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None):
+    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=True):
         self.store=store;self.cap=money(cap_usd)
+        self.enforce_spending_caps=enforce_spending_caps
         if self.cap<=0:raise ValueError('Explicit positive spending cap required')
         self.provider_caps={k:str(money(v)) for k,v in provider_caps.items()}
         self.quotes={(q.provider,q.model_id):q for q in quotes}
@@ -147,12 +148,12 @@ class BudgetLedger:
         def reserve(state):
             if state['halted']:raise BudgetError('Budget ledger halted for review')
             held=sum((money(r['maximumUSD']) for r in state['reservations'].values()),Decimal(0))
-            if money(state['spentEstimateUSD'])+held+maximum>self.cap:raise BudgetError('Global spending cap would be exceeded')
+            if self.enforce_spending_caps and money(state['spentEstimateUSD'])+held+maximum>self.cap:raise BudgetError('Global spending cap would be exceeded')
             provider=selection.provider
-            if provider not in self.provider_caps:raise BudgetError('Explicit provider cap required')
+            if self.enforce_spending_caps and provider not in self.provider_caps:raise BudgetError('Explicit provider cap required')
             used=money(state['spentByProvider'].get(provider,'0'))
             held_provider=sum((money(r['maximumUSD']) for r in state['reservations'].values() if r['provider']==provider),Decimal(0))
-            if used+held_provider+maximum>money(self.provider_caps[provider]):raise BudgetError('Provider spending cap would be exceeded')
+            if self.enforce_spending_caps and used+held_provider+maximum>money(self.provider_caps[provider]):raise BudgetError('Provider spending cap would be exceeded')
             state['reservations'][identifier]={'provider':provider,'modelId':selection.model_id,'maximumUSD':str(maximum)}
         self.store.update(reserve)
         return BudgetReservation(self,identifier,quote,maximum)
@@ -195,6 +196,6 @@ class BudgetReservation:
             state['spentByProvider'][provider]=str(money(state['spentByProvider'].get(provider,'0'))+estimate)
             state['settled'][self.identifier]=str(estimate)
             del state['reservations'][self.identifier]
-            if estimate>self.maximum or money(state['spentEstimateUSD'])>self.ledger.cap:
+            if estimate>self.maximum or (self.ledger.enforce_spending_caps and money(state['spentEstimateUSD'])>self.ledger.cap):
                 state['halted']=True
         self.ledger.store.update(finish)
