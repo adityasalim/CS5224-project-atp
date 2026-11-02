@@ -1701,6 +1701,15 @@ def merge_prefs(old, new):
     return out
 
 
+def _budget_only_failure(result):
+    """Deliver budget-only failures with existing warnings."""
+    violations = result.get("violations")
+    return (result.get("ok") is True and result.get("passed") is False
+            and isinstance(violations, list) and bool(violations)
+            and all(isinstance(v, dict) and v.get("check") == "budget"
+                    for v in violations))
+
+
 def improve(spec, pool, plan, full_request, usage, change=None):
     """Steps 4-7: sequence -> verify -> judge -> repair, up to MAX_REPAIR_ROUNDS. Returns the best version."""
     _, _, gw = _clients()
@@ -1743,7 +1752,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             print("repair failed:", e)
             break
     best["rounds"] = rounds
-    if getattr(getattr(usage, "adapter", None), "strict_no_retry", False) and not best["verify"].get("passed"):
+    if getattr(getattr(usage, "adapter", None), "strict_no_retry", False) and not best["verify"].get("passed") and not _budget_only_failure(best["verify"]):
         raise ValueError("Optimized itinerary failed deterministic checks after one correction")
     return best
 
