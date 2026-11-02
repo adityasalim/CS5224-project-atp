@@ -79,11 +79,12 @@ function tripCard(title) {
 function tripChoiceGroup(options, current, onChange) {
   const group = document.createElement("div");
   group.className = "trip-options";
-
   options.forEach(([value, label]) => {
     const btn = tripButton(label, () => {
       onChange(value);
-      renderTripForm();
+      group.querySelectorAll("button").forEach(other => {
+        other.classList.toggle("selected", other === btn);
+      });
     }, current === value);
     group.append(btn);
   });
@@ -93,15 +94,16 @@ function tripChoiceGroup(options, current, onChange) {
 function tripMultiSelect(options, selected, onChange) {
   const group = document.createElement("div");
   group.className = "trip-options";
-
+  let values = [...selected];
   options.forEach(value => {
-    group.append(tripButton(value, () => {
-      const next = selected.includes(value)
-        ? selected.filter(v => v !== value)
-        : [...selected, value];
-      onChange(next);
-      renderTripForm();
-    }, selected.includes(value)));
+    const btn = tripButton(value, () => {
+      values = values.includes(value)
+        ? values.filter(v => v !== value)
+        : [...values, value];
+      onChange([...values]);
+      btn.classList.toggle("selected", values.includes(value));
+    }, values.includes(value));
+    group.append(btn);
   });
   return group;
 }
