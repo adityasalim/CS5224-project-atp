@@ -1573,7 +1573,7 @@ def narrative(spec, seq, pool, usage):
 def _narrative_request(spec, seq, pool, usage):
     names = {p["placeId"]: p for p in pool["places"]}
     stays = _stays_of(seq, pool)
-    facts = {"hotel": stays[0].get("name"), "days": [
+    facts = {"flight": _web_selected_flight(spec, seq, pool), "hotel": stays[0].get("name"), "days": [
         {"date": d["date"], "theme": d.get("theme"),
          "places": [names.get(s["placeId"], {}).get("name", "") for s in d["stops"]]} for d in seq["days"]]}
     if is_multi(spec):
@@ -1620,6 +1620,22 @@ def _ground(out, facts, spec):
     return out
 
 
+def _web_selected_flight(spec, seq, pool):
+    flight = next((f for f in pool.get("flights", [])
+                   if f.get("offerId") == seq.get("flightOfferId")), None)
+    if flight is None:
+        return None
+    return {
+        "airline": flight.get("airline"),
+        "priceLabel": money_text(spec, pool_price(flight)),
+        "slices": [
+            {k: leg.get(k) for k in
+             ("from", "to", "departAt", "arriveAt", "stops")}
+            for leg in flight.get("slices", [])
+        ],
+    }
+
+
 def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id, rounds, version=1):
     names = {p["placeId"]: p for p in pool["places"]}
     days = []
@@ -1653,7 +1669,7 @@ def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id,
     return {"tripId": trip_id, "title": story["title"], "summary": story["summary"],
             "currency": currency_code(spec),
             "totals": {"total": float(totals.get("total", totals.get("totalSGD", 0))), "budget": budget_amount(spec)},
-            "days": days, "caveats": caveats, "pdfUrl": (pdf or {}).get("url"),
+            "flight": _web_selected_flight(spec, seq, pool), "days": days, "caveats": caveats, "pdfUrl": (pdf or {}).get("url"),
             "verified": bool((verify_res or {}).get("passed")),
             "judge": {"scores": (judge_res or {}).get("scores"), "rationale": (judge_res or {}).get("rationale")},
             "repairRounds": rounds, "version": version, "route": _route_text(spec),

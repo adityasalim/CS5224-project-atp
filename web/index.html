@@ -481,6 +481,30 @@ function renderItinerary(it) {
     l.onclick = (e) => { e.preventDefault(); openPdf(it, l); };
     card.append(l);
   }
+  if (it.flight) {
+    const flight = el("div", "day");
+    flight.append(el("h3", null, "Selected flights"));
+    if (it.flight.airline)
+      flight.append(el("div", null, it.flight.airline));
+    if (it.flight.priceLabel)
+      flight.append(el("div", "note",
+        "Flight total: " + it.flight.priceLabel));
+    (it.flight.slices || []).forEach((leg, index) => {
+      const part = el("div");
+      part.append(el("strong", null,
+        "Flight leg " + (index + 1) + ": " +
+        (leg.from || "?") + " → " + (leg.to || "?")));
+      part.append(el("div", "note",
+        "Departure: " + (leg.departAt || "Not supplied") +
+        " · Arrival: " + (leg.arriveAt || "Not supplied")));
+      if (leg.stops !== undefined && leg.stops !== null)
+        part.append(el("div", "note", "Stops: " + leg.stops));
+      flight.append(part);
+    });
+    flight.append(el("div", "note",
+      "Selected search offer; not a confirmed booking."));
+    card.append(flight);
+  }
   (it.days || []).forEach((d) => {
     const day = el("div", "day"); day.append(el("h3", null, d.title));
     if (d.note) day.append(el("p", "note", d.note));
