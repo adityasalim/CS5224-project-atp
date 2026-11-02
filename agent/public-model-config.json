@@ -1,0 +1,32 @@
+{
+  "experimentId": "public_combo_19",
+  "googleBillingDisabled": true,
+  "planner": {
+    "provider": "alibaba",
+    "model": "qwen3.8-max",
+    "options": {
+      "enableThinking": false
+    }
+  },
+  "executor": {
+    "provider": "alibaba",
+    "model": "deepseek-v4.1-flash-1017",
+    "options": {
+      "enableThinking": false
+    }
+  },
+  "reviewer": {
+    "provider": "bedrock",
+    "model": "global.moonshotai.kimi-k3",
+    "options": {
+      "reasoningEffort": "low"
+    }
+  },
+  "independent_evaluator": {
+    "provider": "bedrock",
+    "model": "global.moonshotai.kimi-k3",
+    "options": {
+      "reasoningEffort": "low"
+    }
+  }
+}

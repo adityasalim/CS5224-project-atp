@@ -1,3 +1,4 @@
+from trip_currency import normalize_cached_pool, code as currency_code, budget_amount, pool_price, daily as trip_daily
 """
 tp-render-pdf — Lambda tool: turn a final (verified) itinerary into a PDF travel plan with
 clickable links, save it to S3 and return a short-lived download link.
@@ -110,6 +111,9 @@ class PlanPDF(FPDF):
 
 def build_pdf(event, pool, daily_spend):
     spec, it = event["tripSpec"], event["itinerary"]
+    pool = normalize_cached_pool(spec, pool)
+    currency = currency_code(spec)
+    daily_spend = trip_daily(spec, daily_spend)
     pax = int(spec.get("pax", 1))
     start, end = date.fromisoformat(spec["startDate"]), date.fromisoformat(spec["endDate"])
     n_days = (end - start).days + 1
@@ -144,12 +148,12 @@ def build_pdf(event, pool, daily_spend):
         pdf.ln(2)
 
     # Costs (computed from pool prices, same formula as the verifier)
-    flight_sgd = float(flight.get("priceTotalSGD") or 0) if flight else 0.0
-    stay_sgd = sum(float(x.get("priceTotalSGD") or 0) for x in stays)
-    transfer_sgd = sum(float(x.get("priceTotalSGD") or 0) for x in transfers)
+    flight_cost = pool_price(flight) if flight else 0.0
+    stay_cost = sum(pool_price(x) for x in stays)
+    transfer_cost = sum(pool_price(x) for x in transfers)
     spend = daily_spend * pax * n_days
-    total = flight_sgd + stay_sgd + transfer_sgd + spend
-    budget = float(spec.get("budgetSGD", 0))
+    total = flight_cost + stay_cost + transfer_cost + spend
+    budget = budget_amount(spec)
 
     def section(title):
         pdf.ln(2)
@@ -172,21 +176,21 @@ def build_pdf(event, pool, daily_spend):
             pdf.cell(95, 6.5, _t(detail))
         pdf.cell(0, 6.5, _t(amount), align="R", new_x="LMARGIN", new_y="NEXT")
 
-    section("Costs (SGD)")
+    section(f"Costs ({currency})")
     if flight:
         legs = " / ".join(f'{s.get("from")}->{s.get("to")} {str(s.get("departAt", ""))[:16].replace("T", " ")}'
                           for s in flight.get("slices", []))
-        cost_row("Flights", f'{flight.get("airline", "")}  {legs}', f"{flight_sgd:,.2f}", link=flight.get("bookingUrl"))
+        cost_row("Flights", f'{flight.get("airline", "")}  {legs}', f"{flight_cost:,.2f}", link=flight.get("bookingUrl"))
     for st in stays:
         cost_row("Hotel (booked)" if st.get("booked") else "Hotel",
                  f'{st.get("name")} ({st.get("checkIn")} to {st.get("checkOut")})',
-                 f'{float(st.get("priceTotalSGD") or 0):,.2f}', link=st.get("mapsUrl"))
+                 f'{pool_price(st):,.2f}', link=st.get("mapsUrl"))
     for t in transfers:
         label = "Transfer*" if t.get("estimate") else "Transfer"
         cost_row(label, f'{t.get("summary")} {str(t.get("departAt", ""))[:16].replace("T", " ")}',
-                 f'{float(t.get("priceTotalSGD") or 0):,.2f}', link=t.get("bookingUrl"))
-    cost_row("Daily spend", f"Estimate: SGD {daily_spend:g} x {pax} x {n_days} days", f"{spend:,.2f}")
-    cost_row("Total", f"Budget SGD {budget:,.2f}  ({'within' if total <= budget else 'over'} budget)",
+                 f'{pool_price(t):,.2f}', link=t.get("bookingUrl"))
+    cost_row("Daily spend", f"Estimate: {currency} {daily_spend:g} x {pax} x {n_days} days", f"{spend:,.2f}")
+    cost_row("Total", f"Budget {currency} {budget:,.2f}  ({'within' if total <= budget else 'over'} budget)",
              f"{total:,.2f}", bold=True)
     if any(t.get("estimate") for t in transfers):
         pdf.set_font(_FAMILY, "I", 8.5)
@@ -297,11 +301,11 @@ def lambda_handler(event, context):
         try:
             _dynamodb.Table(table).update_item(
                 Key={"tripId": trip_id, "version": str(event.get("version", "1"))},
-                UpdateExpression="SET pdfKey = :k, pdfCreatedAt = :t, totalSGD = :s",
+                UpdateExpression=("SET pdfKey = :k, pdfCreatedAt = :t, totalAmount = :s, currency = :c" if "budget" in event["tripSpec"] else "SET pdfKey = :k, pdfCreatedAt = :t, totalSGD = :s"),
                 ExpressionAttributeValues={":k": key, ":t": datetime.utcnow().isoformat() + "Z",
-                                           ":s": Decimal(str(total))})
+                                           ":s": Decimal(str(total)), **({":c": currency_code(event["tripSpec"])} if "budget" in event["tripSpec"] else {})})
         except Exception as e:  # noqa: BLE001 — the PDF exists; don't fail the tool over bookkeeping
             print("could not record pdfKey:", e)
 
     return {"ok": True, "s3Key": key, "url": url, "expiresInSeconds": expires,
-            "sizeBytes": len(pdf_bytes), "totalSGD": total}
+            "sizeBytes": len(pdf_bytes), **({"totalAmount": total, "currency": currency_code(event["tripSpec"])} if "budget" in event["tripSpec"] else {"totalSGD": total})}

@@ -1,0 +1,67 @@
+{
+  "quotes": [
+    {
+      "provider": "alibaba",
+      "modelId": "qwen3.8-max",
+      "inputPerMillionUSD": "2",
+      "outputPerMillionUSD": "6",
+      "inputIncludesCache": true,
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "verifiedOn": "2026-11-02",
+      "validUntil": "2026-11-03",
+      "verified": true,
+      "inputLimit": 1000000,
+      "deploymentScope": "International",
+      "region": "Singapore",
+      "publicFreeQuotaTokens": 1000000,
+      "publicQuotaValidity": "90 days after activation, release or approval, whichever is later",
+      "rateBasis": "Undiscounted standard list price; DeepSeek peak-hour rate. Off-peak and temporary discounts excluded.",
+      "remainingAccountQuotaVerified": false,
+      "actualNetCostUSD": null
+    },
+    {
+      "provider": "alibaba",
+      "modelId": "deepseek-v4.1-flash-1017",
+      "inputPerMillionUSD": ".3",
+      "outputPerMillionUSD": "1.2",
+      "inputIncludesCache": true,
+      "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+      "verifiedOn": "2026-11-02",
+      "validUntil": "2026-11-03",
+      "verified": true,
+      "inputLimit": 1000000,
+      "deploymentScope": "International",
+      "region": "Singapore",
+      "publicFreeQuotaTokens": 1000000,
+      "publicQuotaValidity": "90 days after activation, release or approval, whichever is later",
+      "rateBasis": "Undiscounted standard list price; DeepSeek peak-hour rate. Off-peak and temporary discounts excluded.",
+      "remainingAccountQuotaVerified": false,
+      "actualNetCostUSD": null
+    },
+    {
+      "provider": "bedrock",
+      "modelId": "global.moonshotai.kimi-k3",
+      "inputPerMillionUSD": "3",
+      "outputPerMillionUSD": "15",
+      "cacheReadPerMillionUSD": ".30",
+      "cacheWritePerMillionUSD": "3.75",
+      "inputIncludesCache": false,
+      "source": "https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-moonshot-ai-kimi-k3.html",
+      "verifiedOn": "2026-11-02",
+      "validUntil": "2026-11-03",
+      "verified": true,
+      "inputLimit": 100000,
+      "sourceSKUs": [
+        "6AS2TZ265RQMP7XG",
+        "J4WRZNEHX3G2CC63",
+        "J8CF58TUXFB6EJ5P",
+        "PRU2V8PR6SKTNCGB"
+      ],
+      "sourceUnit": "1K tokens",
+      "conversionMultiplier": 1000,
+      "region": "ap-southeast-1",
+      "pricingTier": "standard global",
+      "usageApi": "Converse"
+    }
+  ]
+}

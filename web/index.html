@@ -105,6 +105,133 @@
   .welcome h2 { font-size: 22px; margin: 0 0 8px; }
   .welcome p { color: var(--muted); margin: 0 0 18px; }
   @media (max-width: 560px) { .bubble { max-width: 92%; } .stop { grid-template-columns: 48px 1fr; } }
+
+  /* Trip planning form */
+  #tripFormScreen {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 16px 48px;
+  }
+  .trip-form-header {
+    text-align: center;
+    margin-bottom: 24px;
+  }
+  .trip-form-header h2 {
+    font-size: 26px;
+    margin: 0 0 6px;
+  }
+  .trip-form-header p {
+    color: var(--muted);
+    margin: 0;
+  }
+  .trip-form-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 22px;
+    margin-bottom: 16px;
+  }
+  .trip-form-card h3 {
+    font-size: 17px;
+    margin: 0 0 16px;
+  }
+  .trip-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 16px;
+    position: relative;
+  }
+  .trip-field label {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .trip-field input,
+  .trip-field select,
+  .trip-field textarea {
+    width: 100%;
+    padding: 11px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg);
+    color: var(--text);
+    font: inherit;
+  }
+  .trip-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+  .trip-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .trip-options button.selected {
+    background: var(--accent);
+    color: var(--accent-ink);
+    border-color: var(--accent);
+  }
+  .trip-rating {
+    margin-bottom: 18px;
+  }
+  .trip-rating-header {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+  .trip-rating input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .trip-city {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+  }
+  .trip-suggestions {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  }
+  .trip-suggestions button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 0;
+    border-radius: 0;
+    padding: 10px 12px;
+  }
+  .trip-suggestions button:hover {
+    background: var(--surface-2);
+  }
+  .trip-submit {
+    width: 100%;
+    padding: 14px;
+    font-size: 16px;
+  }
+  @media (max-width: 560px) {
+    .trip-grid { grid-template-columns: 1fr; }
+    .trip-form-card { padding: 16px; }
+    #tripFormScreen { padding: 16px 12px 32px; }
+  }
+
+
+  .trip-suggestions button.selected {
+    background: var(--surface-2);
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
 </style>
 </head>
 <body>
@@ -113,6 +240,8 @@
   <div class="user">
     <span id="modeBadge" class="badge demo">Demo mode</span>
     <span id="userEmail"></span>
+    <a href="/agency/index.html">Become a provider</a>
+    <a id="providerApprovals" class="hidden" hidden href="/agency/admin.html">Provider approvals</a>
     <button id="newTripBtn" title="Start a new conversation">New trip</button>
     <button id="signOutBtn" class="hidden">Sign out</button>
   </div>
@@ -123,6 +252,15 @@
     <h2>Plan a trip by chatting</h2>
     <p>Describe where you want to go. The planner searches real flights, hotels and places, checks the budget and timings, and you can ask for changes until it's right.</p>
     <button id="signInBtn" class="primary">Sign in</button>
+  </section>
+
+  <!-- Initial trip-planning form -->
+  <section id="tripFormScreen" class="hidden">
+    <div class="trip-form-header">
+      <h2>Plan your perfect trip</h2>
+      <p>Tell us where you want to go and what matters most to you.</p>
+    </div>
+    <div id="tripFormContent"></div>
   </section>
 
   <div id="app" class="hidden" style="display:flex;flex-direction:column;flex:1;min-height:0">
@@ -138,6 +276,7 @@
   </div>
 </main>
 
+<script src="trip-form.js"></script>
 <script>
 /* ============================================================
    CONFIG — fill these in. Leave a value "" to keep that part off.
@@ -151,7 +290,8 @@ const CONFIG = {
   // Agent (Phase 6.3). Leave "" to use built-in demo data.
   AGENT_RUNTIME_ARN: "",
   // REST API (Phase 5), e.g. "https://abc123.execute-api.ap-southeast-1.amazonaws.com/dev"
-  API_URL: ""
+  API_URL: "",
+  ADMIN_GROUP: ""
 };
 const REDIRECT_URI = window.location.origin + "/";
 const AUTH_ON = !!(CONFIG.COGNITO_DOMAIN && CONFIG.COGNITO_CLIENT_ID);
@@ -181,7 +321,8 @@ function decodeJwt(token) {
 }
 function safeUrl(u) { return /^https:\/\//.test(u || "") ? u : null; }
 function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
-function sgd(n) { return "SGD " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 }); }
+function tripMoney(n, currency = "SGD") { return currency + " " + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: currency === "JPY" ? 0 : 2 }); }
+function sgd(n) { return tripMoney(n, "SGD"); }
 
 /* ---------- auth (Cognito Hosted UI, authorization code + PKCE) ---------- */
 async function signIn() {
@@ -210,11 +351,20 @@ async function handleCallback() {
 }
 function currentUser() {
   const idt = store.get("id_token"), exp = Number(store.get("expires_at") || 0);
-  if (!idt || Date.now() > exp) return null;
+  if (!idt || !Number.isFinite(exp) || Date.now() >= exp) return null;
   return decodeJwt(idt);
+}
+function updateProviderApprovals() {
+  const user = currentUser(), link = $("providerApprovals");
+  const groups = user && user["cognito:groups"];
+  const allowed = !!(AUTH_ON && user && Number(user.exp) * 1000 > Date.now() &&
+    Array.isArray(groups) && groups.includes(CONFIG.ADMIN_GROUP));
+  link.hidden = !allowed;
+  link.classList.toggle("hidden", !allowed);
 }
 function signOut() {
   ["id_token", "access_token", "expires_at", "session_id", "transcript"].forEach(store.del);
+  updateProviderApprovals();
   if (AUTH_ON) {
     const url = new URL(CONFIG.COGNITO_DOMAIN + "/logout");
     url.search = new URLSearchParams({ client_id: CONFIG.COGNITO_CLIENT_ID, logout_uri: REDIRECT_URI });
@@ -233,8 +383,16 @@ function saveTranscript() { store.set("transcript", JSON.stringify(transcript.sl
 function newTrip() {
   if (busy) return;
   store.del("session_id"); store.del("transcript"); transcript = [];
-  $("chat").innerHTML = ""; greet(); showChips(STARTERS.map((s) => s.length > 60 ? s : s), true);
-  $("input").focus();
+  $("chat").innerHTML = "";
+  greet();
+  showChips([]);
+
+  tripFormSubmitting = false;
+  tripFormState = initialTripForm();
+  renderTripForm();
+
+  $("app").classList.add("hidden");
+  $("tripFormScreen").classList.remove("hidden");
 }
 
 /* ---------- rendering ---------- */
@@ -247,6 +405,53 @@ function renderBot(text, cls) {
   wrap.append(el("div", "who", "Planner"), el("div", "bubble" + (cls ? " " + cls : ""), text));
   row.append(wrap); $("chat").append(row); scrollDown();
 }
+/* ---------- agency package options ---------- */
+function packageEnquiryUrl(p, it) {
+  const email = p.contactEmail || "";
+  if (!/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(email)) return null;
+  const subject = "Travel package enquiry: " + String(p.title || p.packageId).slice(0, 180);
+  const body = "I would like to enquire about package " + p.packageId + ".\nPlease confirm availability, all inclusions/exclusions, mandatory fees and the full party price in " + (it.currency || "SGD") + ".\nThis is an enquiry, not a booking.";
+  return "mailto:" + email + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+}
+function renderPackageOptions(result, it) {
+  const section = el("section", "package-options");
+  if (!result || result.status === "custom_only") return section;
+  section.append(el("h3", null, "Agency package options"));
+  if (!(result.packages || []).length) {
+    const unavailable = ["search_unavailable", "review_unavailable"].includes(result.status);
+    section.append(el("p", "note", unavailable ? "Package comparison is temporarily unavailable. Your custom itinerary is shown above." : "No agency package was recommended for this trip. Your custom itinerary remains available."));
+    return section;
+  }
+  section.append(el("p", "note", "Compare these options with your custom itinerary. Enquiries open an email draft; nothing is booked or sent automatically."));
+  result.packages.forEach(p => {
+    const card = el("article", "package-card");
+    card.style.cssText = "border:1px solid var(--line,#555);border-radius:12px;padding:16px;margin:12px 0";
+    card.append(el("h3", null, p.title || "Agency package"));
+    card.append(el("div", "meta", p.agencyName || "Agency"));
+    const c = p.comparison || {}, currency = c.currency || it.currency || "SGD";
+    card.append(el("p", null, "Package price for your party: " + tripMoney(c.packageTotal, currency)));
+    card.append(el("p", "note", "Known extras: " + tripMoney(c.knownExtras, currency)));
+    if (c.costComplete && c.estimatedTotal != null) {
+      card.append(el("p", null, "Estimated full trip total: " + tripMoney(c.estimatedTotal, currency)));
+      if (c.customVerified && c.customTotal != null) card.append(el("p", "note", "Custom itinerary estimate: " + tripMoney(c.customTotal, currency)));
+    } else {
+      card.append(el("p", "note", "Full trip total unknown. Known minimum: " + tripMoney(c.knownMinimumTotal, currency) + ". Missing costs: " + (c.missingCosts || []).join(", ") + ". This package has not been confirmed within budget."));
+    }
+    [["Why it fits", p.reasons], ["Tradeoffs", p.tradeoffs], ["Included", p.included], ["Excluded", p.excluded]].forEach(([label, items]) => {
+      if (!(items || []).length) return;
+      card.append(el("strong", null, label));
+      const list = el("ul"); items.slice(0, 15).forEach(x => list.append(el("li", null, String(x))));card.append(list);
+    });
+    card.append(el("p", "note", c.comparisonNote || "Confirm the full price and availability with the agency."));
+    const url = packageEnquiryUrl(p, it);
+    if (url) { const a = el("a", "pdf", "Enquire with agency");a.href = url;card.append(a); }
+    else card.append(el("p", "note", "Agency contact details are unavailable."));
+    section.append(card);
+  });
+  return section;
+}
+/* ---------- end agency package options ---------- */
+
 function renderItinerary(it) {
   const row = el("div", "row bot"); const card = el("div", "card");
   card.append(el("h2", null, it.title || "Your itinerary"));
@@ -264,8 +469,8 @@ function renderItinerary(it) {
   if (it.summary) card.append(el("p", null, it.summary));
   if (it.totals) {
     const t = el("div", "totals");
-    const a = el("span"); a.append("Estimated total "); a.append(el("strong", null, sgd(it.totals.total)));
-    const b = el("span"); b.append("Budget "); b.append(el("strong", null, sgd(it.totals.budget)));
+    const a = el("span"); a.append("Estimated total "); a.append(el("strong", null, tripMoney(it.totals.total, it.currency || "SGD")));
+    const b = el("span"); b.append("Budget "); b.append(el("strong", null, tripMoney(it.totals.budget, it.currency || "SGD")));
     t.append(a, b);
     if (it.verified !== undefined) t.append(el("span", "badge " + (it.verified ? "ok" : "demo"), it.verified ? "All checks passed" : "See notes"));
     card.append(t);
@@ -293,6 +498,7 @@ function renderItinerary(it) {
   if ((it.caveats || []).length) {
     const ul = el("ul", "notes"); it.caveats.forEach((c) => ul.append(el("li", null, c))); card.append(ul);
   }
+  if (it.packageRecommendations) card.append(renderPackageOptions(it.packageRecommendations, it));
   if (CONFIG.API_URL && it.tripId) card.append(feedbackBox(it));
   row.append(card); $("chat").append(row); scrollDown();
 }
@@ -400,7 +606,7 @@ function showChips(list, starters) {
 }
 function greet() {
   const msg = LIVE_AGENT
-    ? "Hi! Tell me about the trip you'd like: where, when, how many people and your budget in SGD. After I make a plan you can ask me to change anything."
+    ? "Hi! Tell me about the trip you'd like: where, when, how many people and your budget and preferred currency. After I make a plan you can ask me to change anything."
     : "Hi! This is demo mode with sample data. Describe a trip and I'll show what the planner looks like. Connect the agent (AGENT_RUNTIME_ARN) for real plans.";
   renderBot(msg);
 }
@@ -469,7 +675,9 @@ async function runAgent(prompt, handle) {
   const res = await fetch(url, { method: "POST",
     headers: { "Authorization": "Bearer " + store.get("access_token"), "Content-Type": "application/json",
                "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": sessionId() },
-    body: JSON.stringify({ prompt }) });
+    body: JSON.stringify({ prompt, ...(window.pendingTripBudget ? {budget: window.pendingTripBudget} : {}), ...(window.pendingPackageMode ? {packageMode: window.pendingPackageMode} : {}) }) });
+  window.pendingTripBudget = null;
+  window.pendingPackageMode = null;
   if (!res.ok) { handle({ type: "error", message: "Agent error " + res.status + ": " + (await res.text()).slice(0, 300) }); return; }
   const reader = res.body.getReader(), dec = new TextDecoder();
   let buf = "", raw = "", any = false;
@@ -532,10 +740,18 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
   $("modeBadge").className = "badge " + (LIVE_AGENT ? "live" : "demo");
   $("signInBtn").onclick = signIn; $("signOutBtn").onclick = signOut; $("newTripBtn").onclick = newTrip;
 
+  const portal = new URLSearchParams(location.search).get('portal');
+  if (['/agency/index.html','/agency/admin.html'].includes(portal)) store.set('portal_return',portal);
   if (AUTH_ON) {
     await handleCallback();
+    updateProviderApprovals();
+    setInterval(updateProviderApprovals, 1000);
+    window.addEventListener("pageshow", updateProviderApprovals);
     const user = currentUser();
+    if (!user && store.get('portal_return')) { await signIn(); return; }
     if (!user) { $("signedOut").classList.remove("hidden"); $("newTripBtn").classList.add("hidden"); return; }
+    const back=store.get('portal_return');
+    if (['/agency/index.html','/agency/admin.html'].includes(back)) { store.del('portal_return'); location.assign(back); return; }
     $("userEmail").textContent = user.email || ""; $("signOutBtn").classList.remove("hidden");
   }
   $("app").classList.remove("hidden");
@@ -543,13 +759,18 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
   try { transcript = JSON.parse(store.get("transcript") || "[]"); } catch { transcript = []; }
   greet();
   if (transcript.length) {
+    $("tripFormScreen").classList.add("hidden");
+    $("app").classList.remove("hidden");
     transcript.forEach(render);
     showChips(transcript.some((t) => t.kind === "itinerary") ? FOLLOW_UPS : []);
   } else {
     store.del("session_id");   // fresh page, fresh conversation
-    showChips(STARTERS, true);
+    showChips([]);
+    $("app").classList.add("hidden");
+    $("tripFormScreen").classList.remove("hidden");
+    renderTripForm();
   }
-  $("input").focus();
+  if (!$("app").classList.contains("hidden")) $("input").focus();
 })();
 </script>
 </body>

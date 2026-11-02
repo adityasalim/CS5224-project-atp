@@ -410,8 +410,21 @@ def _text_targets(q):
     for cat in q["categories"]:
         text = LOCATION_QUERY[cat]
         if q["cuisine"] and cat == "restaurant":
-            text = f'{q["cuisine"]} restaurant'
-        out.append((cat, text, _radius_km(cat, q), None))
+            cuisines = [
+                c.strip()
+                for c in q["cuisine"].split("|")
+                if c.strip()
+            ][:5]
+
+            for cuisine in cuisines:
+                out.append((
+                    cat,
+                    f"{cuisine.replace('_', ' ')} restaurant",
+                    _radius_km(cat, q),
+                    None
+                ))
+        else:
+            out.append((cat, text, _radius_km(cat, q), None))
     for kw in q.get("keywords", []):
         out.append(("activity", kw, _radius_km("kw:" + kw, q), kw))
     return out

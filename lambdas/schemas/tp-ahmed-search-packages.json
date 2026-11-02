@@ -1,0 +1,107 @@
+{
+  "name": "search_agency_packages",
+  "description": "Find eligible published agency packages. Results have partial costs and are not booking confirmations; verify total trip costs and status before recommending.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "destinations": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Ordered destination city names"
+      },
+      "startDate": {
+        "type": "string",
+        "description": "ISO date YYYY-MM-DD"
+      },
+      "endDate": {
+        "type": "string",
+        "description": "ISO date YYYY-MM-DD"
+      },
+      "pax": {
+        "type": "integer"
+      },
+      "budgetSGD": {
+        "type": "number"
+      },
+      "origin": {
+        "type": "string"
+      },
+      "flightType": {
+        "type": "string"
+      },
+      "dietary": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "requiredInclusions": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "cuisines": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "accessibilityRequired": {
+        "type": "boolean"
+      },
+      "preferenceScores": {
+        "type": "object",
+        "properties": {
+          "culture": {
+            "type": "number",
+            "description": "Importance weight from 0 to 10"
+          },
+          "food": {
+            "type": "number",
+            "description": "Importance weight from 0 to 10"
+          },
+          "nature": {
+            "type": "number",
+            "description": "Importance weight from 0 to 10"
+          },
+          "comfort": {
+            "type": "number",
+            "description": "Importance weight from 0 to 10"
+          },
+          "intensity": {
+            "type": "number",
+            "description": "Importance weight from 0 to 10"
+          }
+        }
+      },
+      "budget": {
+        "type": "object",
+        "properties": {
+          "amount": {
+            "type": "string"
+          },
+          "currency": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount",
+          "currency"
+        ]
+      },
+      "fxQuote": {
+        "type": "object",
+        "description": "Server-fetched FX snapshot from the planner."
+      }
+    },
+    "required": [
+      "destinations",
+      "startDate",
+      "endDate",
+      "pax"
+    ]
+  }
+}

@@ -1,2 +1,4 @@
 bedrock-agentcore
 boto3>=1.39
+google-genai==2.34.0
+openai==3.42.0

@@ -32,3 +32,24 @@ hop = {"from": {"city": "Copenhagen", "airport": "CPH"}, "to": {"city": "Lofoten
        "date": "2026-12-13", "pax": 2}
 assert tr.lambda_handler({**hop, "prefer": "ground", "avoidOvernight": False}, None)["options"][0]["mode"] == "ground"
 print("TOOL PREFERENCES OK")
+
+
+# Provider contract: 8.1 is a guest review score, not an eight-star property.
+q,error=st._validate({"city":"Tokyo","checkIn":"2026-12-10","checkOut":"2026-12-13","guests":1})
+assert error is None,error
+class LiteResponse:
+    status_code=200
+    def json(self):
+        return {"hotels":[{"id":"h1","name":"Synthetic Hotel","rating":8.1,"stars":3,"latitude":35.6,"longitude":139.7}],
+                "data":[{"hotelId":"h1","roomTypes":[{"offerRetailRate":{"amount":"300","currency":"SGD"}}]}]}
+saved=st._secret,st._post_with_retry
+try:
+    st._secret=lambda name:"synthetic-offline-api-key"
+    st._post_with_retry=lambda *a,**k:(LiteResponse(),None)
+    result,error=st._liteapi(q)
+    assert error is None and result[0]["starRating"]==3 and result[0]["reviewScore"]==8.1,result
+    assert st._liteapi_ratings({"rating":8.1})==(None,8.1)
+    assert st._liteapi_ratings({"stars":9,"rating":True})==(None,None)
+finally:
+    st._secret,st._post_with_retry=saved
+print("LITEAPI RATING CONTRACT OK: property stars and guest review scores are distinct")

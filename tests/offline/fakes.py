@@ -1,6 +1,7 @@
 """Fake AWS (DynamoDB, S3) and fpdf so the Lambda tools run offline in MOCK_MODE."""
 import sys, types, json, importlib.util, os, pathlib
 REPO = pathlib.Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "shared"))
 # ---- fake DynamoDB shared store ----
 STORE = {}
 class Table:

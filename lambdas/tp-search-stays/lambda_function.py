@@ -178,7 +178,7 @@ def _maps_link(name, lat, lng):
 
 
 def _cache_key(q):
-    return "stays:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "stays-rating-v2:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -292,6 +292,21 @@ def _duffel(q):
     return out, None
 
 
+def _liteapi_ratings(hotel):
+    """LiteAPI rating is a guest score; stars/starRating describe the property."""
+    def bounded(value,maximum):
+        if isinstance(value,bool):
+            return None
+        try:
+            value=float(value)
+        except (TypeError,ValueError):
+            return None
+        return value if 0<=value<=maximum else None
+    stars=hotel.get("starRating") if hotel.get("starRating") is not None else hotel.get("stars")
+    reviews=hotel.get("reviewScore") if hotel.get("reviewScore") is not None else hotel.get("rating")
+    return bounded(stars,5),bounded(reviews,10)
+
+
 def _liteapi(q):
     key = _secret("LITEAPI_KEY")
     if not key:
@@ -323,7 +338,7 @@ def _liteapi(q):
         best = min(prices, key=lambda p: float(p.get("amount", 1e12)))
         h = hotels.get(row.get("hotelId"), {})
         out.append(_stay("lite:" + str(row.get("hotelId")), h.get("name", "Unnamed hotel"),
-                         h.get("rating") or h.get("stars"), h.get("reviewScore"),
+                         *_liteapi_ratings(h),
                          h.get("latitude"), h.get("longitude"), h.get("address", ""),
                          best["amount"], best.get("currency", "SGD"), q, "liteapi"))
     return out, None

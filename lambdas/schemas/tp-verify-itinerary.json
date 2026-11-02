@@ -47,13 +47,46 @@
               "type": "string"
             },
             "description": "placeIds of places the traveller asked for by name; each must appear in some day."
+          },
+          "budget": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "string"
+              },
+              "currency": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount",
+              "currency"
+            ]
+          },
+          "dailySpend": {
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "string"
+              },
+              "currency": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "amount",
+              "currency"
+            ]
+          },
+          "fxQuote": {
+            "type": "object",
+            "description": "Trusted server-fetched FX quote for source-price normalization. Never invent rates."
           }
         },
         "required": [
           "startDate",
           "endDate",
-          "pax",
-          "budgetSGD"
+          "pax"
         ]
       },
       "itinerary": {
