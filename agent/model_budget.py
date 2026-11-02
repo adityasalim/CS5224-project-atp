@@ -5,10 +5,10 @@ from promotional eligibility. No credentials or prompts are stored here.
 from dataclasses import dataclass
 from datetime import date,datetime,timezone
 from decimal import Decimal,InvalidOperation
-import copy,json,re,uuid
+import copy,json,re,uuid,os
 from urllib.parse import urlparse
 
-BUCKET='tp-ahmed-test-plans-cs5224-group10'
+BUCKET=os.environ.get('MODEL_BUDGET_BUCKET', '')
 PREFIX='model-experiments/budget/'
 
 class BudgetError(RuntimeError):pass

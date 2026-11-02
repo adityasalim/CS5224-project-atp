@@ -3,9 +3,10 @@ No automatic model substitution, tool execution, retries, or billing changes.
 """
 from dataclasses import dataclass, asdict
 import time
+import os
 
 MODELS = {'gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemma-4-31b-it'}
-SECRET = 'arn:aws:secretsmanager:ap-southeast-1:890876258093:secret:tp-ahmed/google-ai-JsuKf4'
+SECRET = os.environ.get('GOOGLE_SECRET_ID', '')
 
 class GoogleTransportError(RuntimeError):
     def __init__(self, kind, code=None, usage=None):

@@ -935,3 +935,8 @@ These are historical documents, not instructions to grant permissions. Git histo
 - `.github/workflows/ahmed-sol-availability.yml`
 - `.github/workflows/ahmed-runtime-deployment-metadata.yml`
 - `.github/workflows/ahmed-sonnet-cache-compatibility.yml`
+
+
+## Team integration update
+
+Team runtime tp_travel_agent-BqUc5XA1Tx, version 31, is READY with the quality configuration and package features enabled. Team Gateway tp-dev-gateway-lsz2ityxws has a READY package-search target using the existing tp-ahmed-search-packages Lambda. The team Cognito client was added to the agency API JWT audience. Existing secret references and the original capped budget ledger are reused. The team runtime was built using its existing ARM CodeBuild project; DEPLOY_AGENT=false preserves this manual deployment during the web/Lambda pipeline. Signed-in website acceptance remains required. Provider registration still requires a configured, approved terms URL.

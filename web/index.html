@@ -285,12 +285,13 @@ const CONFIG = {
   REGION: "ap-southeast-1",
   // Cognito (Phase 3.4). Domain is the full URL from Branding → Domain,
   // e.g. "https://ap-southeast-1abcd123.auth.ap-southeast-1.amazoncognito.com"
-  COGNITO_DOMAIN: "https://ap-southeast-1ehnwin5g2.auth.ap-southeast-1.amazoncognito.com",
-  COGNITO_CLIENT_ID: "57g0k0g8op6hp98f1kn0ajsf2s",
+  COGNITO_DOMAIN: "",
+  COGNITO_CLIENT_ID: "",
   // Agent (Phase 6.3). Leave "" to use built-in demo data.
-  AGENT_RUNTIME_ARN: "arn:aws:bedrock-agentcore:ap-southeast-1:890876258093:runtime/tp_ahmed_agent-lLMEtbC67m",
+  AGENT_RUNTIME_ARN: "",
   // REST API (Phase 5), e.g. "https://abc123.execute-api.ap-southeast-1.amazonaws.com/dev"
-  API_URL: ""
+  API_URL: "",
+  ADMIN_GROUP: ""
 };
 const REDIRECT_URI = window.location.origin + "/";
 const AUTH_ON = !!(CONFIG.COGNITO_DOMAIN && CONFIG.COGNITO_CLIENT_ID);
@@ -357,7 +358,7 @@ function updateProviderApprovals() {
   const user = currentUser(), link = $("providerApprovals");
   const groups = user && user["cognito:groups"];
   const allowed = !!(AUTH_ON && user && Number(user.exp) * 1000 > Date.now() &&
-    Array.isArray(groups) && groups.includes("tp-ahmed-marketplace-admin"));
+    Array.isArray(groups) && groups.includes(CONFIG.ADMIN_GROUP));
   link.hidden = !allowed;
   link.classList.toggle("hidden", !allowed);
 }

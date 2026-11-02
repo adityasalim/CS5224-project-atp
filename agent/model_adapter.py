@@ -2,12 +2,12 @@
 No model substitution. Budget authorization is a required callback for paid-capable
 providers; verified pricing and persistent spending limits belong in that callback.
 """
-import json,time,uuid,hashlib
+import json,time,uuid,hashlib,os
 from datetime import datetime,timezone
 from google_transport import GoogleTransport,GoogleTransportError
 from model_configuration import ModelConfiguration
 
-ALIBABA_SECRET='arn:aws:secretsmanager:ap-southeast-1:890876258093:secret:tp-ahmed/alibaba-B6pA5p'
+ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
 ALIBABA_MODELS={'qwen3.8-max','qwen3.8-flash','qwen3.7-plus','deepseek-v4.1-flash-1017','deepseek-v4-pro-0813','glm-5.3'}
 
 class ModelAdapterError(RuntimeError):

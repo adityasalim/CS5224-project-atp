@@ -16,7 +16,7 @@ def public_adapter(ledger_factory=None,adapter_type=None):
         raise ValueError('Website configuration does not match approved quality/cost roles')
     quotes=[PriceQuote.parse(q) for q in json.loads((root/'public-model-prices.json').read_text())['quotes']]
     if ledger_factory is None:
-        ledger=BudgetLedger(S3BudgetStore('ahmed-full-benchmark-approved20-20261102'),cap_usd='20',provider_caps={'bedrock':'20','alibaba':'4'},quotes=quotes)
+        ledger=BudgetLedger(S3BudgetStore(os.environ['MODEL_BUDGET_LEDGER']),cap_usd='20',provider_caps={'bedrock':'20','alibaba':'4'},quotes=quotes)
     else:ledger=ledger_factory(quotes)
     return (adapter_type or PublicProtocolAdapter)(config,budget_authorizer=ledger.authorize,record_sink=ledger.record)
 

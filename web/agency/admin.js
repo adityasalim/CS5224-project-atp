@@ -7,7 +7,7 @@ try {
  const claims=JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
  const end=Number(sessionStorage.getItem('expires_at')||0);
  return !!(token && Number.isFinite(end) && Date.now()<end && Number(claims.exp)*1000>Date.now() &&
-  Array.isArray(claims['cognito:groups']) && claims['cognito:groups'].includes('tp-ahmed-marketplace-admin'));
+  Array.isArray(claims['cognito:groups']) && claims['cognito:groups'].includes(window.AGENCY_CONFIG.ADMIN_GROUP));
 } catch { return false; }
 }
 if(!adminSession()){location.replace('/');return;}

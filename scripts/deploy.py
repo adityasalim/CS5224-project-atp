@@ -41,7 +41,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 PARAM = os.environ.get("LAST_DEPLOYED_PARAM", "/tp/dev/last-deployed-commit")
 DRY = os.environ.get("DRY_RUN", "").lower() == "true"
 WEB_CONFIG_KEYS = {"COGNITO_DOMAIN": "WEB_COGNITO_DOMAIN", "COGNITO_CLIENT_ID": "WEB_COGNITO_CLIENT_ID",
-                   "AGENT_RUNTIME_ARN": "WEB_AGENT_RUNTIME_ARN", "API_URL": "WEB_API_URL"}
+                   "AGENT_RUNTIME_ARN": "WEB_AGENT_RUNTIME_ARN", "API_URL": "WEB_API_URL", "ADMIN_GROUP": "WEB_ADMIN_GROUP"}
 REQUIRED_WEB_KEYS = ("COGNITO_DOMAIN", "COGNITO_CLIENT_ID", "AGENT_RUNTIME_ARN")
 
 _clients = {}
@@ -232,10 +232,36 @@ def deploy_web(changed, commit, report):
     aws("s3").put_object(Bucket=bucket, Key="index.html", Body=html.encode("utf-8"),
                          ContentType="text/html; charset=utf-8", CacheControl="no-cache")
     report.append(f"uploaded index.html to s3://{bucket}/")
+
+    # Publish the supporting frontend files as well as index.html.
+    import mimetypes
+    for asset in sorted((REPO / "web").rglob("*")):
+        if not asset.is_file() or asset.name == "index.html":
+            continue
+        key = asset.relative_to(REPO / "web").as_posix()
+        body = asset.read_bytes()
+        if key == "agency/config.js":
+            config = {
+                "API_BASE": env("WEB_AGENCY_API_URL"),
+                "TERMS_URL": env("WEB_AGENCY_TERMS_URL"),
+                "ADMIN_GROUP": env("WEB_ADMIN_GROUP"),
+            }
+            body = ("window.AGENCY_CONFIG = Object.freeze(" +
+                    json.dumps(config) + ");\n").encode()
+        content_type = (
+            "application/javascript" if asset.suffix == ".js"
+            else mimetypes.guess_type(key)[0] or "application/octet-stream"
+        )
+        aws("s3").put_object(
+            Bucket=bucket, Key=key, Body=body,
+            ContentType=content_type, CacheControl="no-cache",
+        )
+    report.append("uploaded supporting website assets")
+
     dist = env("CLOUDFRONT_DISTRIBUTION_ID").split("/")[-1]   # an ARN or the plain ID both work
     if dist:
         aws("cloudfront").create_invalidation(DistributionId=dist, InvalidationBatch={
-            "Paths": {"Quantity": 1, "Items": ["/index.html"]},
+            "Paths": {"Quantity": 1, "Items": ["/*"]},
             "CallerReference": f"{commit[:12]}-{int(time.time())}"})
         report.append(f"CloudFront invalidation created for /index.html ({dist})")
     else:
