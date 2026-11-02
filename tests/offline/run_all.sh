@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline tests: no AWS account, no API keys. Needs: pip install requests
 set -euo pipefail
+unset PUBLIC_MODEL_CONFIGURATION
 cd "$(dirname "$0")"
 python3 test_lambdas.py
 python3 test_tool_preferences.py
