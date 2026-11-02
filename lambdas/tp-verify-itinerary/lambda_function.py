@@ -1,3 +1,4 @@
+from trip_currency import normalize_cached_pool
 """
 tp-verify-itinerary — Lambda tool (pure code, no LLM): check a draft itinerary against the
 trip's hard constraints. Prices are always re-read from the candidate pool by ID, never
@@ -92,7 +93,7 @@ def verify(spec, it, pool, daily_spend):
     rep = Report()
     start, end = date.fromisoformat(spec["startDate"]), date.fromisoformat(spec["endDate"])
     pax = int(spec.get("pax", 1))
-    budget = float(spec["budgetSGD"])
+    budget = float(spec["budget"]["amount"] if "budget" in spec else spec["budgetSGD"])
     hc = spec.get("hardConstraints") or {}
     max_stops = int(hc.get("maxStopsPerDay", 6))
     min_free = int(hc.get("minFreeMinutesPerDay", 0))
@@ -149,28 +150,65 @@ def verify(spec, it, pool, daily_spend):
         rep.fail("ids_exist", "no hotel chosen", "Choose a stayId from search_stays for each city.")
     rep.ok("ids_exist", "all IDs found in the candidate pool")
 
-    # 2. Budget — totals computed here from pool prices only
-    def price(x):
-        return float(x["priceTotalSGD"]) if x and x.get("priceTotalSGD") is not None else 0.0
-    flight_sgd = price(flight)
-    stay_sgd = round(sum(price(st) for st in stays if st["found"]), 2)
-    transfer_sgd = round(sum(price(t) for t in transfers if t["found"]), 2)
-    spend_sgd = daily_spend * pax * n_days
-    total = round(flight_sgd + stay_sgd + transfer_sgd + spend_sgd, 2)
-    totals = {"flightSGD": flight_sgd, "staySGD": stay_sgd, "transferSGD": transfer_sgd,
-              "dailySpendEstimateSGD": spend_sgd, "totalSGD": total, "budgetSGD": budget,
-              "remainingSGD": round(budget - total, 2),
-              "staysSGD": [{"stayId": st["stayId"], "name": st.get("name"), "sgd": price(st)} for st in stays],
-              "transfersSGD": [{"transferId": t["transferId"], "sgd": price(t), "estimate": t.get("estimate", False)}
-                               for t in transfers],
-              "dailySpendAssumption": f"SGD {daily_spend:g} per person per day (food, local transport, entry fees)"}
-    if total > budget:
-        over = round(total - budget, 2)
-        rep.fail("budget", f"estimated total SGD {total:,.2f} is over budget by SGD {over:,.2f}",
-                 f"Cut at least SGD {over:,.0f}: pick cheaper stayIds (largest saving usually), cheaper transfers "
-                 f"(ground instead of flights) or a cheaper flightOfferId.", overBySGD=over)
+    # 2. Budget: new requests use explicitly normalized prices in their selected currency.
+    if "budget" in spec:
+        currency = spec["budget"].get("currency")
+        if currency not in ("SGD", "USD", "SAR", "EUR", "GBP", "CNY", "JPY"):
+            raise ValueError("unsupported budget currency")
+        from decimal import Decimal
+        def amount(value):
+            if not isinstance(value, dict) or value.get("currency") != currency:
+                raise ValueError("prices must be normalized to the selected budget currency")
+            raw = value.get("amount")
+            if isinstance(raw, bool):
+                raise ValueError("invalid money")
+            result = Decimal(str(raw))
+            if not result.is_finite() or result < 0:
+                raise ValueError("invalid money")
+            return result
+        selected_budget = amount(spec["budget"])
+        def selected_price(item):
+            return amount(item["price"]) if item else Decimal(0)
+        flight_cost = selected_price(flight)
+        stay_cost = sum((selected_price(st) for st in stays if st["found"]), Decimal(0))
+        transfer_cost = sum((selected_price(t) for t in transfers if t["found"]), Decimal(0))
+        daily_cost = amount(spec["dailySpend"])
+        spend = daily_cost * pax * n_days
+        total = flight_cost + stay_cost + transfer_cost + spend
+        totals = {"currency": currency, "flight": str(flight_cost), "stay": str(stay_cost),
+                  "transfer": str(transfer_cost), "dailySpendEstimate": str(spend),
+                  "total": str(total), "budget": str(selected_budget),
+                  "remaining": str(selected_budget-total),
+                  "dailySpendAssumption": f"{currency} {daily_cost} per person per day (food, local transport, entry fees)"}
+        if total > selected_budget:
+            over = total-selected_budget
+            rep.fail("budget", f"estimated total {currency} {total:,.2f} is over budget by {currency} {over:,.2f}",
+                     f"Reduce costs by at least {currency} {over:,.2f}.", overBy=str(over), currency=currency)
+        else:
+            rep.ok("budget", f"{currency} {total:,.2f} of {currency} {selected_budget:,.2f}")
     else:
-        rep.ok("budget", f"SGD {total:,.2f} of SGD {budget:,.2f}")
+        def price(x):
+            return float(x["priceTotalSGD"]) if x and x.get("priceTotalSGD") is not None else 0.0
+        flight_sgd = price(flight)
+        stay_sgd = round(sum(price(st) for st in stays if st["found"]), 2)
+        transfer_sgd = round(sum(price(t) for t in transfers if t["found"]), 2)
+        spend_sgd = daily_spend * pax * n_days
+        total = round(flight_sgd + stay_sgd + transfer_sgd + spend_sgd, 2)
+        totals = {"flightSGD": flight_sgd, "staySGD": stay_sgd, "transferSGD": transfer_sgd,
+                  "dailySpendEstimateSGD": spend_sgd, "totalSGD": total, "budgetSGD": budget,
+                  "remainingSGD": round(budget - total, 2),
+                  "staysSGD": [{"stayId": st["stayId"], "name": st.get("name"), "sgd": price(st)} for st in stays],
+                  "transfersSGD": [{"transferId": t["transferId"], "sgd": price(t), "estimate": t.get("estimate", False)}
+                                   for t in transfers],
+                  "dailySpendAssumption": f"SGD {daily_spend:g} per person per day (food, local transport, entry fees)"}
+        if total > budget:
+            over = round(total - budget, 2)
+            rep.fail("budget", f"estimated total SGD {total:,.2f} is over budget by SGD {over:,.2f}",
+                     f"Cut at least SGD {over:,.0f}: pick cheaper stayIds (largest saving usually), cheaper transfers "
+                     f"(ground instead of flights) or a cheaper flightOfferId.", overBySGD=over)
+        else:
+            rep.ok("budget", f"SGD {total:,.2f} of SGD {budget:,.2f}")
+
 
     # 3. Day count and dates
     expected = [(start + timedelta(days=i)).isoformat() for i in range(n_days)]
@@ -373,7 +411,7 @@ def lambda_handler(event, context):
         return _err("bad_input", "need tripSpec and itinerary objects")
     try:
         start, end = date.fromisoformat(spec["startDate"]), date.fromisoformat(spec["endDate"])
-        float(spec["budgetSGD"])
+        float(spec["budget"]["amount"] if "budget" in spec else spec["budgetSGD"])
     except (KeyError, ValueError, TypeError):
         return _err("bad_input", "tripSpec needs startDate, endDate (YYYY-MM-DD) and budgetSGD")
     if end < start:
@@ -384,7 +422,14 @@ def lambda_handler(event, context):
     ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
     ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
     pool = _pool_get(ids)
+    try:
+        pool = normalize_cached_pool(spec, pool)
+    except (KeyError, TypeError, ValueError):
+        return _err('bad_currency', 'Prices cannot be normalized to the selected currency; refresh the plan.')
     daily = float(os.environ.get("DAILY_SPEND_SGD_PER_PERSON", "100"))
-    result = verify(spec, it, pool, daily)
+    try:
+        result = verify(spec, it, pool, daily)
+    except (KeyError, TypeError, ValueError):
+        return _err('bad_currency', 'Budget and all prices must use the selected currency.')
     result["checkedAt"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     return result

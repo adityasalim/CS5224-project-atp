@@ -119,7 +119,7 @@ def list_trips(event, user_id):
     resp = _table("TRIPS_TABLE").query(KeyConditionExpression=Key("userId").eq(user_id),
                                        ScanIndexForward=False, Limit=50)
     trips = [{k: t.get(k) for k in ("tripId", "title", "destination", "startDate", "endDate", "status",
-                                     "createdAt", "budgetSGD")} for t in resp.get("Items", [])]
+                                     "createdAt", "budgetSGD", "budget", "currency")} for t in resp.get("Items", [])]
     trips.sort(key=lambda t: t.get("createdAt") or "", reverse=True)
     return _resp(event, 200, {"trips": trips})
 

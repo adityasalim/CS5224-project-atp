@@ -19,7 +19,7 @@ Today's date is {today}. Convert the traveller's request (and any earlier detail
 Rules:
 - Resolve relative dates ("next Friday", "in December") against today's date. Never put dates in the past.
 - If a duration is given with a start date, compute endDate (a 6-day trip from 10 Dec ends 15 Dec).
-- budgetSGD is the TOTAL budget for all travellers in Singapore dollars; convert other currencies approximately.
+- budget is an object with amount and currency (SGD, USD, SAR, EUR, GBP, CNY, JPY): the TOTAL for all travellers in the currency they selected. Never convert it into SGD or invent exchange rates.
 - originAirport: use the traveller's stated city/airport, else "{home_airport}".
 - destinationAirport: the main IATA code for the destination city (Tokyo -> HND, Osaka -> KIX, Bangkok -> BKK,
   Copenhagen or Denmark -> CPH, Oslo or Norway -> OSL, Stockholm or Sweden -> ARN, Bergen -> BGO, Tromso -> TOS,
@@ -42,6 +42,18 @@ Rules:
   Shibuya", "Fushimi Inari at sunrise"), as [{{"name": "teamLab Planets", "city": ""}}] (city only for multi-city
   trips). Generic wishes ("a sushi dinner") go in interests/activities instead.
 - pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (5-6). "some free time" means relaxed.
+- packageMode: compare by default; custom_only when the traveller asks to skip agency packages; packages_only when they prefer agency packages. Never force an unsuitable package.
+- flightType: "round" when the traveller returns to their origin, including an open-jaw
+  return from the last destination; "oneway" when the trip ends at the last destination.
+  Preserve explicit flight type. Do not infer one-way merely from multiple cities.
+- cuisines: list ALL explicitly selected cuisines, preserving their names.
+  Keep the existing cuisine field for compatibility with search tools.
+- preferenceScores: preserve explicit integer ratings from 1 to 10 for culture,
+  food, nature, comfort and intensity. If not provided, use 5.
+  Scores represent relative priorities, not mandatory activity quotas.
+  A low score means lower priority, not an explicit prohibition.
+- Map activity intensity to pace: 1-3 relaxed, 4-7 moderate, 8-10 packed,
+  unless the traveller explicitly requests a different pace.
 - preferences: capture EVERY personal wish, even indirect ones, as structured values (leave defaults otherwise):
   vibe: "hidden_gems" for "off the beaten path", "like a local", "not touristy", "avoid crowds", "been before";
         "classic" for "first time", "the highlights", "must-sees"; else "balanced".
@@ -64,14 +76,17 @@ Rules:
         elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
   transfer: prefer "ground" for "scenic train"/"no flying", "fastest" for "quickest", else "cheapest".
   notes: anything else personal in one sentence (an occasion, photography, a surprise, a pace detail).
-- missing: list the REQUIRED fields you could not determine: destination, startDate, endDate, pax, budgetSGD.
+- missing: list the REQUIRED fields you could not determine: destination, startDate, endDate, pax, budget.
   Do not guess dates or budget. If pax is unclear but the trip is a honeymoon or couple trip, pax is 2.
 - question: if anything is missing, ONE short friendly question asking for all missing fields; else "".
 
 Return ONLY this JSON, no other text:
 {{"destination": "Tokyo", "destinationAirport": "HND", "originAirport": "SIN",
-  "startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD", "pax": 2, "budgetSGD": 5000,
-  "tripType": "honeymoon", "interests": ["temple", "museum", "restaurant"], "activities": [], "cuisine": "japanese",
+  "startDate": "YYYY-MM-DD", "endDate": "YYYY-MM-DD", "pax": 2, "budget": {{"amount": 5000, "currency": "SGD"}},
+  "tripType": "honeymoon", "flightType": "round", "packageMode": "compare",
+   "interests": ["temple", "museum", "restaurant"], "activities": [],
+   "cuisine": "japanese", "cuisines": ["Japanese"],
+   "preferenceScores": {{"culture": 5, "food": 5, "nature": 5, "comfort": 5, "intensity": 5}},
   "legs": [], "dayTrips": [],
   "hotelPreference": "romantic", "pace": "relaxed", "mustInclude": [], "avoid": [],
   "preferences": {{"vibe": "balanced", "dietary": [], "accessibility": [], "audience": "any",
@@ -88,7 +103,10 @@ GATHER = """ROLE: research step of a travel planner. You collect candidate optio
 Trip: {spec}
 
 Call the tools to gather options:
-- search_flights once (origin and destination airports, the trip dates as departDate/returnDate, pax).
+- search_flights once using originAirport, destinationAirport, startDate and pax.
+  For flightType "round", include returnDate = endDate.
+  For flightType "oneway", omit returnDate and returnFrom entirely.
+  Never invent a return flight for a one-way trip.
 - search_stays once (destination city, checkIn = startDate, checkOut = endDate, guests = pax).
   If the budget is tight, set maxPricePerNightSGD so flights + hotel leave room for daily spending.
 - find_places for the traveller's interests as categories. Always include "restaurant" (and "cafe" if relevant).
@@ -108,16 +126,16 @@ the single word DONE."""
 # Trip + candidate pool. Sent as a separate, cached system block before the role instructions, so propose and
 # every repair round re-use it from the prompt cache instead of paying for it again.
 POOL_CONTEXT = """TRIP: {spec}
-Daily spending estimate (food, local transport, entry fees): SGD {daily} per person per day, already
-reserved by the system. Money left for flights, hotels and transfers together: about SGD {bookable}.
+Daily spending estimate (food, local transport, entry fees): {currency} {daily} per person per day, already
+reserved by the system. Money left for flights, hotels and transfers together: about {currency} {bookable}.
 
 Candidate pool (the only valid IDs):
 {pool}
 """
 
 POOL_CONTEXT_MULTI = """TRIP: {spec}
-Daily spending estimate (food, local transport, entry fees): SGD {daily} per person per day, already
-reserved by the system. Money left for flights, hotels and transfers together: about SGD {bookable}.
+Daily spending estimate (food, local transport, entry fees): {currency} {daily} per person per day, already
+reserved by the system. Money left for flights, hotels and transfers together: about {currency} {bookable}.
 
 Candidate pool, grouped by city in travel order (the only valid IDs):
 {pool}
@@ -133,7 +151,19 @@ SPECIAL_RULES = """- pinned: places the traveller asked for BY NAME (pool items 
 PLANNER = """ROLE: itinerary planner. Build a day-by-day plan using ONLY IDs from the candidate pool above.
 
 Rules:
-- Choose exactly one flightOfferId and one stayId whose combined priceSGD fits the money left.
+- Interpret trip.preferenceScores as relative priorities (1-10):
+  culture: prioritize museums, historic places, temples and cultural attractions.
+  food: prioritize restaurants, local cuisine, food markets and culinary experiences.
+  nature: prioritize parks, gardens, hiking, beaches and outdoor experiences.
+  comfort: prioritize better-reviewed, comfortable accommodation within budget.
+  intensity: controls activity density, not attraction importance.
+- Scores 8-10 indicate strong preferences; 4-7 moderate; 1-3 low priority.
+  Low scores do NOT prohibit activities unless the traveller explicitly excludes them.
+- Prefer activities matching the highest scores while maintaining variety.
+- Respect trip.cuisines when selecting restaurants and food experiences.
+  Dietary requirements are mandatory constraints, not optional preferences.
+- Do not exceed the budget merely to satisfy a high comfort or food score.
+- Choose exactly one flightOfferId and one stayId whose combined prices in the trip budget currency fits the money left.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order.
 - The first day is an arrival day and the last day is a departure day: keep them light (0-2 places).
 - Places per full day by pace: relaxed 2-3, moderate 3-4, packed 5-6. Never repeat a place.
@@ -158,6 +188,18 @@ Return ONLY this JSON ("dayTrip" only on day-trip days):
 PLANNER_MULTI = """ROLE: itinerary planner for a MULTI-CITY trip. Use ONLY IDs from the candidate pool above.
 
 Rules:
+- Interpret trip.preferenceScores as relative priorities (1-10):
+  culture: prioritize museums, historic places, temples and cultural attractions.
+  food: prioritize restaurants, local cuisine, food markets and culinary experiences.
+  nature: prioritize parks, gardens, hiking, beaches and outdoor experiences.
+  comfort: prioritize better-reviewed, comfortable accommodation within budget.
+  intensity: controls activity density, not attraction importance.
+- Scores 8-10 indicate strong preferences; 4-7 moderate; 1-3 low priority.
+  Low scores do NOT prohibit activities unless the traveller explicitly excludes them.
+- Prefer activities matching the highest scores while maintaining variety.
+- Respect trip.cuisines when selecting restaurants and food experiences.
+  Dietary requirements are mandatory constraints, not optional preferences.
+- Do not exceed the budget merely to satisfy a high comfort or food score.
 - Choose one international flightOfferId (it arrives in the first city and leaves from the last).
 - For EACH city, choose exactly one stayId from that city's stays (they are already priced for the right dates).
 - For EACH move between cities, choose one transferId from that hop's options. Prefer a flight for long hops and
@@ -305,7 +347,7 @@ Classify the traveller's NEW message:
 - "smalltalk": thanks, greetings, or anything else.
 
 For "modify":
-- specChanges: ONLY trip-detail fields that change, using these keys: startDate, endDate, pax, budgetSGD,
+- specChanges: ONLY trip-detail fields that change, using these keys: packageMode (compare, custom_only, packages_only), startDate, endDate, pax, budget (amount and currency),
   destination, destinationAirport, originAirport, interests, activities, pace, cuisine, hotelPreference, avoid,
   destination: for a country use its main city; ALWAYS give destinationAirport (main IATA code) with it.
   legs (the FULL new list of cities with airport and nights, when cities are added, removed, reordered or nights change),
@@ -347,6 +389,10 @@ DEFAULTS = {"INTAKE": INTAKE, "GATHER": GATHER, "PLANNER": PLANNER, "REPAIR": RE
 
 def get_prompt(name):
     """Returns the prompt template text for INTAKE/GATHER/PLANNER/REPAIR/JUDGE/NARRATIVE/ROUTER/CHAT."""
+    # Currency-sensitive prompts use the repository contract, so older managed prompts
+    # cannot silently restore SGD-only budgets.
+    if name in ("INTAKE", "POOL_CONTEXT", "POOL_CONTEXT_MULTI", "ROUTER"):
+        return DEFAULTS[name]
     if name in _cache:
         return _cache[name]
     arn = os.environ.get(f"PROMPT_ARN_{name}")

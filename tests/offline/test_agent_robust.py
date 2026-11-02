@@ -2,6 +2,7 @@
 dates/budget/travellers, and prompt-cache checkpoints. Runs against the fake Gateway (real Lambda code, mock mode)."""
 from stubutil import sys_text, clean_msgs, CACHE_SEEN
 import sys, types, json, os, re
+os.environ["GATHER_MODE"] = "model"  # Exercise retained model-loop cache behaviour explicitly.
 bac = types.ModuleType("bedrock_agentcore")
 class App:
     def entrypoint(self, f): self.f = f; return f

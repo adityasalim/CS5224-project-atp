@@ -11,6 +11,11 @@ TOOLS = []
 for t, fn in TARGETS.items():
     sch = json.load(open(REPO / "lambdas" / "schemas" / f"{fn}.json"))
     TOOLS.append({**sch, "name": f"{t}___{sch['name']}"})
+# Package gathering is optional; the frozen catalogue is deliberately empty.
+from types import SimpleNamespace
+MODS['agency-packages']=SimpleNamespace(lambda_handler=lambda event,context: {'ok':True,'packages':[]})
+sch=json.load(open(REPO/'lambdas/schemas/tp-ahmed-search-packages.json'))
+TOOLS.append({**sch,'name':'agency-packages___'+sch['name']})
 SSE = {"n": 0}
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
