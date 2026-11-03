@@ -1553,7 +1553,7 @@ def _judge_request(request, spec, seq, pool, usage):
     if is_multi(spec):
         lines.insert(0, "Route: " + _route_text(spec) + " (moving days are meant to be light)")
     system = get_prompt("JUDGE").format(request=request[-1500:], spec=_sj(spec), plan="\n".join(lines))
-    res = ask_json(JUDGE_MODEL, system, "Score this itinerary.", usage, max_tokens=800, temperature=0.0, model_role='reviewer')
+    res = ask_json(JUDGE_MODEL, system, "Score this itinerary.", usage, max_tokens=1500, temperature=0.0, model_role='reviewer')
     scores = {k: int(v) for k, v in (res.get("scores") or {}).items() if str(v).strip().isdigit()}
     res["scores"] = scores
     res["minScore"] = min(scores.values()) if scores else 0
