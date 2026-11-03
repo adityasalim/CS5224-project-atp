@@ -105,7 +105,8 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "agent"))
 import tp_travel_agent as A
 import base64 as _b
-_tok = "x." + _b.urlsafe_b64encode(json.dumps({"sub": "user-123-abc"}).encode()).decode().rstrip("=") + ".y"
+import time
+_tok = "x." + _b.urlsafe_b64encode(json.dumps({"sub": "user-123-abc", "exp": time.time() + 3600}).encode()).decode().rstrip("=") + ".y"
 class Ctx: session_id = "tp-" + "a" * 40; request_headers = {"Authorization": "Bearer " + _tok}
 TURNS_ALL = ["We are planning a six-day honeymoon in Tokyo for two people with a budget of SGD 4,500. Romantic hotel, culture, Japanese food, free time.",
          "10 to 15 December", "What's near our hotel?", "Find a cheaper hotel", "Actually end on 14 December",
