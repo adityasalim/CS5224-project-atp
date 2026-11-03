@@ -1,9 +1,10 @@
 """Offline check of the agent's model handling. No AWS or provider calls.
 
 Part 1 (role adapter, the website path): config validation, the request each role gets (planner and executor through
-the Alibaba OpenAI-compatible API, Kimi K3 reviewer through Bedrock InvokeModel), the output-token cap, truncation
-retries, no tool schemas, no model substitution, error and quota handling, website config consistency, and a static
-check that every model call names a valid role and stays within the 8000-token cap.
+the Alibaba OpenAI-compatible API with thinking on; Kimi K3 reviewer and evaluator through Bedrock InvokeModel with
+a reasoning effort), the output-token cap, truncation retries, no tool schemas, no model substitution, error and quota
+handling, website config consistency, and static checks that every model call names a valid role, stays within the
+8000-token cap and leaves room for the model's thinking tokens.
 Part 2 (legacy Bedrock path, used when PUBLIC_MODEL_CONFIGURATION is not set): thinking on/off, effort, temperature,
 simpler retries when a field is rejected, and switching to a fallback model when a model isn't enabled."""
 import ast, io, json, os, pathlib, re, sys, types
@@ -66,13 +67,12 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-assert S["planner"].provider == "alibaba" and S["planner"].model_id.startswith("qwen3.8-max")
-assert S["planner"].options == {"enableThinking": True}
+# the approved public combination: Qwen and DeepSeek think; Kimi reviews at medium effort, evaluates at low
+assert (S["planner"].provider, S["planner"].model_id, S["planner"].options) == ("alibaba", "qwen3.8-max-0902", {"enableThinking": True})
 assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash-1017", {"enableThinking": True})
 assert (S["reviewer"].provider, S["reviewer"].model_id, S["reviewer"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "medium"})
-assert S["independent_evaluator"].model_id == "global.moonshotai.kimi-k3"
-PLANNER_ID = S["planner"].model_id
-print("config roles:", {r: s.model_id for r, s in S.items()})
+assert (S["independent_evaluator"].provider, S["independent_evaluator"].model_id, S["independent_evaluator"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "low"})
+print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
 
 # strict validation: no defaults, no unsupported options
 base = json.loads((AGENT / "public-model-config.json").read_text())
@@ -81,12 +81,14 @@ def with_(role, **row):
 raises(ValueError, lambda: ModelConfiguration.parse({k: v for k, v in base.items() if k != "reviewer"}), "reviewer")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", provider="openai")), "provider")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"thinkingLevel": "high"})), "Google")
-raises(ValueError, lambda: ModelConfiguration.parse(with_("reviewer", options={"enableThinking": False})), "Alibaba")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": "yes"})), "boolean")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("reviewer", options={"enableThinking": True})), "Alibaba")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("reviewer", options={"temperature": 0.2})), "Kimi")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("reviewer", options={"reasoningEffort": "turbo"})), "reasoning effort")
-raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": False, "reasoningEffort": "low"})), "reasoning effort")
-raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": False, "temperature": 1.5})), "temperature")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "reasoningEffort": "low"})), "reasoning effort")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "temperature": 1.5})), "temperature")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="glm-5.3", options={"enableThinking": False})), "GLM")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="qwen3.7-max")), "verified experiment pool")
 raises(ValueError, lambda: ModelConfiguration.parse({**base, "fallbackModel": "x"}), "Unexpected")
 
 # website configuration must agree with the adapter's eligible models and with public_models.py's approved roles
@@ -98,7 +100,7 @@ for role, sel in S.items():
     if sel.provider == "alibaba":
         assert sel.model_id in model_adapter.ALIBABA_MODELS, f"{role}: {sel.model_id} is not in ALIBABA_MODELS"
 
-# fake providers
+# fake providers (the reply reports reasoning tokens, as thinking models do)
 class FakeOpenAI:
     def __init__(self): self.calls, self.queue = [], []
     def reply(self, text, finish="stop"): self.queue.append((text, finish))
@@ -110,8 +112,8 @@ class FakeOpenAI:
         text, finish = self.queue.pop(0) if self.queue else ('{"ok": true}', "stop")
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=text), finish_reason=finish)],
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15,
-                                  prompt_tokens_details=None, completion_tokens_details=None), model=kw["model"])
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=50, total_tokens=60, prompt_tokens_details=None,
+                                  completion_tokens_details=SimpleNamespace(reasoning_tokens=40)), model=kw["model"])
 
 class FakeKimi:
     def __init__(self): self.calls = []
@@ -136,28 +138,31 @@ MSG = [{"role": "user", "content": [{"text": "q"}]}]
 ad, ali, kimi = make_adapter()
 u = A.Usage(adapter=ad, trip_id="t1")
 
-# planner: thinking off, temperature passed, system first, system sections joined
+# planner: Qwen with thinking ON, temperature passed, system first, system sections joined
 assert A.ask_json(A.PLANNER_MODEL, ["CTX", "ROLE: planner"], "plan", u, max_tokens=3000, temperature=0.3, think=True, cache=True, model_role="planner") == {"ok": True}
 c = ali.calls[-1]
 print("planner request:", {k: v for k, v in c.items() if k != "messages"})
-assert c["model"] == PLANNER_ID and c["extra_body"] == {"enable_thinking": False} and c["max_tokens"] == 3000
-assert c["temperature"] == 0.3 and "reasoning_effort" not in c
+assert c["model"] == "qwen3.8-max-0902" and c["extra_body"] == {"enable_thinking": True} and c["max_tokens"] == 3000
+assert c["temperature"] == 0.3 and "reasoning_effort" not in c and "stream" not in c
 assert c["messages"][0] == {"role": "system", "content": "CTX\n\nROLE: planner"} and c["messages"][1]["role"] == "user"
-# executor: DeepSeek flash
+assert ad.records[-1]["thinkingTokens"] == 40 and ad.records[-1]["outputTokens"] == 50   # reasoning counts inside the output
+# executor: DeepSeek flash with thinking ON
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", u, temperature=0.0, model_role="executor")
 c = ali.calls[-1]
-assert c["model"] == "deepseek-v4.1-flash-1017" and c["extra_body"] == {"enable_thinking": False} and c["temperature"] == 0.0
-# reviewer: Kimi K3 through InvokeModel, reasoning effort, no sampling fields
+assert c["model"] == "deepseek-v4.1-flash-1017" and c["extra_body"] == {"enable_thinking": True} and c["temperature"] == 0.0
+# reviewer: Kimi K3 through InvokeModel at medium effort; evaluator at low; no sampling fields
 A.ask_json(A.REVIEWER_MODEL, "sys", "judge", u, temperature=0.0, model_role="reviewer")
 kc = kimi.calls[-1]
 print("reviewer request:", kc["modelId"], {k: v for k, v in kc["body"].items() if k != "messages"})
-assert kc["modelId"] == "global.moonshotai.kimi-k3" and kc["body"]["reasoning_effort"] == "low"
+assert kc["modelId"] == "global.moonshotai.kimi-k3" and kc["body"]["reasoning_effort"] == "medium"
 assert "temperature" not in kc["body"] and kc["body"]["messages"][0]["role"] == "system"
 rec = ad.records[-1]
 assert rec["role"] == "reviewer" and rec["provider"] == "bedrock" and rec["success"] and rec["thinkingTokens"] == 3
-assert {PLANNER_ID, "deepseek-v4.1-flash-1017", "global.moonshotai.kimi-k3"} <= set(u.by_model)
+A.ask_json(A.REVIEWER_MODEL, "sys", "evaluate", u, model_role="independent_evaluator")
+assert kimi.calls[-1]["body"]["reasoning_effort"] == "low" and ad.records[-1]["role"] == "independent_evaluator"
+assert {"qwen3.8-max-0902", "deepseek-v4.1-flash-1017", "global.moonshotai.kimi-k3"} <= set(u.by_model)
 
-# no implicit role, no tool schemas, no unbounded output, no unreserved spend, no unlisted model, no odd messages
+# no implicit role, no tool schemas, no unbounded output, no unreserved spend, no odd messages
 raises(ValueError, lambda: A.converse("x", "sys", MSG, u), "explicit role")
 raises(ValueError, lambda: ad.generate(role="planner", trip_id="t1", system="s", messages=MSG, tools=[{"toolSpec": {}}]), "tool")
 for bad in (0, 8001, 100.0):
@@ -169,8 +174,6 @@ raises(ValueError, lambda: ad.generate(role="executor", trip_id="t1", system="s"
 raises(ValueError, lambda: ad.generate(role="executor", trip_id="t1", system="s", messages=[{"role": "user", "content": [{"image": "x"}]}]), "text message")
 ad_nobudget, _, _ = make_adapter(with_budget=False)
 raises(ValueError, lambda: ad_nobudget.generate(role="executor", trip_id="t1", system="s", messages=MSG), "budget")
-ad_unlisted, _, _ = make_adapter(config=ModelConfiguration.parse(with_("planner", model="qwen3.7-max")))
-raises(ValueError, lambda: ad_unlisted.generate(role="planner", trip_id="t1", system="s", messages=MSG), "eligibility")
 # GATHER_MODE=model needs tools, which the adapter rejects: refuse early
 os.environ["GATHER_MODE"] = "model"
 raises(ValueError, lambda: next(A.gather({}, u, {})), "tool calling")
@@ -198,21 +201,21 @@ ali.calls.clear(); ali.reply('{"ok": tr', "length")
 raises(ValueError, lambda: A.ask_json(A.EXECUTOR_MODEL, "sys", "q", u, max_tokens=8000, model_role="executor"), "still truncated")
 assert len(ali.calls) == 1, "no point repeating a call that is already at the cap"
 
-# KNOWN ISSUES in model_adapter.py (these fail until it is fixed):
-# 1) an empty reply is reported with the wrong error kind (the record says "ModelAdapterError", not "EmptyModelOutput")
+# With thinking on, a model can spend the whole budget reasoning and return no text with finish_reason "length".
+# That must come back as a truncation so ask_json retries with a larger limit, not as a hard error.
+ali.calls.clear(); ali.reply("", "length")
+assert A.ask_json(A.EXECUTOR_MODEL, "sys", "q", u, max_tokens=2000, model_role="executor") == {"ok": True}
+assert [c["max_tokens"] for c in ali.calls] == [2000, 4000], ali.calls
+# an empty reply that was NOT cut off is a real error and keeps its kind in the record
 ad_e, ali_e, _ = make_adapter()
 ali_e.reply("", "stop")
 raises(ModelAdapterError, lambda: ad_e.generate(role="executor", trip_id="t1", system="s", messages=MSG))
 assert ad_e.records[-1]["errorType"] == "EmptyModelOutput", ad_e.records[-1]["errorType"]
-# 2) a reasoning model that spends the whole budget thinking returns an empty reply with finish_reason "length";
-#    that must come back as a truncation so ask_json can retry with a larger limit, not as a hard error
-ali.calls.clear(); ali.reply("", "length")
-assert A.ask_json(A.EXECUTOR_MODEL, "sys", "q", u, max_tokens=2000, model_role="executor") == {"ok": True}
-assert [c["max_tokens"] for c in ali.calls] == [2000, 4000], ali.calls
 
 # helpers
-assert A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-04"}) == 2000 + 220 * 4
-assert A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-21", "legs": [1] * 5}) == 8000
+short = A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-04"})
+long_ = A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-21", "legs": [1] * 5})
+assert 5000 <= short < long_ == 8000, (short, long_)         # thinking needs room even for a short trip
 assert A.reply_or_flag({"output": {"message": {"content": [{"text": "Hello"}]}}, "stopReason": "max_tokens"}) == "Hello …"
 assert A.reply_or_flag({"output": {"message": {"content": [{"text": "Hello"}]}}, "stopReason": "end_turn"}) == "Hello"
 req = "Tokyo 5 days"
@@ -224,7 +227,14 @@ assert len(long_req) <= A.MAX_REQUEST_CHARS and long_req.endswith("y"), "a very 
 assert A._clip("First sentence. Second sentence is long.", 25) == "First sentence."
 assert len(A._clip("a" * 500, 400)) <= 401
 
-# static check: every model call names a valid role and stays within the adapter's 8000-token cap
+# static checks: every model call names a valid role, stays within the adapter's 8000-token cap, and, because every
+# role now thinks (Qwen and DeepSeek thinking on, Kimi reasoning effort set), leaves room for the thinking tokens.
+# max_tokens is only a ceiling: unused room costs nothing, a ceiling that is too low costs a failed call and a retry.
+MIN_THINKING_MAX_TOKENS = 2000
+def thinks(sel):
+    return sel.options.get("enableThinking") is True or sel.options.get("reasoningEffort", "none") != "none"
+THINKING_ROLES = {r for r, sel in S.items() if thinks(sel)}
+assert THINKING_ROLES == set(S), THINKING_ROLES
 ROLES = set(S)
 tree = ast.parse((AGENT / "tp_travel_agent.py").read_text(encoding="utf-8"))
 def role_values(node):
@@ -237,9 +247,13 @@ for node in ast.walk(tree):
         kw = {k.arg: k.value for k in node.keywords if k.arg}
         calls += 1
         assert "model_role" in kw, f"line {node.lineno}: {node.func.id} without model_role"
-        assert set(role_values(kw["model_role"])) <= ROLES, f"line {node.lineno}: unknown role"
+        roles = set(role_values(kw["model_role"]))
+        assert roles <= ROLES, f"line {node.lineno}: unknown role"
         if isinstance(kw.get("max_tokens"), ast.Constant):
-            assert kw["max_tokens"].value <= A.MAX_OUTPUT_TOKENS, f"line {node.lineno}: max_tokens over the cap"
+            limit = kw["max_tokens"].value
+            assert limit <= A.MAX_OUTPUT_TOKENS, f"line {node.lineno}: max_tokens {limit} over the cap"
+            if roles & THINKING_ROLES:
+                assert limit >= MIN_THINKING_MAX_TOKENS, f"line {node.lineno}: max_tokens {limit} leaves no room for thinking"
 print("model calls checked:", calls)
 
 # the website adapter is off without PUBLIC_MODEL_CONFIGURATION, and only the approved configuration may serve it
