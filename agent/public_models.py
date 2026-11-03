@@ -11,7 +11,7 @@ def public_adapter(ledger_factory=None,adapter_type=None):
     from public_protocol import PublicProtocolAdapter
     root=Path(__file__).resolve().parent
     config=ModelConfiguration.load(root/'public-model-config.json')
-    expected=('qwen3.8-max','deepseek-v4.1-flash-1017','global.moonshotai.kimi-k3')
+    expected=('qwen3.8-max-0902','deepseek-v4.1-flash-1017','global.moonshotai.kimi-k3')
     if tuple(config.selections[r].model_id for r in ('planner','executor','reviewer'))!=expected:
         raise ValueError('Website configuration does not match approved quality/cost roles')
     quotes=[PriceQuote.parse(q) for q in json.loads((root/'public-model-prices.json').read_text())['quotes']]
