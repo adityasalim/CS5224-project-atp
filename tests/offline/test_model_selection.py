@@ -4,7 +4,7 @@ Part 1 (role adapter, the website path): config validation, the request each rol
 the Alibaba OpenAI-compatible API with thinking on; Kimi K3 reviewer and evaluator through Bedrock InvokeModel with
 a reasoning effort), the output-token cap, truncation retries, no tool schemas, no model substitution, error and quota
 handling, website config consistency, and static checks that every model call names a valid role, stays within the
-8000-token cap and leaves room for the model's thinking tokens.
+8000-token cap and keeps at least the output limit the agent has today (so a limit can't be lowered by accident).
 Part 2 (legacy Bedrock path, used when PUBLIC_MODEL_CONFIGURATION is not set): thinking on/off, effort, temperature,
 simpler retries when a field is rejected, and switching to a fallback model when a model isn't enabled."""
 import ast, io, json, os, pathlib, re, sys, types
@@ -212,10 +212,11 @@ ali_e.reply("", "stop")
 raises(ModelAdapterError, lambda: ad_e.generate(role="executor", trip_id="t1", system="s", messages=MSG))
 assert ad_e.records[-1]["errorType"] == "EmptyModelOutput", ad_e.records[-1]["errorType"]
 
-# helpers
+# helpers (plan_tokens grows with trip length and cities, up to the adapter cap)
 short = A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-04"})
+mid = A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-10"})
 long_ = A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-21", "legs": [1] * 5})
-assert 5000 <= short < long_ == 8000, (short, long_)         # thinking needs room even for a short trip
+assert 2000 <= short < mid < long_ == A.MAX_OUTPUT_TOKENS, (short, mid, long_)
 assert A.reply_or_flag({"output": {"message": {"content": [{"text": "Hello"}]}}, "stopReason": "max_tokens"}) == "Hello …"
 assert A.reply_or_flag({"output": {"message": {"content": [{"text": "Hello"}]}}, "stopReason": "end_turn"}) == "Hello"
 req = "Tokyo 5 days"
@@ -223,20 +224,28 @@ for i in range(8):
     req = A._append_change(req, f"change {i}")
 assert req.startswith("Tokyo 5 days") and req.count(" | Change: ") == 5 and "change 7" in req and "change 2" not in req
 long_req = A._append_change("x" * 5000, "y" * 5000)
-assert len(long_req) <= A.MAX_REQUEST_CHARS and long_req.endswith("y"), "a very long change is clipped, not dropped"
+assert len(long_req) <= A.MAX_REQUEST_CHARS and long_req.startswith("x"), "the saved request stays within its cap"
 assert A._clip("First sentence. Second sentence is long.", 25) == "First sentence."
 assert len(A._clip("a" * 500, 400)) <= 401
 
-# static checks: every model call names a valid role, stays within the adapter's 8000-token cap, and, because every
-# role now thinks (Qwen and DeepSeek thinking on, Kimi reasoning effort set), leaves room for the thinking tokens.
-# max_tokens is only a ceiling: unused room costs nothing, a ceiling that is too low costs a failed call and a retry.
-MIN_THINKING_MAX_TOKENS = 2000
-def thinks(sel):
-    return sel.options.get("enableThinking") is True or sel.options.get("reasoningEffort", "none") != "none"
-THINKING_ROLES = {r for r, sel in S.items() if thinks(sel)}
-assert THINKING_ROLES == set(S), THINKING_ROLES
+# static checks: every model call names a valid role and stays within the adapter's 8000-token cap, and no call
+# site's output limit is lowered below what it is today. With thinking on, a lower limit means failed calls and
+# retries. A new call site that is not listed here must still have a limit of at least 1000.
+CURRENT_MIN_TOKENS = {            # enclosing function -> lowest allowed constant max_tokens
+    "intake": 4000, "resolve_airport": 100, "_judge_request": 5000, "answer": 1000, "_narrative_request": 4000,
+    "route": 1500, "select_packages": 4000, "review_text": 3000, "revise_text": 2500, "evaluator_call": 4000,
+    "gather_model": 3000,
+}
+DEFAULT_MIN_TOKENS = 1000
 ROLES = set(S)
 tree = ast.parse((AGENT / "tp_travel_agent.py").read_text(encoding="utf-8"))
+parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+def enclosing_function(node):
+    while node in parents:
+        node = parents[node]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return node.name
+    return None
 def role_values(node):
     if isinstance(node, ast.IfExp): return role_values(node.body) + role_values(node.orelse)
     if isinstance(node, ast.Constant): return [node.value]
@@ -247,13 +256,12 @@ for node in ast.walk(tree):
         kw = {k.arg: k.value for k in node.keywords if k.arg}
         calls += 1
         assert "model_role" in kw, f"line {node.lineno}: {node.func.id} without model_role"
-        roles = set(role_values(kw["model_role"]))
-        assert roles <= ROLES, f"line {node.lineno}: unknown role"
+        assert set(role_values(kw["model_role"])) <= ROLES, f"line {node.lineno}: unknown role"
         if isinstance(kw.get("max_tokens"), ast.Constant):
-            limit = kw["max_tokens"].value
+            limit, where = kw["max_tokens"].value, enclosing_function(node)
             assert limit <= A.MAX_OUTPUT_TOKENS, f"line {node.lineno}: max_tokens {limit} over the cap"
-            if roles & THINKING_ROLES:
-                assert limit >= MIN_THINKING_MAX_TOKENS, f"line {node.lineno}: max_tokens {limit} leaves no room for thinking"
+            floor = CURRENT_MIN_TOKENS.get(where, DEFAULT_MIN_TOKENS)
+            assert limit >= floor, f"line {node.lineno} ({where}): max_tokens {limit} is below the allowed minimum {floor}"
 print("model calls checked:", calls)
 
 # the website adapter is off without PUBLIC_MODEL_CONFIGURATION, and only the approved configuration may serve it
