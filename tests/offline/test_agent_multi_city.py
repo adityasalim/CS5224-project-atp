@@ -96,8 +96,17 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "agent"))
 import tp_travel_agent as A
 import base64 as _b
 import time
-_tok = "x." + _b.urlsafe_b64encode(json.dumps({"sub": "user-123-abc", "exp": time.time() + 3600}).encode()).decode().rstrip("=") + ".y"class Ctx: session_id = "tp-" + "a" * 40; request_headers = {"Authorization": "Bearer " + _tok}
 
+_tok = "x." + _b.urlsafe_b64encode(
+    json.dumps({
+        "sub": "user-123-abc",
+        "exp": time.time() + 3600
+    }).encode()
+).decode().rstrip("=") + ".y"
+
+class Ctx:
+    session_id = "tp-" + "a" * 40
+    request_headers = {"Authorization": "Bearer " + _tok}
 TURNS = ["Copenhagen 3 nights, then Lofoten 4, then Abisko 4, 10-21 Dec 2026, two people, SGD 14,000",
          "how do we get to Abisko?", "skip abisko, just copenhagen and lofoten"]
 for prompt in TURNS:
