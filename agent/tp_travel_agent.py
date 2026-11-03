@@ -527,7 +527,7 @@ def resolve_airport(place, usage=None):
         try:
             r = ask_json(EXECUTOR_MODEL, "ROLE: airport lookup. Reply with ONLY JSON {\"iata\": \"XXX\"}: the main "
                                        "international airport serving the place (\"\" if unsure).", str(place)[:80],
-                         usage, max_tokens=100, temperature=0.0, model_role='executor')
+                         usage, max_tokens=2000, temperature=0.0, model_role='executor')
             c = str(r.get("iata") or "").strip().upper()
             code = c if re.fullmatch(r"[A-Z]{3}", c) else ""
         except Exception as e:  # noqa: BLE001
@@ -1980,8 +1980,11 @@ def _append_change(request, instruction):
     """Original request plus the most recent change requests, kept under MAX_REQUEST_CHARS."""
     parts = (request + " | Change: " + instruction).split(" | Change: ")
     base, changes = parts[0].strip()[:1500], [c.strip() for c in parts[1:] if c.strip()][-5:]
-    while changes and len(base) + sum(len(c) + 12 for c in changes) > MAX_REQUEST_CHARS:
+    while len(changes) > 1 and len(base) + sum(len(c) + 12 for c in changes) > MAX_REQUEST_CHARS:
         changes.pop(0)
+    total = len(base) + sum(len(c) + 12 for c in changes)
+    if changes and total > MAX_REQUEST_CHARS:
+        changes[-1] = changes[-1][:max(MAX_REQUEST_CHARS - (total - len(changes[-1])), 0)]
     return (base + "".join(" | Change: " + c for c in changes)).strip()
 
 
@@ -2321,7 +2324,7 @@ def answer(state, question, usage):
     system = get_prompt("CHAT").format(spec=_sj(state["spec"]), facts=_summary(state),
                                        history=_history_text(state))
     resp = converse(EXECUTOR_MODEL, system, [{"role": "user", "content": [{"text": question}]}], usage,
-                    max_tokens=1000, temperature=0.4, model_role='executor')
+                    max_tokens=2500, temperature=0.4, model_role='executor')
     text = reply_or_flag(resp) or "Sorry, I couldn't answer that. Could you rephrase?"
     _remember(state, "assistant", text)
     yield ev("message", text)
@@ -2332,7 +2335,7 @@ def route(state, message, usage):
     system = get_prompt("ROUTER").format(today=today, spec=_sj(state["spec"]), summary=_summary(state),
                                          history=_history_text(state))
     try:
-        r = ask_json(EXECUTOR_MODEL, system, message, usage, max_tokens=1500, temperature=0.0, model_role='executor')
+        r = ask_json(EXECUTOR_MODEL, system, message, usage, max_tokens=3000, temperature=0.0, model_role='executor')
     except Exception as e:  # noqa: BLE001
         print("router failed:", e)
         r = {"intent": "modify", "specChanges": {}, "instruction": message}
