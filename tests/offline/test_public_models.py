@@ -15,7 +15,7 @@ class Public(unittest.TestCase):
   from types import SimpleNamespace
   with patch.dict(os.environ,{'PUBLIC_MODEL_CONFIGURATION':'combo_19'}):
    adapter=public_adapter(ledger_factory=lambda quotes:SimpleNamespace(authorize=lambda *a:None,record=lambda row:row))
-   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer']],['qwen3.8-max','deepseek-v4.1-flash-1017','global.moonshotai.kimi-k3'])
+   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer']],['qwen3.8-max-0902','deepseek-v4.1-flash-1017','global.moonshotai.kimi-k3'])
    self.assertEqual(adapter.records,[])
 if __name__=='__main__':unittest.main()
 
