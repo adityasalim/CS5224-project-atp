@@ -66,7 +66,7 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-assert S["planner"].provider == "alibaba" and S["planner"].model_id.startswith("Qwen3.8-Max-0902")
+assert S["planner"].provider == "alibaba" and S["planner"].model_id.startswith("qwen3.8-max")
 assert S["planner"].options == {"enableThinking": True}
 assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash-1017", {"enableThinking": True})
 assert (S["reviewer"].provider, S["reviewer"].model_id, S["reviewer"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "medium"})
