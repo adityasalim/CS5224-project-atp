@@ -42,7 +42,7 @@ class Protocol(unittest.TestCase):
   tree=ast.parse((ROOT/'agent/tp_travel_agent.py').read_text())
   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_repair_request')
   captured={}
-  ns={'prepare_pool':lambda *a:None,'DAILY_SPEND':100,'is_multi':lambda s:False,'_special_rules':lambda s:'','planning_context':lambda *a:'facts','get_prompt':lambda n:'repairer','json':__import__('json'),'PLANNER_MODEL':'unused'}
+  ns={'prepare_pool':lambda *a:None,'DAILY_SPEND':100,'is_multi':lambda s:False,'_special_rules':lambda s:'','planning_context':lambda *a:'facts','get_prompt':lambda n:'repairer','json':__import__('json'),'PLANNER_MODEL':'unused','plan_tokens':lambda spec:6000}
   def ask(*args,**kw):captured.update(kw);return {}
   ns['ask_json']=ask
   exec(compile(ast.Module(body=[node],type_ignores=[]),'<repair>','exec'),ns)
@@ -52,7 +52,7 @@ class Protocol(unittest.TestCase):
   source=(ROOT/'agent/tp_travel_agent.py').read_text();tree=ast.parse(source)
   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='ask_json')
   calls=[];adapter=SimpleNamespace(strict_no_retry=True,configuration=SimpleNamespace(selections={'planner':SimpleNamespace(model_id='test')}))
-  ns={'json':__import__('json'),'converse':lambda *a,**k:calls.append(1) or {},'reply_text':lambda r:'invalid','extract_json':lambda s:(_ for _ in ()).throw(ValueError()),'effective_model':lambda m:m}
+  ns={'json':__import__('json'),'converse':lambda *a,**k:calls.append(1) or {},'reply_text':lambda r:'invalid','extract_json':lambda s:(_ for _ in ()).throw(ValueError()),'effective_model':lambda m:m,'MAX_OUTPUT_TOKENS':8000}
   exec(compile(ast.Module(body=[node],type_ignores=[]),'<json>','exec'),ns)
   with self.assertRaises(ValueError):ns['ask_json']('test','','',SimpleNamespace(adapter=adapter),model_role='planner')
   self.assertEqual(len(calls),1)

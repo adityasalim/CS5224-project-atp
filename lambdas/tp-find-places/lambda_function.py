@@ -56,7 +56,7 @@ TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_SECONDS", "40"))
 OVERPASS_TIMEOUT_S = 18          # per Overpass request
 OVERPASS_SHARE_S = 24            # Overpass may use at most this much of the budget
 FOOD_RADIUS_KM = 1.5             # restaurants/cafes/bars are dense in cities; search closer in
-_GEO_CFG = Config(connect_timeout=4, read_timeout=8, retries={"max_attempts": 2})
+_GEO_CFG = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 2})
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
 CATEGORY_TAGS = {

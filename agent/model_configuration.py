@@ -4,6 +4,11 @@ import json
 
 ROLES = ('planner', 'executor', 'reviewer', 'independent_evaluator')
 PROVIDERS = {'bedrock', 'google', 'alibaba'}
+# Single source of truth for the Alibaba (DashScope) models allowed in an experiment or on the website.
+# model_adapter.py imports this set, and parse() rejects any other Alibaba model when the config is loaded,
+# so a mismatch fails at start-up instead of on the first planner call.
+ALIBABA_MODELS = {'qwen3.8-max', 'qwen3.8-max-0902', 'qwen3.8-flash', 'qwen3.7-plus',
+                  'deepseek-v4.1-flash-1017', 'deepseek-v4-pro-0813', 'glm-5.3'}
 
 @dataclass(frozen=True)
 class ModelSelection:
@@ -38,6 +43,8 @@ class ModelConfiguration:
                 raise ValueError('Explicit model required for ' + role)
             if set(row) - {'provider', 'model', 'options'}:
                 raise ValueError('Unexpected selection fields; credentials and implicit fallbacks are forbidden')
+            if row['provider'] == 'alibaba' and model not in ALIBABA_MODELS:
+                raise ValueError(f'Alibaba model {model} for {role} is not in the verified experiment pool')
             options = row.get('options', {})
             if not isinstance(options, dict) or set(options) - {'thinkingLevel', 'enableThinking', 'temperature','reasoningEffort'}:
                 raise ValueError('Unsupported provider options')
@@ -48,6 +55,8 @@ class ModelConfiguration:
                 raise ValueError('Custom Google sampling settings are not enabled in this adapter')
             if 'thinkingLevel' in options and row['provider'] != 'google':
                 raise ValueError('thinkingLevel is a Google-specific option')
+            if 'thinkingLevel' in options and (not isinstance(options['thinkingLevel'], str) or not options['thinkingLevel'].strip()):
+                raise ValueError('thinkingLevel must be a non-empty string')
             if 'enableThinking' in options and (row['provider'] != 'alibaba' or type(options['enableThinking']) is not bool):
                 raise ValueError('enableThinking must be an Alibaba boolean option')
             if row['provider'] == 'google' and data.get('googleBillingDisabled') is not True:

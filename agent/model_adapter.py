@@ -5,10 +5,12 @@ providers; verified pricing and persistent spending limits belong in that callba
 import json,time,uuid,hashlib,os
 from datetime import datetime,timezone
 from google_transport import GoogleTransport,GoogleTransportError
-from model_configuration import ModelConfiguration
+from model_configuration import ModelConfiguration, ALIBABA_MODELS   # ALIBABA_MODELS: one list, defined in model_configuration
 
 ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
-ALIBABA_MODELS={'qwen3.8-max','qwen3.8-flash','qwen3.7-plus','deepseek-v4.1-flash-1017','deepseek-v4-pro-0813','glm-5.3'}
+# Request timeouts. A planner reply can be up to 8000 tokens, which takes longer than the old 90 s on a large trip.
+ALIBABA_TIMEOUT_SECONDS=float(os.environ.get('ALIBABA_TIMEOUT_SECONDS', '180'))
+BEDROCK_READ_TIMEOUT_SECONDS=int(os.environ.get('BEDROCK_READ_TIMEOUT_SECONDS', '180'))
 
 class ModelAdapterError(RuntimeError):
     def __init__(self,kind,code=None):
@@ -39,7 +41,7 @@ class ModelAdapter:
             import boto3
             from botocore.config import Config
             result=boto3.client('bedrock-runtime',region_name='ap-southeast-1',
-                config=Config(connect_timeout=10,read_timeout=120,retries={'total_max_attempts':1}))
+                config=Config(connect_timeout=10,read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,retries={'total_max_attempts':1}))
         else:
             import boto3
             from openai import OpenAI
@@ -48,7 +50,7 @@ class ModelAdapter:
             except ValueError:value={'api_key':raw}
             key=next((value.get(k) for k in ('api_key','API_KEY','DASHSCOPE_API_KEY','ALIBABA_API_KEY') if value.get(k)),None)
             if not isinstance(key,str) or not key:raise ValueError('Alibaba secret lacks a supported API-key field')
-            result=OpenAI(api_key=key,base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',timeout=90,max_retries=0)
+            result=OpenAI(api_key=key,base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',timeout=ALIBABA_TIMEOUT_SECONDS,max_retries=0)
         self.clients[provider]=result
         return result
 
@@ -138,7 +140,11 @@ class ModelAdapter:
                                cacheReadTokens=getattr(getattr(usage,'prompt_tokens_details',None),'cached_tokens',None),
                                thinkingTokens=getattr(getattr(usage,'completion_tokens_details',None),'reasoning_tokens',None))
                 row.update(finishReason=result.choices[0].finish_reason,responseModelId=result.model)
-            if not text.strip():raise ModelAdapterError('EmptyModelOutput')
+            if not text.strip():
+                # A reasoning model can spend its whole output budget thinking and return no text. That is a
+                # truncation (the caller can retry with a larger limit), not a hard failure.
+                if row.get('finishReason') not in ('length','max_tokens'):raise ModelAdapterError('EmptyModelOutput')
+                row['emptyBecauseTruncated']=True
             if row['inputTokens'] is None or row['outputTokens'] is None:
                 raise ModelAdapterError('MissingTokenUsage')
             if selected.provider=='google':
@@ -160,10 +166,12 @@ class ModelAdapter:
             if isinstance(error,GoogleTransportError) and error.usage:
                 row.update({k:v for k,v in error.usage.items() if k in row})
             detail=getattr(error,'response',{}).get('Error',{}) if isinstance(getattr(error,'response',None),dict) else {}
-            row.update(errorType=type(error).__name__,errorCode=getattr(error,'code',None) or getattr(error,'status_code',None) or detail.get('Code'))
+            # Keep the kind of our own errors (EmptyModelOutput, MissingTokenUsage, ...); name the class for provider errors.
+            kind=str(error) if isinstance(error,ModelAdapterError) else type(error).__name__
+            row.update(errorType=kind,errorCode=getattr(error,'code',None) or getattr(error,'status_code',None) or detail.get('Code'))
             if str(row['errorCode']) in ('429','RESOURCE_EXHAUSTED','ResourceExhausted'):
                 self.quota_exhausted=True
-            raise ModelAdapterError(row['errorType'],row['errorCode']) from None
+            raise ModelAdapterError(kind,row['errorCode']) from None
         finally:
             row['latencyMs']=round((time.monotonic()-start)*1000)
             try:

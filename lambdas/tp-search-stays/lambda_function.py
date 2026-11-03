@@ -111,7 +111,7 @@ def _geocode(city, allow_known=True):
     if os.environ.get("MOCK_MODE", "true").lower() == "true":
         return known
     try:
-        r = boto3.client("geo-places").geocode(QueryText=city, MaxResults=1)
+        r = boto3.client("geo-places", region_name="us-east-1").geocode(QueryText=city, MaxResults=1)
         items = r.get("ResultItems", [])
         if items:
             lng, lat = items[0]["Position"]

@@ -3,23 +3,23 @@
   "googleBillingDisabled": true,
   "planner": {
     "provider": "alibaba",
-    "model": "qwen3.8-max",
+    "model": "qwen3.8-max-0902",
     "options": {
-      "enableThinking": false
+      "enableThinking": true
     }
   },
   "executor": {
     "provider": "alibaba",
     "model": "deepseek-v4.1-flash-1017",
     "options": {
-      "enableThinking": false
+      "enableThinking": true
     }
   },
   "reviewer": {
     "provider": "bedrock",
     "model": "global.moonshotai.kimi-k3",
     "options": {
-      "reasoningEffort": "low"
+      "reasoningEffort": "medium"
     }
   },
   "independent_evaluator": {
