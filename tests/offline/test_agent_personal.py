@@ -94,8 +94,18 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "agent"))
 import tp_travel_agent as A
 import base64 as _b
-_tok = "x." + _b.urlsafe_b64encode(json.dumps({"sub": "user-123-abc"}).encode()).decode().rstrip("=") + ".y"
-class Ctx: session_id = "tp-" + "a" * 40; request_headers = {"Authorization": "Bearer " + _tok}
+import time
+
+_tok = "x." + _b.urlsafe_b64encode(
+    json.dumps({
+        "sub": "user-123-abc",
+        "exp": time.time() + 3600
+    }).encode()
+).decode().rstrip("=") + ".y"
+
+class Ctx:
+    session_id = "tp-" + "a" * 40
+    request_headers = {"Authorization": "Bearer " + _tok}
 
 its = []
 for prompt in ["Anniversary in Tokyo 10-15 Dec 2026 for two, SGD 6000. We're vegetarian, hate tourist traps, love a lie-in, want a nice ryokan in Asakusa and only direct flights after 10am.",
