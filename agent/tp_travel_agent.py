@@ -39,7 +39,7 @@ import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
 
 from gateway_client import Gateway, GatewayError
-from prompts_v5 import get_prompt
+from prompts import get_prompt
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
 from package_recommendations import recommend as recommend_packages, MODES as PACKAGE_MODES
