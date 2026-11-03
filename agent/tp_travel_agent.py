@@ -309,7 +309,7 @@ def _next_in_chain(model):
     return None
 
 
-def converse(model, system, messages, usage, max_tokens=3000, temperature=0.2, tools=None, think=False, cache=False, model_role=None):
+def converse(model, system, messages, usage, max_tokens=6000, temperature=0.2, tools=None, think=False, cache=False, model_role=None):
     """One Bedrock Converse call. think=True gives Claude 5-series models adaptive thinking (planner and
     repair); every other call runs with thinking off, which is faster and cheaper. cache=True adds prompt-cache
     checkpoints (see _request_parts); a model that rejects them is remembered and called without."""
@@ -383,7 +383,7 @@ def reply_text(resp):
     return "".join(b.get("text", "") for b in resp["output"]["message"]["content"] if "text" in b)
 
 
-def ask_json(model, system, user_text, usage, max_tokens=3000,
+def ask_json(model, system, user_text, usage, max_tokens=6000,
              temperature=0.2, think=False, cache=False, model_role=None):
     """Request JSON with bounded recovery from malformed or truncated output."""
     if getattr(usage, "adapter", None) is not None:
@@ -967,7 +967,7 @@ def gather_model(spec, usage, metrics):
             pool["places"] += [p for p in res.get("places", []) if p["placeId"] not in have]
 
     for _ in range(6):   # at most 6 model turns
-        resp = converse(PLANNER_MODEL, system, messages, usage, max_tokens=1500, temperature=0.0, tools=specs,
+        resp = converse(PLANNER_MODEL, system, messages, usage, max_tokens=3000, temperature=0.0, tools=specs,
                         cache=True, model_role='executor')
         msg = resp["output"]["message"]
         messages.append(msg)
@@ -1308,7 +1308,7 @@ def _propose_request(spec, pool, usage):
     prepare_pool(spec, pool, DAILY_SPEND)
     multi = is_multi(spec)
     role = get_prompt("PLANNER_MULTI" if multi else "PLANNER").format(special=_special_rules(spec))
-    return ask_json(PLANNER_MODEL, [planning_context(spec, pool), role], "Create the plan.", usage, max_tokens=3000,
+    return ask_json(PLANNER_MODEL, [planning_context(spec, pool), role], "Create the plan.", usage, max_tokens=6000,
                     temperature=0.3, think=True, cache=True, model_role='planner')
 
 
@@ -1334,7 +1334,7 @@ def _repair_request(spec, pool, plan, verify_res, judge_res, unscheduled, usage,
         violations=json.dumps(violations, separators=(",", ":")) if violations else "none",
         special=_special_rules(spec))
     return ask_json(PLANNER_MODEL, [planning_context(spec, pool), role], "Return the repaired plan.", usage,
-                    max_tokens=3000, temperature=0.2, think=True, cache=True,
+                    max_tokens=6000, temperature=0.2, think=True, cache=True,
                     model_role='executor' if getattr(getattr(usage, 'adapter', None), 'operation', None) == 'correction' else 'planner')
 
 
@@ -1552,8 +1552,8 @@ def _judge_request(request, spec, seq, pool, usage):
     lines = _plan_lines(seq, pool)
     if is_multi(spec):
         lines.insert(0, "Route: " + _route_text(spec) + " (moving days are meant to be light)")
-    system = get_prompt("JUDGE").format(request=request[-1500:], spec=_sj(spec), plan="\n".join(lines))
-    res = ask_json(JUDGE_MODEL, system, "Score this itinerary.", usage, max_tokens=1500, temperature=0.0, model_role='reviewer')
+    system = get_prompt("JUDGE").format(request=request, spec=_sj(spec), plan="\n".join(lines))
+    res = ask_json(JUDGE_MODEL, system, "Score this itinerary.", usage, max_tokens=3000, temperature=0.0, model_role='reviewer')
     scores = {k: int(v) for k, v in (res.get("scores") or {}).items() if str(v).strip().isdigit()}
     res["scores"] = scores
     res["minScore"] = min(scores.values()) if scores else 0
@@ -1588,7 +1588,7 @@ def _narrative_request(spec, seq, pool, usage):
             fd["dayTrip"] = d["dayTrip"]["place"]
     try:
         out = ask_json(INTAKE_MODEL, get_prompt("NARRATIVE").format(spec=_sj(spec), facts=json.dumps(facts, ensure_ascii=False)),
-                       f"Write the text in the trip currency {currency_code(spec)}; do not quote monetary amounts in narrative prose because the deterministic cost table supplies them.", usage, max_tokens=1200, temperature=0.5, model_role='executor')
+                       f"Write the text in the trip currency {currency_code(spec)}; do not quote monetary amounts in narrative prose because the deterministic cost table supplies them.", usage, max_tokens=3000, temperature=0.5, model_role='executor')
     except Exception as e:  # noqa: BLE001
         print("narrative failed:", e)
         out = {}
