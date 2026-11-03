@@ -109,7 +109,19 @@ os.environ.update(GATEWAY_URL="http://127.0.0.1:8765/mcp", GATEWAY_TOKEN_URL="ht
 import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "agent"))
 import tp_travel_agent as A
-class Ctx: session_id = "tp-" + "r" * 40; request_headers = {}
+import base64
+import time
+
+_tok = "x." + base64.urlsafe_b64encode(
+    json.dumps({
+        "sub": "user-123-abc",
+        "exp": time.time() + 3600
+    }).encode()
+).decode().rstrip("=") + ".y"
+
+class Ctx:
+    session_id = "tp-" + "r" * 40
+    request_headers = {"Authorization": "Bearer " + _tok}
 
 def run(prompt):
     its, msgs = [], []
