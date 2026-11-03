@@ -2,7 +2,7 @@
   "quotes": [
     {
       "provider": "alibaba",
-      "modelId": "qwen3.8-max",
+      "modelId": "qwen3.8-max-0902",
       "inputPerMillionUSD": "2",
       "outputPerMillionUSD": "6",
       "inputIncludesCache": true,
