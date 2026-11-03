@@ -3,16 +3,16 @@
   "googleBillingDisabled": true,
   "planner": {
     "provider": "alibaba",
-    "model": "qwen3.8-max",
+    "model": "qwen3.8-max-0902",
     "options": {
-      "enableThinking": false
+      "enableThinking": True
     }
   },
   "executor": {
     "provider": "alibaba",
     "model": "deepseek-v4.1-flash-1017",
     "options": {
-      "enableThinking": false
+      "enableThinking": True
     }
   },
   "reviewer": {
