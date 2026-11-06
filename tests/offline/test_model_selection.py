@@ -111,8 +111,8 @@ raises(
             }
         )
     ),
-    "reasoning effort"
-)raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "temperature": 1.5})), "temperature")
+    "reasoning effort")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "temperature": 1.5})), "temperature")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="glm-5.3", options={"enableThinking": False})), "GLM")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="qwen3.7-max")), "verified experiment pool")
 raises(ValueError, lambda: ModelConfiguration.parse({**base, "fallbackModel": "x"}), "Unexpected")
