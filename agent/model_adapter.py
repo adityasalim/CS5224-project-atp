@@ -52,6 +52,11 @@ class ModelAdapter:
             key=next((value.get(k) for k in ('api_key','API_KEY','DASHSCOPE_API_KEY','ALIBABA_API_KEY') if value.get(k)),None)
             if not isinstance(key,str) or not key:raise ValueError('Alibaba secret lacks a supported API-key field')
             result=OpenAI(api_key=key,base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',timeout=ALIBABA_TIMEOUT_SECONDS,max_retries=0)
+            logging.getLogger(__name__).warning(
+                "Alibaba HTTP timeout: %s; configured: %s",
+                result._client.timeout,
+                ALIBABA_TIMEOUT_SECONDS,
+            )
         self.clients[provider]=result
         return result
 
