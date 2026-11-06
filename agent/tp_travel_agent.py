@@ -148,7 +148,63 @@ POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner nee
 MIN_PLACES_TARGET = 30
 MIN_STAYS_WANTED = 8
 
+MEAL_MAX_KM = 2.5   # a meal stop further than this from the day's other stops is swapped for a closer one
 
+
+def _balance_meals(spec, pool, plan):
+    """For every normal day, swap a restaurant/cafe/dessert stop that is far from the day's sightseeing stops for
+    the nearest unused candidate of the same category that is still compatible (dietary, accessibility, avoid,
+    same city). Pinned and requested places are never swapped. Changes plan["days"] in place; returns the swaps."""
+    byid = {p["placeId"]: p for p in pool["places"]}
+    used = {pid for d in plan.get("days", []) for pid in (d.get("placeIds") or [])}
+    prefs = spec.get("preferences") or {}
+    dietary = prefs.get("dietary") or []
+    access = prefs.get("accessibility") or []
+    avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
+    swaps = []
+
+    def compatible(c, original):
+        if dietary:
+            status = _dietary_status(c, dietary)
+            if status == "conflict" or (_dietary_status(original, dietary) == "verified" and status != "verified"):
+                return False
+        if access and _accessibility_status(c, access) == "conflict":
+            return False
+        blob = f'{c.get("name", "")} {c.get("category", "")} {c.get("cuisine", "")} {c.get("description", "")}'.lower()
+        return not any(a in blob for a in avoid)
+
+    for d in plan.get("days", []):
+        if d.get("dayTrip"):
+            continue
+        ids = list(d.get("placeIds") or [])
+        anchors = [byid[i] for i in ids if i in byid and not _is_food_place(byid[i]) and byid[i].get("lat") is not None]
+        if not anchors:
+            continue
+        centre = {"lat": sum(p["lat"] for p in anchors) / len(anchors),
+                  "lng": sum(p["lng"] for p in anchors) / len(anchors)}
+        for idx, pid in enumerate(ids):
+            p = byid.get(pid)
+            if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("lat") is None
+                    or _km(centre, p) <= MEAL_MAX_KM):
+                continue
+            cands = [c for c in pool["places"]
+                     if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
+                     and c.get("lat") is not None and not c.get("dayTrip")
+                     and (not d.get("city") or c.get("city") == d.get("city")) and compatible(c, p)]
+            if not cands:
+                continue
+            best = min(cands, key=lambda c: _km(centre, c))
+            if _km(centre, best) < _km(centre, p) - 0.5:       # only swap if it is clearly closer
+                ids[idx] = best["placeId"]
+                used.discard(pid)
+                used.add(best["placeId"])
+                swaps.append({"date": d.get("date"), "from": pid, "to": best["placeId"]})
+        d["placeIds"] = ids
+    if swaps:
+        print(json.dumps({"stage": "balance-meals", "swaps": len(swaps)}))
+    return swaps
+  
 def trip_days(spec):
     try:
         return (date.fromisoformat(spec["endDate"]) - date.fromisoformat(spec["startDate"])).days + 1
