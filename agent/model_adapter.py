@@ -152,14 +152,72 @@ class ModelAdapter:
                     selected.model_id,
                     getattr(client, "timeout", None),
                 )
-                result=client.chat.completions.create(**kwargs)
-                text=result.choices[0].message.content or ''
-                usage=result.usage
+                
+                # Stream responses for both Alibaba models.
+                kwargs['stream'] = True
+                kwargs['stream_options'] = {'include_usage': True}
+
+                stream = client.chat.completions.create(**kwargs)
+
+                content_parts = []
+                usage = None
+                finish_reason = None
+                response_model = selected.model_id
+                received_finish = False
+                received_usage = False
+
+                for chunk in stream:
+                    if chunk.model:
+                        response_model = chunk.model
+
+                    if chunk.usage is not None:
+                        usage = chunk.usage
+                        received_usage = True
+
+                    if not chunk.choices:
+                        continue
+
+                    choice = chunk.choices[0]
+                    delta = choice.delta
+
+                    if delta.content:
+                        content_parts.append(delta.content)
+
+                    # Do not collect or log reasoning_content.
+                    if choice.finish_reason is not None:
+                        finish_reason = choice.finish_reason
+                        received_finish = True
+
+                # A partial stream must not be treated as a
+                # successful complete response.
+                if not received_finish or not received_usage:
+                    raise ModelAdapterError(
+                        'IncompleteStreamingResponse'
+                    )
+
+                text = ''.join(content_parts)
+
                 if usage is not None:
-                    row.update(inputTokens=usage.prompt_tokens,outputTokens=usage.completion_tokens,totalTokens=usage.total_tokens,
-                               cacheReadTokens=getattr(getattr(usage,'prompt_tokens_details',None),'cached_tokens',None),
-                               thinkingTokens=getattr(getattr(usage,'completion_tokens_details',None),'reasoning_tokens',None))
-                row.update(finishReason=result.choices[0].finish_reason,responseModelId=result.model)
+                    row.update(
+                        inputTokens=usage.prompt_tokens,
+                        outputTokens=usage.completion_tokens,
+                        totalTokens=usage.total_tokens,
+                        cacheReadTokens=getattr(
+                            getattr(usage, 'prompt_tokens_details', None),
+                            'cached_tokens', None
+                        ),
+                        thinkingTokens=getattr(
+                            getattr(usage, 'completion_tokens_details', None),
+                            'reasoning_tokens', None
+                        )
+                    )
+
+                row.update(
+                    finishReason=finish_reason,
+                    responseModelId=response_model,
+                    transport='alibaba.streaming'
+                )
+
             if not text.strip():
                 # A reasoning model can spend its whole output budget thinking and return no text. That is a
                 # truncation (the caller can retry with a larger limit), not a hard failure.
