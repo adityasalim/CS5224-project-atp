@@ -149,7 +149,7 @@ assert ad.records[-1]["thinkingTokens"] == 40 and ad.records[-1]["outputTokens"]
 # executor: DeepSeek flash with thinking ON
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", u, temperature=0.0, model_role="executor")
 c = ali.calls[-1]
-assert c["model"] == "deepseek-v4.1-flash-1017" and c["extra_body"] == {"enable_thinking": True} and c["temperature"] == 0.0
+assert c["model"] == "deepseek-v4.1-flash" and c["extra_body"] == {"enable_thinking": True} and c["temperature"] == 0.0
 # reviewer: Kimi K3 through InvokeModel at medium effort; evaluator at low; no sampling fields
 A.ask_json(A.REVIEWER_MODEL, "sys", "judge", u, temperature=0.0, model_role="reviewer")
 kc = kimi.calls[-1]
@@ -160,7 +160,7 @@ rec = ad.records[-1]
 assert rec["role"] == "reviewer" and rec["provider"] == "bedrock" and rec["success"] and rec["thinkingTokens"] == 3
 A.ask_json(A.REVIEWER_MODEL, "sys", "evaluate", u, model_role="independent_evaluator")
 assert kimi.calls[-1]["body"]["reasoning_effort"] == "low" and ad.records[-1]["role"] == "independent_evaluator"
-assert {"qwen3.8-max-0902", "deepseek-v4.1-flash-1017", "global.moonshotai.kimi-k3"} <= set(u.by_model)
+assert {"qwen3.8-max-0902", "deepseek-v4.1-flash", "global.moonshotai.kimi-k3"} <= set(u.by_model)
 
 # no implicit role, no tool schemas, no unbounded output, no unreserved spend, no odd messages
 raises(ValueError, lambda: A.converse("x", "sys", MSG, u), "explicit role")
