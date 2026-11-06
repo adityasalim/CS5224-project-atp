@@ -49,14 +49,16 @@ assert fp._overpass_groups(["bar", "cafe", "museum", "hiking", "restaurant", "de
 _TAGS = {"restaurant": {"amenity": "restaurant"}, "cafe": {"amenity": "cafe"}, "museum": {"tourism": "museum"}}
 _MARK = {"restaurant": 'amenity"="restaurant"', "cafe": 'amenity"="cafe"', "museum": 'tourism"="museum"'}
 
+_IDS = {"restaurant": 1, "cafe": 2, "museum": 3}      # unique per category, like real Overpass elements
+
 
 def _fake_request(forget_in_single_request):
     def fake(query, deadline, ua):
         present = [c for c, mark in _MARK.items() if mark in query]
         if forget_in_single_request and len(present) == 3:
             present = ["restaurant"]          # a single request that only returns one category
-        return [{"type": "node", "id": n, "lat": 35.68 + n * 0.001, "lon": 139.76,
-                 "tags": {"name": f"Place {c}", **_TAGS[c]}} for n, c in enumerate(present, 1)], None
+        return [{"type": "node", "id": _IDS[c], "lat": 35.68 + _IDS[c] * 0.001, "lon": 139.76,
+                 "tags": {"name": f"Place {c}", **_TAGS[c]}} for c in present], None
     return fake
 
 
