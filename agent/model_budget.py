@@ -56,7 +56,7 @@ class S3BudgetStore:
                 return result
             except Exception as error:
                 if not conflict(error):raise
-        # raise BudgetError('Budget state remained contested; no model request authorized')
+        raise BudgetError('Budget state remained contested; no model request authorized')
 
     def put_record(self,row):
         identifier=row['invocationId']
@@ -67,7 +67,7 @@ class S3BudgetStore:
         except Exception as error:
             if not conflict(error):raise
             old=self.client.get_object(Bucket=BUCKET,Key=key)['Body'].read()
-            # if old!=body:raise BudgetError('Conflicting invocation record; refusing replacement') from None
+            if old!=body:raise BudgetError('Conflicting invocation record; refusing replacement') from None
 
 @dataclass(frozen=True)
 class PriceQuote:
@@ -102,14 +102,13 @@ class PriceQuote:
                    money(data['cacheWritePerMillionUSD']) if data.get('cacheWritePerMillionUSD') is not None else None,limit,str(data.get('rateBasis','Verified public standard rates; account credits and invoice adjustments excluded')))
 
     def validate_date(self,today):
-        temp=1
-        # if not date.fromisoformat(self.verified_on)<=today<=date.fromisoformat(self.valid_until):
-            # raise BudgetError('Pricing quote is not valid for the invocation date')
+        if not date.fromisoformat(self.verified_on)<=today<=date.fromisoformat(self.valid_until):
+            raise BudgetError('Pricing quote is not valid for the invocation date')
 
     def reserve_cost(self,system,messages,max_tokens):
         # UTF-8 byte count plus ample chat wrappers is deliberately conservative.
         upper=len(system.encode())+len(json.dumps(messages,ensure_ascii=False).encode())+1024+64*len(messages)
-        # if upper>self.input_limit:raise BudgetError('Request exceeds the verified pricing tier bound')
+        if upper>self.input_limit:raise BudgetError('Request exceeds the verified pricing tier bound')
         rate=max(self.input_per_million,self.cache_read_per_million or Decimal(0),self.cache_write_per_million or Decimal(0))
         return (Decimal(upper)*rate+Decimal(max_tokens)*self.output_per_million)/Decimal(1000000)
 
@@ -118,7 +117,7 @@ class PriceQuote:
         inp=money(row['inputTokens']);out=money(row['outputTokens'])
         read=money(row.get('cacheReadTokens') or 0);write=money(row.get('cacheWriteTokens') or 0)
         if write and self.cache_write_per_million is None:return None,'cache-write rate not verified'
-        # if self.input_includes_cache and read>inp:raise BudgetError('Invalid cache token accounting')
+        if self.input_includes_cache and read>inp:raise BudgetError('Invalid cache token accounting')
         if read and self.cache_read_per_million is None:
             if not self.input_includes_cache:inp+=read
             return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000),'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
@@ -127,7 +126,7 @@ class PriceQuote:
         return amount,self.rate_basis
 
 class BudgetLedger:
-    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=False):
+    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=True):
         self.store=store;self.cap=money(cap_usd)
         self.enforce_spending_caps=enforce_spending_caps
         if self.cap<=0:raise ValueError('Explicit positive spending cap required')
@@ -137,23 +136,24 @@ class BudgetLedger:
         initial={'schemaVersion':1,'capUSD':str(self.cap),'providerCapsUSD':self.provider_caps,
                  'spentEstimateUSD':'0','spentByProvider':{},'reservations':{},'settled':{},'halted':False}
         state=store.initialize(initial)
-        # if money(state['capUSD'])!=self.cap or state['providerCapsUSD']!=self.provider_caps:
-            # raise BudgetError('Existing budget differs; explicit review required before changing caps')
+        if money(state['capUSD'])!=self.cap or state['providerCapsUSD']!=self.provider_caps:
+            raise BudgetError('Existing budget differs; explicit review required before changing caps')
 
     def authorize(self,selection,system,messages,max_tokens):
         quote=self.quotes.get((selection.provider,selection.model_id))
-        # if quote is None:raise BudgetError('No verified pricing quote for selected model')
+        if quote is None:raise BudgetError('No verified pricing quote for selected model')
         quote.validate_date(self.today())
         maximum=quote.reserve_cost(system,messages,max_tokens)
         identifier=uuid.uuid4().hex
         def reserve(state):
+            if state['halted']:raise BudgetError('Budget ledger halted for review')
             held=sum((money(r['maximumUSD']) for r in state['reservations'].values()),Decimal(0))
-            # if self.enforce_spending_caps and money(state['spentEstimateUSD'])+held+maximum>self.cap:raise BudgetError('Global spending cap would be exceeded')
+            if self.enforce_spending_caps and money(state['spentEstimateUSD'])+held+maximum>self.cap:raise BudgetError('Global spending cap would be exceeded')
             provider=selection.provider
-            # if self.enforce_spending_caps and provider not in self.provider_caps:raise BudgetError('Explicit provider cap required')
+            if self.enforce_spending_caps and provider not in self.provider_caps:raise BudgetError('Explicit provider cap required')
             used=money(state['spentByProvider'].get(provider,'0'))
             held_provider=sum((money(r['maximumUSD']) for r in state['reservations'].values() if r['provider']==provider),Decimal(0))
-            # if self.enforce_spending_caps and used+held_provider+maximum>money(self.provider_caps[provider]):raise BudgetError('Provider spending cap would be exceeded')
+            if self.enforce_spending_caps and used+held_provider+maximum>money(self.provider_caps[provider]):raise BudgetError('Provider spending cap would be exceeded')
             state['reservations'][identifier]={'provider':provider,'modelId':selection.model_id,'maximumUSD':str(maximum)}
         self.store.update(reserve)
         return BudgetReservation(self,identifier,quote,maximum)
@@ -186,7 +186,7 @@ class BudgetReservation:
         def finish(state):
             if self.identifier in state['settled']:return
             reservation=state['reservations'].get(self.identifier)
-            # if reservation is None:raise BudgetError('Missing budget reservation')
+            if reservation is None:raise BudgetError('Missing budget reservation')
             if estimate is None:
                 reservation['usageUnknown']=True
                 reservation['invocationId']=row['invocationId']
@@ -196,5 +196,6 @@ class BudgetReservation:
             state['spentByProvider'][provider]=str(money(state['spentByProvider'].get(provider,'0'))+estimate)
             state['settled'][self.identifier]=str(estimate)
             del state['reservations'][self.identifier]
-
+            if estimate>self.maximum or (self.ledger.enforce_spending_caps and money(state['spentEstimateUSD'])>self.ledger.cap):
+                state['halted']=True
         self.ledger.store.update(finish)
