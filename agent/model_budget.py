@@ -138,7 +138,10 @@ class BudgetLedger:
         initial={'schemaVersion':1,'capUSD':str(self.cap),'providerCapsUSD':self.provider_caps,
                  'spentEstimateUSD':'0','spentByProvider':{},'reservations':{},'settled':{},'halted':False}
         state=store.initialize(initial)
-        if money(state['capUSD'])!=self.cap or state['providerCapsUSD']!=self.provider_caps:
+        if self.enforce_spending_caps and (
+            money(state['capUSD']) != self.cap
+            or state['providerCapsUSD'] != self.provider_caps
+        ):
             raise BudgetError('Existing budget differs; explicit review required before changing caps')
 
     def authorize(self,selection,system,messages,max_tokens):
