@@ -7,7 +7,6 @@ from datetime import datetime,timezone
 from google_transport import GoogleTransport,GoogleTransportError
 from model_configuration import ModelConfiguration, ALIBABA_MODELS   # ALIBABA_MODELS: one list, defined in model_configuration
 import logging
-import httpx2
 
 ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
 # Request timeouts. A planner reply can be up to 8000 tokens, which takes longer than the old 90 s on a large trip.
