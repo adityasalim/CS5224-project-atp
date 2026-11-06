@@ -6,6 +6,7 @@ import json,time,uuid,hashlib,os
 from datetime import datetime,timezone
 from google_transport import GoogleTransport,GoogleTransportError
 from model_configuration import ModelConfiguration, ALIBABA_MODELS   # ALIBABA_MODELS: one list, defined in model_configuration
+import logging
 
 ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
 # Request timeouts. A planner reply can be up to 8000 tokens, which takes longer than the old 90 s on a large trip.
@@ -164,6 +165,18 @@ class ModelAdapter:
                     '_adapter':row}
         except Exception as error:
             if isinstance(error,GoogleTransportError) and error.usage:
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    "Model request failed: provider=%s model=%s "
+                    "role=%s latency=%.1fs error=%s cause=%r",
+                    selected.provider,
+                    selected.model_id,
+                    role,
+                    time.monotonic() - start,
+                    type(error).__name__,
+                    error.__cause__ or error.__context__,
+                    exc_info=True,
+                )
                 row.update({k:v for k,v in error.usage.items() if k in row})
             detail=getattr(error,'response',{}).get('Error',{}) if isinstance(getattr(error,'response',None),dict) else {}
             # Keep the kind of our own errors (EmptyModelOutput, MissingTokenUsage, ...); name the class for provider errors.
