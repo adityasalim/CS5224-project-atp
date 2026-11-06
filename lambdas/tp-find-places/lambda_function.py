@@ -1,9 +1,10 @@
 """
 tp-find-places — Lambda tool: find attractions, restaurants and cafes near a city or point
-using OpenStreetMap Overpass (cached), with Google Places as a fallback.
+using OpenStreetMap Overpass (cached), with Amazon Location and Google Places as fallbacks.
 
-Fallback chain: Overpass (main, then mirror) -> Amazon Location Places -> Google Places
-(if GOOGLE_MAPS_KEY in secret) -> mock. The whole chain is bounded by TIME_BUDGET_SECONDS (default 40),
+Fallback chain: Overpass (main, then mirror; one query per group of categories) -> Amazon Location Places
+-> Google Places (if GOOGLE_MAPS_KEY in secret) -> mock. Categories that Overpass returns too few places
+for are topped up from Amazon Location. The whole chain is bounded by TIME_BUDGET_SECONDS (default 45),
 so the tool always answers before the 60 s Lambda timeout.
 
 Environment variables:
@@ -11,17 +12,19 @@ Environment variables:
   CACHE_TABLE  DynamoDB cache table (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = sample data only (default "true")
   CONTACT_EMAIL  optional; added to the User-Agent as Overpass etiquette asks
+  TIME_BUDGET_SECONDS  default 45
   CACHE_TTL_SECONDS  default 604800 (7 days);  POOL_TTL_SECONDS  default 86400 (24 h)
 
 Input event:
   {"city": "Tokyo", "categories": ["temple", "museum", "restaurant", "climbing", "hiking"],
-   "keywords": ["bouldering gym", "day hike"], "radiusKm": 4, "cuisine": "japanese", "maxPerCategory": 8}
+   "keywords": ["bouldering gym", "day hike"], "radiusKm": 6, "cuisine": "japanese", "maxPerCategory": 20}
   ("lat" and "lng" can be given instead of "city".)
   - categories: fixed place types (see CATEGORY_TAGS). Unknown words are treated as keywords.
-  - keywords: free-text activities for anything else; searched with Amazon Location / Google text search
-    and returned with category "activity" and "activity": <keyword>.
-  - radius: city categories use up to 15 km, food 1.5 km, outdoor categories and keywords up to 50 km
-    (good for day trips such as hiking outside the city).
+  - keywords: free-text activities (up to 8) for anything else; searched with Amazon Location / Google text
+    search and returned with category "activity" and "activity": <keyword>.
+  - maxPerCategory: places kept per category (1-40, default 8).
+  - radius: city categories use up to 15 km, food 5 km (foodRadiusKm, 1-15), outdoor categories and keywords
+    up to 50 km (good for day trips such as hiking outside the city).
   Personalisation (all optional):
   - vibe: "classic" (famous sights first), "balanced" (default, mix), "hidden_gems" (lesser-known local places first)
   - dietary: ["vegetarian", "vegan", "halal", "kosher", "gluten_free"] -> food places tagged with it first,
@@ -36,6 +39,7 @@ Input event:
     never filtered out by the preferences above. Names that cannot be found are listed in "notFound".
   Each place returns "tags" (e.g. "wheelchair", "vegetarian", "free entry", "indoor", "family", "well-known",
   "local pick"), "matches" (which requested preferences it meets) and a short "description" when known.
+  The result also has "counts": {"raw": {category: n}, "returned": {category: n}} and "warnings".
 """
 import hashlib
 import json
@@ -52,10 +56,13 @@ from botocore.config import Config
 
 # Whole-tool time budget (seconds). Keep well under the Lambda timeout (60 s) so the tool
 # always answers, falling back to the next source instead of timing out.
-TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_SECONDS", "40"))
+TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_SECONDS", "45"))
 OVERPASS_TIMEOUT_S = 18          # per Overpass request
-OVERPASS_SHARE_S = 24            # Overpass may use at most this much of the budget
-FOOD_RADIUS_KM = 1.5             # restaurants/cafes/bars are dense in cities; search closer in
+OVERPASS_SHARE_S = 32            # Overpass may use at most this much of the budget
+FOOD_RADIUS_KM = 5               # food search radius for every city (override per call with foodRadiusKm)
+MAX_PER_CATEGORY = 40
+MAX_KEYWORDS = 8
+OVERPASS_MIN_CAP, OVERPASS_MAX_CAP = 300, 1000   # elements returned per Overpass query
 _GEO_CFG = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 2})
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
@@ -102,6 +109,7 @@ DIET_TAG = {"vegetarian": "diet:vegetarian", "vegan": "diet:vegan", "halal": "di
             "gluten_free": "diet:gluten_free"}
 OUTDOOR = {"climbing", "hiking", "nature", "onsen", "beach"}
 CITY_MAX_KM, OUTDOOR_MAX_KM = 15, 50
+DIET_SEARCH_MAX_M = 15000        # the wider search for diet-tagged places
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osaka": (34.6937, 135.5023),
                 "singapore": (1.2903, 103.8520), "seoul": (37.5665, 126.9780), "bangkok": (13.7563, 100.5018),
                 "bali": (-8.6500, 115.2167), "hong kong": (22.3193, 114.1694), "taipei": (25.0330, 121.5654),
@@ -120,6 +128,7 @@ KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osa
 
 _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
+_warnings = []   # non-fatal problems of the current call (reset at the start of every invocation)
 
 
 # ---------------------------------------------------------------- helpers
@@ -186,7 +195,7 @@ def _validate(event):
     cats = [c for c in raw if c in CATEGORY_TAGS]
     # Anything that isn't a known category becomes a free-text keyword ("bouldering", "kayaking", ...)
     kws = [c for c in raw if c not in CATEGORY_TAGS] + [str(k).strip() for k in (event.get("keywords") or [])]
-    kws = list(dict.fromkeys(re.sub(r"[^\w\s&'-]", "", k)[:40].strip().lower() for k in kws if k))[:5]
+    kws = list(dict.fromkeys(re.sub(r"[^\w\s&'-]", "", k)[:40].strip().lower() for k in kws if k))[:MAX_KEYWORDS]
     kws = [k for k in kws if k]
     names = list(dict.fromkeys(re.sub(r"[^\w\s&'.,()-]", "", str(n))[:60].strip()
                                for n in (event.get("names") or []) if str(n).strip()))[:6]
@@ -228,17 +237,26 @@ def _validate(event):
         cats = [c for c in cats if c not in ADULT_ONLY]
     if prefs["dietary"] and any(c in ("restaurant", "cafe") for c in cats):
         # text search providers find diet-specific places by name/description
-        kws = (kws + [f'{prefs["dietary"][0].replace("_", " ")} restaurant'])[:5]
+        kws = (kws + [f'{prefs["dietary"][0].replace("_", " ")} restaurant'])[:MAX_KEYWORDS]
+    try:
+        food_radius = min(max(float(event.get("foodRadiusKm", FOOD_RADIUS_KM)), 1.0), 15.0)
+    except (TypeError, ValueError):
+        food_radius = float(FOOD_RADIUS_KM)
+    try:
+        per_cat = min(max(int(event.get("maxPerCategory", 8)), 1), MAX_PER_CATEGORY)
+    except (TypeError, ValueError):
+        per_cat = 8
     return {"lat": round(lat, 4), "lng": round(lng, 4), "categories": cats, "keywords": kws,
             "radiusKm": min(max(float(event.get("radiusKm", 4)), 0.5), OUTDOOR_MAX_KM), "cuisine": cuisine or None,
-            "maxPerCategory": min(max(int(event.get("maxPerCategory", 8)), 1), 20), "prefs": prefs,
+            "foodRadiusKm": food_radius,
+            "maxPerCategory": per_cat, "prefs": prefs,
             "names": names}, None
 
 
 def _radius_km(cat, q):
-    """Search radius per category: food close by, city sights within 15 km, outdoors/keywords up to 50 km."""
+    """Search radius per category: food 5 km, city sights within 15 km, outdoors/keywords up to 50 km."""
     if cat in FOOD:
-        return min(q["radiusKm"], FOOD_RADIUS_KM)
+        return q.get("foodRadiusKm", FOOD_RADIUS_KM)
     if cat in ("hiking", "nature"):
         return min(max(q["radiusKm"], 40.0), OUTDOOR_MAX_KM)     # trails are usually outside the city
     if cat in OUTDOOR or cat.startswith("kw:"):
@@ -247,7 +265,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v2:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -313,13 +331,14 @@ def _place(pid, name, cat, lat, lng, q, hours_raw=None, simple=None, cuisine=Non
             "url": url, "mapsUrl": f"https://www.google.com/maps/search/?api=1&query={lat},{lng}"}
 
 
+def _dupe_key(p):
+    return (str(p.get("name", "")).lower(), round(p.get("lat") or 0, 3), round(p.get("lng") or 0, 3))
+
+
 # ---------------------------------------------------------------- providers
-def _overpass(q, deadline):
-    deadline = min(deadline, time.time() + OVERPASS_SHARE_S)   # leave time for the fallbacks
-    if not q["categories"]:
-        return [], None
+def _overpass_query(cats, q, cap):
     parts = []
-    for cat in q["categories"]:
+    for cat in cats:
         r = int(_radius_km(cat, q) * 1000)
         for tag in CATEGORY_TAGS[cat]:
             extra = f'["cuisine"~"{q["cuisine"]}",i]' if (q["cuisine"] and cat == "restaurant") else ""
@@ -327,11 +346,12 @@ def _overpass(q, deadline):
             if cat in ("restaurant", "cafe"):
                 for diet in q.get("prefs", {}).get("dietary", []):   # rarer, so look 4x further out
                     parts.append(f'nwr{tag}["{DIET_TAG[diet]}"~"yes|only"]["name"]'
-                                 f'(around:{min(r * 4, 6000)},{q["lat"]},{q["lng"]});')
-    query = f'[out:json][timeout:{OVERPASS_TIMEOUT_S - 3}];({"".join(parts)});out center tags 300;'
-    ua = "tp-group10-travel-planner/0.1 (academic prototype"
-    ua += f"; {os.environ['CONTACT_EMAIL']})" if os.environ.get("CONTACT_EMAIL") else ")"
+                                 f'(around:{min(r * 4, DIET_SEARCH_MAX_M)},{q["lat"]},{q["lng"]});')
+    return f'[out:json][timeout:{OVERPASS_TIMEOUT_S - 3}];({"".join(parts)});out center tags {cap};'
 
+
+def _overpass_request(query, deadline, ua):
+    """One Overpass query: main server, then mirror. Returns (elements, error)."""
     last = "not tried"
     for url in OVERPASS_URLS:          # main server, then mirror; no retries on the same server
         left = deadline - time.time()
@@ -357,8 +377,42 @@ def _overpass(q, deadline):
         if data.get("remark") and not data.get("elements"):
             last = f"overpass remark: {data['remark'][:120]}"
             continue
-        return _parse_overpass(data.get("elements", []), q), None
+        return data.get("elements", []), None
     return None, f"overpass {last}"
+
+
+def _overpass(q, deadline):
+    """One query per group (sights, outdoor, and each food category) so that a dense category such as
+    restaurants cannot use up the element limit of the others."""
+    deadline = min(deadline, time.time() + OVERPASS_SHARE_S)   # leave time for the fallbacks
+    if not q["categories"]:
+        return [], None
+    cats = q["categories"]
+    sights = [c for c in cats if c not in FOOD and c not in OUTDOOR]
+    outdoor = [c for c in cats if c in OUTDOOR]
+    groups = [g for g in (sights, outdoor) if g] + [[c] for c in cats if c in FOOD]
+    ua = "tp-group10-travel-planner/0.1 (academic prototype"
+    ua += f"; {os.environ['CONTACT_EMAIL']})" if os.environ.get("CONTACT_EMAIL") else ")"
+
+    out, seen_ids, ok_groups, last_err = [], set(), 0, None
+    for group in groups:
+        if deadline - time.time() < 8:
+            _warnings.append(f"overpass: time budget used up before {'/'.join(group)}")
+            continue
+        cap = min(OVERPASS_MAX_CAP, max(OVERPASS_MIN_CAP, q["maxPerCategory"] * len(group) * 10))
+        elements, err = _overpass_request(_overpass_query(group, q, cap), deadline, ua)
+        if err:
+            last_err = err
+            _warnings.append(f"overpass failed for {'/'.join(group)}: {err}")
+            continue
+        ok_groups += 1
+        for p in _parse_overpass(elements, {**q, "categories": group}):
+            if p["placeId"] not in seen_ids:
+                seen_ids.add(p["placeId"])
+                out.append(p)
+    if ok_groups == 0:
+        return None, last_err or "overpass: no group could be searched"
+    return out, None
 
 
 def _category_of(tags, wanted):
@@ -470,7 +524,7 @@ def _google(q, deadline=None):
     for cat, text, radius_km, kw in _text_targets(q):
         if deadline and deadline - time.time() < 5:
             break
-        body = {"textQuery": text, "maxResultCount": q["maxPerCategory"],
+        body = {"textQuery": text, "maxResultCount": min(q["maxPerCategory"], 20),
                 "locationBias": {"circle": {"center": {"latitude": q["lat"], "longitude": q["lng"]},
                                             "radius": min(radius_km, 50) * 1000}}}
         try:
@@ -641,8 +695,17 @@ def _rank(places, q):
     return out
 
 
+def _count_by_category(places):
+    counts = {}
+    for p in places:
+        key = p.get("category") or "unknown"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    del _warnings[:]
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})
@@ -687,6 +750,20 @@ def lambda_handler(event, context):
                 sources.append(provider.__name__.strip("_"))
                 break
             attempts.append(f"{provider.__name__.strip('_')} returned no results")
+        # Overpass is free and detailed but thin in some places: top up short categories from Amazon Location
+        if "overpass" in sources and deadline - time.time() > 8:
+            have = _count_by_category(places)
+            short = [c for c in q["categories"] if have.get(c, 0) < q["maxPerCategory"]]
+            if short:
+                extra_found, err = _amazon_location({**q, "categories": short, "keywords": []}, deadline)
+                if err:
+                    _warnings.append("top-up: " + err)
+                elif extra_found:
+                    seen = {_dupe_key(p) for p in places}
+                    added = [p for p in extra_found if _dupe_key(p) not in seen]
+                    if added:
+                        places += added
+                        sources.append("amazon_location-topup")
     if q["keywords"]:   # free-text activities need a text search (Overpass can't do that)
         qk = {**q, "categories": []}
         for provider in (_amazon_location, _google):
@@ -704,14 +781,19 @@ def lambda_handler(event, context):
                 break
 
     if places:
+        raw_counts = _count_by_category(places)
         places = _rank(places, q)
+        counts = {"raw": raw_counts, "returned": _count_by_category(places)}
+        print(json.dumps({"stage": "places", "sources": sources, "radiusKm": q["radiusKm"],
+                          "foodRadiusKm": q["foodRadiusKm"], "maxPerCategory": q["maxPerCategory"], **counts}))
         attribution = []
         if "overpass" in sources:
             attribution.append("Place data © OpenStreetMap contributors")
         if any(s_.startswith("amazon_location") for s_ in sources):
             attribution.append("Place data © Amazon Location Service / HERE")
-        result = {"ok": True, "source": "+".join(sources), "query": q, "places": places,
-                  "fallbacksTried": attempts, "attribution": "; ".join(attribution) or None}
+        result = {"ok": True, "source": "+".join(sources), "query": q, "places": places, "counts": counts,
+                  "warnings": list(_warnings), "fallbacksTried": attempts,
+                  "attribution": "; ".join(attribution) or None}
         missing = [k for k in q["keywords"] if not any(p.get("activity") == k for p in places)]
         if missing:
             result["note"] = f"No places found for: {', '.join(missing)}."
@@ -721,5 +803,6 @@ def lambda_handler(event, context):
 
     places = named + _rank(_mock(q), q)
     _pool_put(places)
-    return {"ok": True, "source": "mock-fallback", "query": q, "places": places, "fallbacksTried": attempts, **extra,
+    return {"ok": True, "source": "mock-fallback", "query": q, "places": places, "fallbacksTried": attempts,
+            "warnings": list(_warnings), **extra,
             "note": "Live providers failed; showing mock data. Tell the user these are not real places."}
