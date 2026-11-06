@@ -139,6 +139,11 @@ class ModelAdapter:
                 # GLM's minimal request is the currently verified compatible shape.
                 if 'enableThinking' in selected.options:kwargs['extra_body']={'enable_thinking':selected.options['enableThinking']}
                 if 'reasoningEffort' in selected.options:kwargs['reasoning_effort']=selected.options['reasoningEffort']
+                logging.getLogger(__name__).warning(
+                    "Alibaba request diagnostics: model=%s timeout=%s",
+                    selected.model_id,
+                    getattr(client, "timeout", None),
+                )
                 result=client.chat.completions.create(**kwargs)
                 text=result.choices[0].message.content or ''
                 usage=result.usage
