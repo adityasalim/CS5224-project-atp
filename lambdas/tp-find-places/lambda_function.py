@@ -2,10 +2,10 @@
 tp-find-places — Lambda tool: find attractions, restaurants and cafes near a city or point
 using OpenStreetMap Overpass (cached), with Amazon Location and Google Places as fallbacks.
 
-Fallback chain: Overpass (main, then mirror; one query per group of categories) -> Amazon Location Places
--> Google Places (if GOOGLE_MAPS_KEY in secret) -> mock. Categories that Overpass returns too few places
-for are topped up from Amazon Location. The whole chain is bounded by TIME_BUDGET_SECONDS (default 45),
-so the tool always answers before the 60 s Lambda timeout.
+Fallback chain: Overpass (one request for all categories; if that fails, the categories in groups, restaurants
+and cafes first) -> Amazon Location Places -> Google Places (if GOOGLE_MAPS_KEY in secret) -> mock. Categories
+that Overpass returns too few places for are topped up from Amazon Location. The whole chain is bounded by
+TIME_BUDGET_SECONDS (default 45), so the tool always answers before the 60 s Lambda timeout.
 
 Environment variables:
   SECRET_ARN   secret with optional {"GOOGLE_MAPS_KEY": "..."}
@@ -38,7 +38,9 @@ Input event:
     (up to 6). Each found one is returned first with "requested": <name> and tag "requested by user"; it is
     never filtered out by the preferences above. Names that cannot be found are listed in "notFound".
   Each place returns "tags" (e.g. "wheelchair", "vegetarian", "free entry", "indoor", "family", "well-known",
-  "local pick"), "matches" (which requested preferences it meets) and a short "description" when known.
+  "local pick"), "matches" (which requested preferences it meets) and a short description when known.
+  openSimple is one open/close window: when the opening hours differ by day or have a break, it is the widest
+  window (so a place is never wrongly shown as closed); the raw text is kept in openingHours.
   The result also has "counts": {"raw": {category: n}, "returned": {category: n}} and "warnings".
 """
 import hashlib
@@ -57,12 +59,14 @@ from botocore.config import Config
 # Whole-tool time budget (seconds). Keep well under the Lambda timeout (60 s) so the tool
 # always answers, falling back to the next source instead of timing out.
 TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_SECONDS", "45"))
-OVERPASS_TIMEOUT_S = 18          # per Overpass request
-OVERPASS_SHARE_S = 32            # Overpass may use at most this much of the budget
+OVERPASS_TIMEOUT_S = 26          # per Overpass request (one request now covers all categories)
+OVERPASS_SHARE_S = 34            # Overpass may use at most this much of the budget
 FOOD_RADIUS_KM = 5               # food search radius for every city (override per call with foodRadiusKm)
 MAX_PER_CATEGORY = 40
 MAX_KEYWORDS = 8
-OVERPASS_MIN_CAP, OVERPASS_MAX_CAP = 300, 1000   # elements returned per Overpass query
+OVERPASS_MIN_CAP, OVERPASS_MAX_CAP = 200, 600    # elements returned per category (output statement)
+OVERPASS_NOTABLE_CAP = 100       # well-known places (with a wikidata tag) per category, listed first
+OVERPASS_DIET_CAP = 200          # diet-tagged food places per category
 _GEO_CFG = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 2})
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
@@ -174,20 +178,50 @@ def _km(lat1, lng1, lat2, lng2):
     return 2 * r * math.asin(math.sqrt(a))
 
 
+# One time range, in 24-hour form ("09:00-17:00", "9:00-17:30") or with AM/PM and an en dash as Google writes
+# it ("9:00 AM – 5:00 PM", possibly with narrow no-break spaces).
+_TIME_RANGE = re.compile(
+    r"(\d{1,2}):(\d{2})[\s\u202f\u00a0]*([AaPp][Mm])?[\s\u202f\u00a0]*[-\u2013\u2014][\s\u202f\u00a0]*"
+    r"(\d{1,2}):(\d{2})[\s\u202f\u00a0]*([AaPp][Mm])?")
+
+
+def _clock_minutes(h, m, ap):
+    """Minutes after midnight, or None when the clock time is not valid."""
+    h, m = int(h), int(m)
+    if m > 59:
+        return None
+    if ap:
+        if not 1 <= h <= 12:
+            return None
+        return ((h % 12) + (12 if ap.upper() == "PM" else 0)) * 60 + m
+    if h == 24 and m == 0:
+        return 24 * 60
+    return h * 60 + m if h < 24 else None
+
+
 def _simple_hours(raw):
-    """Very rough parse of an OSM opening_hours string into one daily open/close window.
-    Returns None when unknown. Good enough for sequencing; the raw string is kept too."""
+    """Parse an opening-hours text (OpenStreetMap or Google) into ONE daily open/close window.
+    Every time range in the text is read; with split hours (a lunch break) or different hours on different
+    days the widest window is returned, so a place is never wrongly shown as closed. The raw text is kept
+    separately. Returns None when no time range is found."""
     if not raw:
         return None
-    if raw.strip() == "24/7":
+    text = str(raw)
+    if text.strip() == "24/7" or re.search(r"open\s+24\s+hours", text, re.I):
         return {"open": "00:00", "close": "23:59"}
-    m = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", raw)
-    if not m:
+    spans = []
+    for m in _TIME_RANGE.finditer(text):
+        o = _clock_minutes(m.group(1), m.group(2), m.group(3))
+        c = _clock_minutes(m.group(4), m.group(5), m.group(6))
+        if o is None or c is None or o >= 24 * 60:
+            continue
+        if c <= o or c >= 24 * 60:      # past midnight (or 24:00) -> clamp to the end of the day
+            c = 24 * 60 - 1
+        spans.append((o, c))
+    if not spans:
         return None
-    oh, om, ch, cm = map(int, m.groups())
-    if ch >= 24 or (ch * 60 + cm) <= (oh * 60 + om):  # past midnight -> clamp to end of day
-        ch, cm = 23, 59
-    return {"open": f"{oh:02d}:{om:02d}", "close": f"{ch:02d}:{cm:02d}"}
+    o, c = min(s[0] for s in spans), max(s[1] for s in spans)
+    return {"open": f"{o // 60:02d}:{o % 60:02d}", "close": f"{c // 60:02d}:{c % 60:02d}"}
 
 
 def _validate(event):
@@ -265,7 +299,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places-v2:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v3:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -337,17 +371,27 @@ def _dupe_key(p):
 
 # ---------------------------------------------------------------- providers
 def _overpass_query(cats, q, cap):
-    parts = []
-    for cat in cats:
+    """One Overpass request with several output statements. For every category the well-known places (those
+    with a wikidata tag) are listed first with their own limit, then the other places up to `cap`, so a dense
+    category cannot push the famous ones out. Diet-tagged food places get their own, wider search."""
+    lat, lng = q["lat"], q["lng"]
+    blocks = []
+    for n, cat in enumerate(cats):
         r = int(_radius_km(cat, q) * 1000)
+        base, notable, diet = [], [], []
         for tag in CATEGORY_TAGS[cat]:
             extra = f'["cuisine"~"{q["cuisine"]}",i]' if (q["cuisine"] and cat == "restaurant") else ""
-            parts.append(f'nwr{tag}{extra}["name"](around:{r},{q["lat"]},{q["lng"]});')
+            base.append(f'nwr{tag}{extra}["name"](around:{r},{lat},{lng});')
+            notable.append(f'nwr{tag}{extra}["name"]["wikidata"](around:{r},{lat},{lng});')
             if cat in ("restaurant", "cafe"):
-                for diet in q.get("prefs", {}).get("dietary", []):   # rarer, so look 4x further out
-                    parts.append(f'nwr{tag}["{DIET_TAG[diet]}"~"yes|only"]["name"]'
-                                 f'(around:{min(r * 4, DIET_SEARCH_MAX_M)},{q["lat"]},{q["lng"]});')
-    return f'[out:json][timeout:{OVERPASS_TIMEOUT_S - 3}];({"".join(parts)});out center tags {cap};'
+                for d in q.get("prefs", {}).get("dietary", []):   # rarer, so look 4x further out
+                    diet.append(f'nwr{tag}["{DIET_TAG[d]}"~"yes|only"]["name"]'
+                                f'(around:{min(r * 4, DIET_SEARCH_MAX_M)},{lat},{lng});')
+        blocks.append(f'({"".join(notable)})->.w{n};.w{n} out center tags {OVERPASS_NOTABLE_CAP};')
+        blocks.append(f'({"".join(base)})->.b{n};.b{n} out center tags {cap};')
+        if diet:
+            blocks.append(f'({"".join(diet)})->.d{n};.d{n} out center tags {OVERPASS_DIET_CAP};')
+    return f'[out:json][timeout:{OVERPASS_TIMEOUT_S - 3}];' + "".join(blocks)
 
 
 def _overpass_request(query, deadline, ua):
@@ -381,29 +425,41 @@ def _overpass_request(query, deadline, ua):
     return None, f"overpass {last}"
 
 
+def _overpass_groups(cats):
+    """Category groups for the fallback, most important first: restaurants and cafes, then sights, then
+    outdoor places, then the other food categories."""
+    food_first = [c for c in ("restaurant", "cafe") if c in cats]
+    sights = [c for c in cats if c not in FOOD and c not in OUTDOOR]
+    outdoor = [c for c in cats if c in OUTDOOR]
+    other_food = [c for c in cats if c in FOOD and c not in ("restaurant", "cafe")]
+    return [g for g in (food_first, sights, outdoor, other_food) if g]
+
+
 def _overpass(q, deadline):
-    """One query per group (sights, outdoor, and each food category) so that a dense category such as
-    restaurants cannot use up the element limit of the others."""
+    """All categories in ONE request (each category has its own output limit). If that request fails, the
+    categories are searched in groups, restaurants and cafes first, with the time that is left."""
     deadline = min(deadline, time.time() + OVERPASS_SHARE_S)   # leave time for the fallbacks
     if not q["categories"]:
         return [], None
     cats = q["categories"]
-    sights = [c for c in cats if c not in FOOD and c not in OUTDOOR]
-    outdoor = [c for c in cats if c in OUTDOOR]
-    groups = [g for g in (sights, outdoor) if g] + [[c] for c in cats if c in FOOD]
+    cap = min(OVERPASS_MAX_CAP, max(OVERPASS_MIN_CAP, q["maxPerCategory"] * 10))
     ua = "tp-group10-travel-planner/0.1 (academic prototype"
     ua += f"; {os.environ['CONTACT_EMAIL']})" if os.environ.get("CONTACT_EMAIL") else ")"
 
-    out, seen_ids, ok_groups, last_err = [], set(), 0, None
-    for group in groups:
+    elements, err = _overpass_request(_overpass_query(cats, q, cap), deadline, ua)
+    if not err:
+        return _parse_overpass(elements, q), None
+
+    _warnings.append(f"overpass: one request for all categories failed ({err}); trying category groups")
+    out, seen_ids, ok_groups, last_err = [], set(), 0, err
+    for group in _overpass_groups(cats):
         if deadline - time.time() < 8:
             _warnings.append(f"overpass: time budget used up before {'/'.join(group)}")
             continue
-        cap = min(OVERPASS_MAX_CAP, max(OVERPASS_MIN_CAP, q["maxPerCategory"] * len(group) * 10))
-        elements, err = _overpass_request(_overpass_query(group, q, cap), deadline, ua)
-        if err:
-            last_err = err
-            _warnings.append(f"overpass failed for {'/'.join(group)}: {err}")
+        elements, gerr = _overpass_request(_overpass_query(group, q, cap), deadline, ua)
+        if gerr:
+            last_err = gerr
+            _warnings.append(f"overpass failed for {'/'.join(group)}: {gerr}")
             continue
         ok_groups += 1
         for p in _parse_overpass(elements, {**q, "categories": group}):
@@ -435,7 +491,7 @@ def _parse_overpass(elements, q):
         if not name or lat is None or not cat:
             continue
         key = (name.lower(), round(lat, 3), round(lng, 3))
-        if key in seen:
+        if key in seen:                 # the same place can come from the well-known, normal and diet statements
             continue
         seen.add(key)
         osm = f"{el['type']}/{el['id']}"
