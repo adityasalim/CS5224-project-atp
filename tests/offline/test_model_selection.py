@@ -68,8 +68,11 @@ def raises(exc, fn, text=None):
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
 # the approved public combination: Qwen and DeepSeek think; Kimi reviews at medium effort, evaluates at low
-assert (S["planner"].provider, S["planner"].model_id, S["planner"].options) == ("alibaba", "qwen3.8-max-0902", {"enableThinking": True})
-assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash", {"enableThinking": True})
+assert (S["planner"].provider, S["planner"].model_id, S["planner"].options) == (
+    "alibaba",
+    "qwen3.8-max-0902",
+    {"enableThinking": True, "reasoningEffort": "medium"}
+)assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash", {"enableThinking": True, "reasoningEffort": "medium"})
 assert (S["reviewer"].provider, S["reviewer"].model_id, S["reviewer"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "medium"})
 assert (S["independent_evaluator"].provider, S["independent_evaluator"].model_id, S["independent_evaluator"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "low"})
 print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
