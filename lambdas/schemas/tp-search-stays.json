@@ -1,6 +1,6 @@
 {
   "name": "search_stays",
-  "description": "Search places to stay for given dates and return options with stayId, name, star rating, review score, style (hotel, ryokan, boutique, hostel, apartment, guesthouse, resort, cabin, capsule), 'matches', location and the total price in SGD for the whole stay. Turn the traveller's wishes into filters: the kind of place, the area, comfort level and what to optimise. Filters that would leave nothing are relaxed and noted in 'filterNote'. For multi-city trips call once per city with that city's dates.",
+  "description": "Search places to stay for given dates and return options with stayId, name, star rating, review score, review count (when known), distanceKm from the search centre, a ranking score, style (hotel, ryokan, boutique, hostel, apartment, guesthouse, resort, cabin, capsule), 'matches', location and the total price in SGD for the whole stay. Results are ranked by location, reviews, stars and price and spread over different areas and price levels. Turn the traveller's wishes into filters: the kind of place, the area, comfort level and what to optimise. Filters that would leave too few hotels are relaxed and noted in 'filterNote'. For multi-city trips call once per city with that city's dates.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -37,11 +37,11 @@
       },
       "minStars": {
         "type": "number",
-        "description": "Minimum star rating 0-5. Honeymoon, anniversary or 'luxury' -> 4 or 5; 'comfortable' -> 3."
+        "description": "Minimum star rating 0-5. Honeymoon, anniversary or 'luxury' -> 4 or 5; 'comfortable' -> 3. Applied only if at least minKeep hotels remain; hotels with an unknown rating are kept."
       },
       "minReviewScore": {
         "type": "number",
-        "description": "Minimum guest review score 0-10, e.g. 8.5 for 'well reviewed'."
+        "description": "Minimum guest review score 0-10, e.g. 8.5 for 'well reviewed'. Applied only if at least minKeep hotels remain; hotels with an unknown score are kept."
       },
       "maxPricePerNightSGD": {
         "type": "number",
@@ -49,11 +49,27 @@
       },
       "sortBy": {
         "type": "string",
-        "description": "What to optimise: 'price' (default, cheapest first), 'rating' (best reviewed first, for special occasions or 'best hotel we can afford'), 'value' (cheap AND well rated)."
+        "description": "What to optimise: 'balanced' (default: location, reviews, stars and price), 'price' (cheapest first), 'rating' (best reviewed first, for special occasions or 'best hotel we can afford'), 'value' (cheap AND well rated)."
+      },
+      "comfort": {
+        "type": "number",
+        "description": "Comfort importance 1-10 (default 5). High values weigh reviews and stars more, low values weigh price more in the 'balanced' ranking."
       },
       "radiusKm": {
         "type": "number",
-        "description": "Search radius around the city or point, 1-25 km (default 5). Smaller for a specific neighbourhood."
+        "description": "Search radius around the city or point, 1-25 km (default 8). Smaller for a specific neighbourhood."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Hotels requested from the provider before ranking, 10-200 (default 100). The agent raises it for longer trips."
+      },
+      "maxResults": {
+        "type": "integer",
+        "description": "Hotels returned after ranking, 5-60 (default 30)."
+      },
+      "minKeep": {
+        "type": "integer",
+        "description": "A price, star or review filter is applied only if at least this many hotels remain (default 8); otherwise it is relaxed and noted in filterNote."
       },
       "name": {
         "type": "string",
