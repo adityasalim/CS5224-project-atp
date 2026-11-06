@@ -4,7 +4,7 @@ from pathlib import Path
 
 # The approved website roles. public-model-config.json must name exactly these models, and every Alibaba model
 # here must also be in model_configuration.ALIBABA_MODELS (the configuration is rejected at load otherwise).
-expected=('qwen3.8-max-0902','deepseek-v4.1-flash-1017','global.moonshotai.kimi-k3')
+expected=('qwen3.8-max-0902','deepseek-v4.1-flash','global.moonshotai.kimi-k3')
 APPROVED_EVALUATOR='global.moonshotai.kimi-k3'
 
 def public_adapter(ledger_factory=None,adapter_type=None):
