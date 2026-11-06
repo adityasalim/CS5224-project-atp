@@ -1,4 +1,7 @@
-"""Native trip-currency contracts. Prices are normalized before any trip budget arithmetic."""
+"""Native trip-currency contracts. Prices are normalized before any trip budget arithmetic.
+
+pool_price(row) keeps its legacy contract (float, 0.0 when the price is absent). Budget and ranking code must use
+known_price(row) instead: float, or None when the price is unknown. Unknown is never free."""
 import copy
 import json
 import math
@@ -24,9 +27,13 @@ def amount(value):
 def budget(spec):
     value = spec.get('budget')
     if value is None:
+        if spec.get('budgetSGD') is None:
+            raise ValueError('Trip budget is missing')
         value = {'amount': spec['budgetSGD'], 'currency': 'SGD'}
     if not isinstance(value, dict) or value.get('currency') not in CURRENCIES:
         raise ValueError('Unsupported budget currency')
+    if 'amount' not in value:
+        raise ValueError('Trip budget has no amount')
     return {'amount': str(amount(value['amount'])), 'currency': value['currency']}
 
 def code(spec):
@@ -111,25 +118,61 @@ def normalize_record(record,target,quote):
     out.pop('pricePerNightSGD',None)
     return out
 
-def prepare_pool(spec,pool,daily_estimate=100):
+def prepare_pool(spec, pool, daily_estimate=100):
+    """Normalize priced candidates into the trip currency.
+
+    Unpriced candidates are kept visible and marked priceUnknown (never dropped, never
+    treated as free); per-category unknown counts are stored under pool['_priceUnknown']
+    for metrics. Raises only on budget/FX problems, never on a single unpriced row.
+    """
+    counts = {'flights': 0, 'stays': 0, 'transfers': 0}
     if 'budget' not in spec:
+        for key in counts:                                    # legacy SGD path
+            counts[key] = sum(1 for row in pool.get(key, []) if known_price(row) is None)
+        pool['_priceUnknown'] = counts
         return pool
-    spec['budget']=budget(spec)
+    spec['budget'] = budget(spec)
     target = code(spec)
     quote = spec.get('_fx')
     try:
         validate_quote(quote)
     except ValueError:
-        quote=load_quote(target)
-        spec['_fx']=quote
+        quote = load_quote(target)
+    spec['_fx'] = quote
     validate_quote(quote)
-    spec['dailySpend']={'amount':str(convert(daily_estimate,'SGD',target,quote)), 'currency':target}
-    for key in ('flights','stays','transfers'):
-        pool[key]=[normalize_record(row,target,quote) for row in pool.get(key,[])]
+    spec['dailySpend'] = {'amount': str(convert(daily_estimate, 'SGD', target, quote)), 'currency': target}
+    for key in counts:
+        normalized = []
+        for row in pool.get(key, []):
+            try:
+                normalized.append(normalize_record(row, target, quote))
+            except ValueError:
+                normalized.append({**row, 'priceUnknown': True} if isinstance(row, dict) else row)
+                counts[key] += 1
+        pool[key] = normalized
+    pool['_priceUnknown'] = counts
     return pool
 
 def pool_price(row):
     return float(amount(row['price']['amount'])) if isinstance(row.get('price'),dict) else float(row.get('priceTotalSGD') or 0)
+
+
+def known_price(row):
+    """Known non-negative price as a float, else None. Missing or invalid is unknown, never zero.
+
+    Reads the normalized 'price' dict first, then legacy priceTotalSGD only when the key
+    exists. An explicit stored 0 is returned as 0.0; absence returns None.
+    """
+    if not isinstance(row, dict):
+        return None
+    try:
+        if isinstance(row.get('price'), dict):
+            return float(amount(row['price'].get('amount')))
+        if row.get('priceTotalSGD') is not None:
+            return float(amount(row['priceTotalSGD']))
+    except ValueError:
+        return None
+    return None
 
 def daily(spec,legacy=100):
     return float(amount(spec['dailySpend']['amount'])) if 'budget' in spec else legacy
@@ -137,11 +180,33 @@ def daily(spec,legacy=100):
 def money_text(spec,value):
     return f'{code(spec)} {float(value):,.2f}'
 
-def normalize_cached_pool(spec,pool):
+def normalize_cached_pool(spec, pool):
+    """Normalize cached candidate rows to the trip currency.
+
+    Backward compatible: accepts the standard pool shape (dict of candidate lists) as
+    well as a flat mapping of individual rows; reads the FX quote from 'fxQuote'
+    (legacy key) or '_fx' (current key); rows without a verifiable price pass through
+    unchanged instead of raising.
+    """
     if 'budget' not in spec:
         return pool
-    quote=spec['fxQuote']
+    quote = spec.get('fxQuote') or spec.get('_fx')
     validate_quote(quote)
-    target=code(spec)
-    return {key: normalize_record(row,target,quote) if row.get('kind') in ('flight','stay','transfer') or row.get('priceTotalSGD') is not None or row.get('priceTotal') is not None else row
-            for key,row in pool.items()}
+    target = code(spec)
+
+    def norm(row):
+        if not isinstance(row, dict):
+            return row
+        if (row.get('priceTotalSGD') is None and row.get('priceTotal') is None
+                and not isinstance(row.get('sourcePrice'), dict)
+                and not isinstance(row.get('price'), dict)):
+            return row
+        try:
+            return normalize_record(row, target, quote)
+        except ValueError:
+            return row
+
+    if any(isinstance(v, list) for v in pool.values()):
+        return {key: ([norm(r) for r in rows] if isinstance(rows, list) else rows)
+                for key, rows in pool.items()}
+    return {key: norm(row) for key, row in pool.items()}
