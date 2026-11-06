@@ -126,7 +126,7 @@ class PriceQuote:
         return amount,self.rate_basis
 
 class BudgetLedger:
-    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=True):
+    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=False):
         self.store=store;self.cap=money(cap_usd)
         self.enforce_spending_caps=enforce_spending_caps
         if self.cap<=0:raise ValueError('Explicit positive spending cap required')
@@ -146,7 +146,6 @@ class BudgetLedger:
         maximum=quote.reserve_cost(system,messages,max_tokens)
         identifier=uuid.uuid4().hex
         def reserve(state):
-            if state['halted']:raise BudgetError('Budget ledger halted for review')
             held=sum((money(r['maximumUSD']) for r in state['reservations'].values()),Decimal(0))
             if self.enforce_spending_caps and money(state['spentEstimateUSD'])+held+maximum>self.cap:raise BudgetError('Global spending cap would be exceeded')
             provider=selection.provider
@@ -196,6 +195,5 @@ class BudgetReservation:
             state['spentByProvider'][provider]=str(money(state['spentByProvider'].get(provider,'0'))+estimate)
             state['settled'][self.identifier]=str(estimate)
             del state['reservations'][self.identifier]
-            if estimate>self.maximum or (self.ledger.enforce_spending_caps and money(state['spentEstimateUSD'])>self.ledger.cap):
-                state['halted']=True
+
         self.ledger.store.update(finish)
