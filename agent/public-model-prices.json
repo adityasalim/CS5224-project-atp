@@ -21,7 +21,7 @@
     },
     {
       "provider": "alibaba",
-      "modelId": "deepseek-v4.1-flash-1017",
+      "modelId": "deepseek-v4.1-flash",
       "inputPerMillionUSD": ".3",
       "outputPerMillionUSD": "1.2",
       "inputIncludesCache": true,
