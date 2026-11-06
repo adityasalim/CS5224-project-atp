@@ -63,7 +63,7 @@ TIMING_RULES = """- Flight and transfer timing: respect the chosen flight's arri
 
 POOL_NOTE = """- The candidate pool is deliberately larger than the plan needs (roughly 2-3 candidates per stop you will plan).
   Pick the best fits for this traveller and for each day's area; do not try to use many of them, and do not fill a
-  day just because more candidates exist."""
+  day just because more candidates exist.   Each stay shows distKm (distance from the search centre): all else equal, prefer the closer one."""
 
 INTAKE = """ROLE: intake parser for a travel planner.
 Today's date is {today}. Convert the traveller's request (and any earlier details) into a TripSpec JSON object.
