@@ -142,7 +142,37 @@ _DIET_NEED_RE = re.compile(
     r"\b(?:diet\w*|vegan|vegetarian|pescatarian|halal|kosher|gluten|lactose|dairy|meat|pork|beef|chicken|"
     r"seafood|shellfish|fish|nuts?|peanuts?|eggs?|soy|sesame|allerg\w*|intoleran\w*|celiac|coeliac)\b", re.I)
 
+# ---- search sizing (new) ------------------------------------------------------------------
+STOPS_PER_DAY = {"relaxed": 4, "moderate": 5, "packed": 7}   # same table as trip_spec_for_tools
+POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner needs
+MIN_PLACES_TARGET = 30
+MIN_STAYS_WANTED = 8
 
+
+def trip_days(spec):
+    try:
+        return (date.fromisoformat(spec["endDate"]) - date.fromisoformat(spec["startDate"])).days + 1
+    except (KeyError, TypeError, ValueError):
+        return 3
+
+
+def places_target(spec, days=None):
+    """How many candidate places the pool should hold: 2.5 x (days x stops per day), at least 30."""
+    days = days or trip_days(spec)
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    return max(MIN_PLACES_TARGET, -(-days * stops * POOL_FACTOR_X10 // 10))
+
+
+def search_sizes(spec, n_categories=5, days=None):
+    """Search sizes that grow with trip length (a 14-day trip needs a much bigger pool than a 3-day one)."""
+    days = days or trip_days(spec)
+    target = places_target(spec, days)
+    per_cat = max(6, min(40, -(-target // max(1, n_categories))))
+    radius = 6 if days <= 4 else 8 if days <= 9 else 10
+    comfort = (spec.get("preferenceScores") or {}).get("comfort", 5)
+    return {"places": {"radiusKm": radius, "maxPerCategory": per_cat},
+            "stays": {"limit": 100 if days <= 7 else 150, "maxResults": 30, "comfort": comfort},
+            "target": target}
 def _clear_dietary_from_message(spec, message):
     """Clear remembered/carried dietary values only when the message says there are none AND names no other food
     need anywhere (so 'no dietary restrictions except shellfish' keeps every restriction). Returns True if cleared.
@@ -161,7 +191,49 @@ def _clear_dietary_from_message(spec, message):
     prefs["dietary"] = []
     print(f"dietary cleared by traveller message: old={old} message={text[:120]!r}")
     return True
+def leg_places_target(spec, leg):
+    """Candidate places wanted for one city of a multi-city trip: 2.5 x (nights x stops per day), at least 25."""
+    nights = max(1, int(leg.get("nights") or 1))
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    return max(25, -(-nights * stops * POOL_FACTOR_X10 // 10))
 
+
+def leg_search_sizes(spec, leg, n_categories=5):
+    """find_places sizes for one city of a multi-city trip."""
+    nights = max(1, int(leg.get("nights") or 1))
+    per_cat = max(6, min(40, -(-leg_places_target(spec, leg) // max(1, n_categories))))
+    radius = 6 if nights <= 3 else 8 if nights <= 8 else 10
+    return {"radiusKm": radius, "maxPerCategory": per_cat}
+
+
+def _is_food_place(p):
+    return str(p.get("category") or "").lower() in _FOOD_CATS and not _is_supermarket(p)
+
+
+def _select_places(places, target, spec):
+    """Best `target` places in rank order, with at least 35% food/cafe stops (every full day needs 1-2 of them).
+    Requested, day-trip and pinned places are never dropped."""
+    chosen = _order_places(places, target, spec=spec)
+    min_food = int(target * 0.35)
+    if sum(1 for p in chosen if _is_food_place(p)) >= min_food:
+        return chosen
+    ranked = _order_places(places, None, spec=spec)            # the full ranking
+    rank = {p["placeId"]: i for i, p in enumerate(ranked)}
+    ids = {p["placeId"] for p in chosen}
+    need = min_food - sum(1 for p in chosen if _is_food_place(p))
+    add = [p for p in ranked if p["placeId"] not in ids and _is_food_place(p)][:need]
+    if not add:
+        return chosen
+    pinned = {x.get("placeId") for x in ((spec or {}).get("pinned") or []) if isinstance(x, dict)}
+    drops = max(0, len(add) - max(target - len(chosen), 0))
+    keep = list(chosen)
+    for p in reversed(chosen):                                  # drop the lowest-ranked non-food stops
+        if drops <= 0:
+            break
+        if not _is_food_place(p) and not p.get("requested") and not p.get("dayTrip") and p["placeId"] not in pinned:
+            keep.remove(p)
+            drops -= 1
+    return sorted(keep + add, key=lambda p: rank.get(p["placeId"], 10 ** 6))
 
 def _real_values(v):
     """List of meaningful strings: drops blanks and placeholders such as 'None', 'n/a', 'no restrictions'."""
@@ -1042,19 +1114,10 @@ def pref_args(tool, spec):
             a["cuisine"] = spec["cuisine"]
     elif tool == "search_stays":
         h = p["hotel"]
-        a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"], "sortBy": h["sortBy"]}
-
-        comfort = (spec.get("preferenceScores") or {}).get("comfort", 5)
-
-        if comfort >= 8:
-            if not a["minStars"]:
-                a["minStars"] = 3
-            if not a["minReviewScore"]:
-                a["minReviewScore"] = 8
-            if a["sortBy"] == "price":
-                a["sortBy"] = "value"
-        elif comfort <= 3 and a["sortBy"] == "price":
-            a["sortBy"] = "price"
+        # Only what the traveller asked for is sent. The comfort score no longer forces star/review floors:
+        # tp-search-stays uses it to weight its ranking, and relaxes any filter that would leave too few hotels.
+        a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"],
+             "sortBy": h["sortBy"], "comfort": (spec.get("preferenceScores") or {}).get("comfort", 5)}
     elif tool == "search_flights":
         f = p["flight"]
         a = {k: f[k] for k in ("maxStops", "departAfter", "departBefore", "returnDepartAfter", "returnDepartBefore",
@@ -1067,18 +1130,30 @@ def pref_args(tool, spec):
                                                      "economy") or (k == "avoidOvernight" and v is False)}
 
 
-def with_prefs(tool, spec, args):
+def with_prefs(tool, spec, args, relax=False):
     """Tool arguments with the traveller's preferences filled in. Values the model chose itself win, so the model
-    can still refine them; preferences it forgot are added, so no personal wish is silently dropped."""
+    can still refine them; preferences it forgot are added, so no personal wish is silently dropped.
+    Search sizes (radius, results per category, hotel limit) are filled in from the trip length unless given.
+    relax=True drops the soft filters (free-only, indoor-only, star/review floors, hotel area) for a retry."""
     out = {**pref_args(tool, spec), **(args or {})}
     if 'budget' in spec:
         out.pop('maxPricePerNightSGD', None)
+    if relax:
+        for k in ("freeOnly", "indoorOnly", "minStars", "minReviewScore"):
+            out.pop(k, None)
+    if tool == "find_places" and (out.get("categories") or out.get("keywords")):
+        n_cats = max(1, len(out.get("categories") or []))
+        for k, v in search_sizes(spec, n_cats)["places"].items():
+            out.setdefault(k, v)
+    if tool == "search_stays":
+        for k, v in search_sizes(spec)["stays"].items():
+            out.setdefault(k, v)
     if tool == "search_stays" and not is_multi(spec) and "name" not in (args or {}):
         name, booked, price = _hotel_wish(spec)
         if name:
             out.update(name=name, alreadyBooked=booked, **({"bookedPriceSGD": price} if price else {}))
     area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
-    if tool == "search_stays" and area and out.get("lat") is None and "," not in str(out.get("city", "")):
+    if tool == "search_stays" and area and not relax and out.get("lat") is None and "," not in str(out.get("city", "")):
         out["city"] = f'{area}, {out.get("city") or spec.get("destination")}'
     return out
 
@@ -1120,7 +1195,7 @@ def gather(spec, usage, metrics):
         return (yield from gather_model(spec, usage, metrics))
     _, _, gw = _clients()
     pool = {"flights": [], "stays": [], "places": [], "transfers": []}
-    calls, sources = [], set()
+    calls, sources, relaxed = [], set(), []
     flight = {"origin": spec["originAirport"], "destination": spec["destinationAirport"],
               "departDate": spec["startDate"], "pax": spec["pax"]}
     if spec.get("flightType") != "oneway":
@@ -1128,7 +1203,7 @@ def gather(spec, usage, metrics):
     cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
                   | {"restaurant"})
     keywords = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-                + list(spec.get("activities") or []))[:5]
+                + list(spec.get("activities") or []))[:8]
     name, booked, price = _hotel_wish(spec)
     hotel = {"city": spec["destination"], "checkIn": spec["startDate"],
              "checkOut": spec["endDate"], "guests": spec["pax"]}
@@ -1136,11 +1211,12 @@ def gather(spec, usage, metrics):
         hotel.update(name=name, alreadyBooked=booked)
         if price:
             hotel["bookedPriceSGD"] = price
+    # radius and results per category come from with_prefs/search_sizes (they grow with the trip length)
+    place_args = {"city": spec["destination"], "categories": cats, "keywords": keywords}
     for tool, args, field, key in [
         ("search_flights", flight, "offers", "flights"),
         ("search_stays", hotel, "stays", "stays"),
-        ("find_places", {"city": spec["destination"], "categories": cats,
-                         "keywords": keywords, "radiusKm": 6, "maxPerCategory": 6}, "places", "places"),
+        ("find_places", place_args, "places", "places"),
     ]:
         calls.append(tool)
         yield ev("status", tool.replace("_", " ").capitalize() + "…")
@@ -1151,9 +1227,33 @@ def gather(spec, usage, metrics):
         if result.get("ok"):
             pool[key] = result.get(field, [])
             sources.add(f"{tool}:{result.get('source')}")
+
+    # Relax-and-retry: too few candidates -> search once more without the soft filters and merge the results.
+    for tool, args, field, key, id_key, wanted in [
+        ("find_places", place_args, "places", "places", "placeId", int(places_target(spec) * 0.6)),
+        ("search_stays", hotel, "stays", "stays", "stayId", MIN_STAYS_WANTED),
+    ]:
+        if len(pool[key]) >= wanted:
+            continue
+        first, loose = with_prefs(tool, spec, args), with_prefs(tool, spec, args, relax=True)
+        if loose == first:      # nothing to relax
+            continue
+        yield ev("status", "Widening the " + ("places" if key == "places" else "hotel") + " search…")
+        calls.append(tool)
+        try:
+            result = gw.call(tool, loose)
+        except GatewayError:
+            result = {"ok": False}
+        if result.get("ok"):
+            have = {x[id_key] for x in pool[key]}
+            pool[key] += [x for x in result.get(field, []) if x[id_key] not in have]
+            sources.add(f"{tool}:{result.get('source')}")
+            relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
+    counts = {k: len(v) for k, v in pool.items()}
+    print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources),
-                   gatherMode="single-city (code)")
+                   gatherMode="single-city (code)", poolCounts=counts, relaxedSearches=relaxed)
     return pool
 
 
@@ -2045,12 +2145,23 @@ def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:6]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    stays = [_c_stay(s_) for s_ in ordered_stays[:8]]
-    places = [_c_place(p) for p in _order_places(pool["places"], 60, spec=spec)]
+    stays = [_c_stay(s_) for s_ in ordered_stays[:12]]
+    days = trip_days(spec) if spec else 20
+    target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
+    floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
+    places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
+
     def dump():
         return json.dumps({"flights": flights, "stays": stays, "places": places}, separators=(",", ":"))
     out = dump()
-    while len(out) > MAX_POOL_CHARS and len(places) > 10:   # places are ranked: drop the lowest ranked first
+    if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions
+        for p in places:
+            p.pop("about", None)
+        out = dump()
+    while len(out) > MAX_POOL_CHARS and len(places) > floor:   # then drop the lowest ranked places
+        del places[-max(1, len(places) // 10):]
+        out = dump()
+    while len(out) > MAX_POOL_CHARS and len(places) > 10:      # last resort, as before
         del places[-max(1, len(places) // 10):]
         out = dump()
     return out
@@ -2132,6 +2243,7 @@ def compact_pool_multi(spec, pool):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:5]]
     cities = []
+    floors = []
     min_by_leg = {}
     for i in range(len(spec["legs"])):
         leg_prices = [p for p in (known_price(s_) for s_ in pool["stays"] if s_.get("leg") == i) if p is not None]
@@ -2144,8 +2256,10 @@ def compact_pool_multi(spec, pool):
         other_stays = sum(v for k, v in min_by_leg.items() if k != i) + min_transfers
         leg_stays = _order_stays([s_ for s_ in pool["stays"] if s_.get("leg") == i],
                                  spec=spec, flights=ordered_flights, other_cost=other_stays)
-        stays = [_c_stay(s_) for s_ in leg_stays[:5]]
-        places = [_c_place(p) for p in _order_places([p for p in pool["places"] if p.get("leg") == i], 22, spec=spec)]
+        stays = [_c_stay(s_) for s_ in leg_stays[:8]]
+        leg_places = [p for p in pool["places"] if p.get("leg") == i]
+        places = [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)]
+        floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
                        "checkOut": leg["checkOut"], "stays": stays, "places": places})
     hops = []
@@ -2155,14 +2269,24 @@ def compact_pool_multi(spec, pool):
              "arrive": t.get("arriveAt"), "minutes": t.get("durationMinutes"), **({"price": t["price"]} if "price" in t else ({"priceSGD": t["priceTotalSGD"]} if t.get("priceTotalSGD") is not None else {"price": "unknown"})),
              "estimate": t.get("estimate"), "overnight": t.get("overnight", False), "matches": t.get("matches") or []}
             for t in pool["transfers"] if t.get("hop") == i]})
+
     def dump():
         return json.dumps({"internationalFlights": flights, "cities": cities, "transfers": hops}, separators=(",", ":"))
     out = dump()
+    if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions
+        for c in cities:
+            for p in c["places"]:
+                p.pop("about", None)
+        out = dump()
     while len(out) > MAX_POOL_CHARS:
-        biggest = max(cities, key=lambda c: len(c["places"]))
-        if len(biggest["places"]) <= 6:
-            break
-        del biggest["places"][-max(1, len(biggest["places"]) // 8):]
+        spare = [(len(c["places"]) - floors[i], i) for i, c in enumerate(cities) if len(c["places"]) > floors[i]]
+        if spare:                                           # trim the city that is furthest above its floor
+            i = max(spare)[1]
+        else:                                               # last resort, as before: down to 6 per city
+            i = max(range(len(cities)), key=lambda k: len(cities[k]["places"]))
+            if len(cities[i]["places"]) <= 6:
+                break
+        del cities[i]["places"][-max(1, len(cities[i]["places"]) // 8):]
         out = dump()
     return out
 
