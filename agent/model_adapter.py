@@ -163,50 +163,50 @@ class ModelAdapter:
                              'cacheReadInputTokens':row['cacheReadTokens'] or 0,'cacheWriteInputTokens':row['cacheWriteTokens'] or 0},
                     'stopReason':'max_tokens' if row.get('finishReason') in ('length','max_tokens') else 'end_turn',
                     '_adapter':row}
-                except Exception as error:
-                    logger = logging.getLogger(__name__)
-                    logger.error(
-                        "Model request failed: provider=%s model=%s "
-                        "role=%s latency=%.1fs error=%s cause=%r",
-                        selected.provider,
-                        selected.model_id,
-                        role,
-                        time.monotonic() - start,
-                        type(error).__name__,
-                        error.__cause__ or error.__context__,
-                        exc_info=True,
+            except Exception as error:
+                logger = logging.getLogger(__name__)
+                logger.error(
+                    "Model request failed: provider=%s model=%s "
+                    "role=%s latency=%.1fs error=%s cause=%r",
+                    selected.provider,
+                    selected.model_id,
+                    role,
+                    time.monotonic() - start,
+                    type(error).__name__,
+                    error.__cause__ or error.__context__,
+                    exc_info=True,
+                )
+    
+                if isinstance(error, GoogleTransportError) and error.usage:
+                    row.update({k:v for k,v in error.usage.items() if k in row})
+    
+                detail = (
+                    getattr(error, 'response', {}).get('Error', {})
+                    if isinstance(getattr(error, 'response', None), dict)
+                    else {}
+                )
+    
+                kind = (
+                    str(error)
+                    if isinstance(error, ModelAdapterError)
+                    else type(error).__name__
+                )
+    
+                row.update(
+                    errorType=kind,
+                    errorCode=(
+                        getattr(error, 'code', None)
+                        or getattr(error, 'status_code', None)
+                        or detail.get('Code')
                     )
-        
-                    if isinstance(error, GoogleTransportError) and error.usage:
-                        row.update({k:v for k,v in error.usage.items() if k in row})
-        
-                    detail = (
-                        getattr(error, 'response', {}).get('Error', {})
-                        if isinstance(getattr(error, 'response', None), dict)
-                        else {}
-                    )
-        
-                    kind = (
-                        str(error)
-                        if isinstance(error, ModelAdapterError)
-                        else type(error).__name__
-                    )
-        
-                    row.update(
-                        errorType=kind,
-                        errorCode=(
-                            getattr(error, 'code', None)
-                            or getattr(error, 'status_code', None)
-                            or detail.get('Code')
-                        )
-                    )
-        
-                    if str(row['errorCode']) in (
-                        '429', 'RESOURCE_EXHAUSTED', 'ResourceExhausted'
-                    ):
-                        self.quota_exhausted = True
-        
-                    raise ModelAdapterError(kind, row['errorCode']) from None
+                )
+    
+                if str(row['errorCode']) in (
+                    '429', 'RESOURCE_EXHAUSTED', 'ResourceExhausted'
+                ):
+                    self.quota_exhausted = True
+    
+                raise ModelAdapterError(kind, row['errorCode']) from None
             detail=getattr(error,'response',{}).get('Error',{}) if isinstance(getattr(error,'response',None),dict) else {}
             # Keep the kind of our own errors (EmptyModelOutput, MissingTokenUsage, ...); name the class for provider errors.
             kind=str(error) if isinstance(error,ModelAdapterError) else type(error).__name__
