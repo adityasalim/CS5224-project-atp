@@ -29,7 +29,12 @@ DEFAULT_VISIT = {"museum": 120, "gallery": 90, "temple": 60, "shrine": 45, "chur
                  "viewpoint": 45, "park": 75, "garden": 75, "zoo": 150, "market": 75, "shopping": 90,
                  "restaurant": 75, "cafe": 45, "bar": 75,
                  "climbing": 150, "hiking": 240, "nature": 150, "onsen": 120, "beach": 150, "activity": 120,
-                 "requested": 90}
+                 "requested": 90,
+                 # categories that used to fall back to 60 minutes
+                 "theme_park": 240, "aquarium": 120, "historic": 75, "spa": 90, "dessert": 30,
+                 "street_food": 45, "nightlife": 90, "bookshop": 30, "playground": 45}
+# Food stops that can be the lunch break: kept out of breakfast time and nudged into the 12:00-14:00 window.
+LUNCH_CATEGORIES = ("restaurant", "cafe", "street_food")
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
 MAX_WALK_MINUTES = 30  # longer walks switch to the car/taxi time for that hop (mode "walk")
@@ -184,7 +189,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             if s.get("openSimple"):
                 open_t, close_t = _hm(s["openSimple"]["open"]), _hm(s["openSimple"]["close"])
             begin = max(arrive, open_t)
-            if lunch and s.get("category") in ("restaurant", "cafe") and begin < 11 * 60 + 30:
+            if lunch and s.get("category") in LUNCH_CATEGORIES and begin < 11 * 60 + 30:
                 begin = 11 * 60 + 30            # don't schedule lunch spots at breakfast time
             end = begin + s["visitMinutes"]
             back, _ = _hop(walk_m, car_m, i, 0, mode)
@@ -193,7 +198,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             score = end
             if long_first and s["visitMinutes"] >= 120:
                 score -= 10000 + s["visitMinutes"] * 10   # long activities (hikes, climbing) first
-            if lunch and s.get("category") in ("restaurant", "cafe") and 12 * 60 <= begin <= 14 * 60:
+            if lunch and s.get("category") in LUNCH_CATEGORIES and 12 * 60 <= begin <= 14 * 60:
                 score -= 60                     # nudge food stops into the lunch window
             if best is None or score < best[0]:
                 best = (score, i, travel, how, arrive, begin, end)
