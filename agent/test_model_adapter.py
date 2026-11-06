@@ -48,7 +48,30 @@ class TestAdapter(unittest.TestCase):
         seen=[]
         def create(**kwargs):
             seen.append(kwargs)
-            return N(choices=[N(message=N(content='{}'),finish_reason='stop')],usage=N(prompt_tokens=10,completion_tokens=5,total_tokens=15),model='glm-5.3')
+        
+            return iter([
+                N(
+                    model='glm-5.3',
+                    choices=[
+                        N(
+                            delta=N(content='{}'),
+                            finish_reason='stop'
+                        )
+                    ],
+                    usage=None
+                ),
+                N(
+                    model='glm-5.3',
+                    choices=[],
+                    usage=N(
+                        prompt_tokens=10,
+                        completion_tokens=5,
+                        total_tokens=15,
+                        prompt_tokens_details=None,
+                        completion_tokens_details=None
+                    )
+                )
+            ])
         adapter=ModelAdapter(ModelConfiguration.parse(values),clients={'alibaba':N(chat=N(completions=N(create=create)))},budget_authorizer=lambda *args:Reservation())
         self.call(adapter);self.assertEqual(seen[0]['reasoning_effort'],'low');self.assertNotIn('extra_body',seen[0])
         values['planner']['options']={'enableThinking':False}
