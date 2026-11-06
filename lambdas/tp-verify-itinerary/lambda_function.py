@@ -1,4 +1,3 @@
-from trip_currency import normalize_cached_pool
 """
 tp-verify-itinerary — Lambda tool (pure code, no LLM): check a draft itinerary against the
 trip's hard constraints. Prices are always re-read from the candidate pool by ID, never
@@ -8,6 +7,8 @@ the repair step can act on.
 Environment variables:
   CACHE_TABLE                  DynamoDB cache table holding pool:<id> items
   DAILY_SPEND_SGD_PER_PERSON   estimate for food, local transport and entry fees (default 100)
+  VERIFY_COUNT_RETURN          "true" (default): the trip back to the hotel counts as busy time in the free-time
+                               check; "false" restores the old behaviour
 
 Input event:
   {"tripSpec": {"startDate": "2026-12-10", "endDate": "2026-12-15", "pax": 2, "budgetSGD": 5000,
@@ -30,6 +31,8 @@ from datetime import date, datetime, timedelta
 
 import boto3
 
+from trip_currency import normalize_cached_pool
+
 _dynamodb = boto3.resource("dynamodb")
 FASTEST_CITY_KMH = 25.0      # sanity lower bound for travel when no travel time is given
 ARRIVAL_BUFFER_MIN = 120     # landing -> immigration -> hotel
@@ -39,6 +42,7 @@ MAX_KM_FROM_BASE = 120       # a place further than this from that night's hotel
 DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day trip
 DAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
 DAY_TRIP_RADIUS_KM = 40      # on a day trip, places must be around the day-trip town
+COUNT_RETURN_TRIP = os.environ.get("VERIFY_COUNT_RETURN", "true").lower() == "true"
 
 
 def _err(code, message, **extra):
@@ -48,6 +52,11 @@ def _err(code, message, **extra):
 def _hm(s):
     h, m = str(s).split(":")
     return int(h) * 60 + int(m)
+
+
+def _fmt(mins):
+    mins = max(0, int(mins))
+    return f"{mins // 60:02d}:{mins % 60:02d}"
 
 
 def _km(a, b):
@@ -355,10 +364,16 @@ def verify(spec, it, pool, daily_spend):
                 if idx == 0 and trip_min:
                     need = 0    # the journey to the day-trip town is checked just below
                 gap = a - (prev_end if prev_end is not None else day_start)
-                if prev_end is not None and gap < int(need):
-                    rep.fail("travel_time", f"{dt}: only {gap} min to reach {name}, travel needs about {need} min",
-                             "Run sequence_day for this day, or move this stop to another day.",
-                             day=dt, item=s_.get("placeId"))
+                if gap < int(need):
+                    if prev_end is None:     # first stop of the day: travel from the hotel
+                        rep.fail("travel_time", f"{dt}: {name} at {s_['arriveAt']} is too early: getting there from "
+                                                f"the hotel takes about {need} min and the day starts at {_fmt(day_start)}",
+                                 "Run sequence_day for this day, or move this stop to another day.",
+                                 day=dt, item=s_.get("placeId"))
+                    else:
+                        rep.fail("travel_time", f"{dt}: only {gap} min to reach {name}, travel needs about {need} min",
+                                 "Run sequence_day for this day, or move this stop to another day.",
+                                 day=dt, item=s_.get("placeId"))
                 busy += int(need)
             hours = p.get("openSimple")
             if idx == 0 and trip_min and a < day_start + trip_min:
@@ -389,6 +404,9 @@ def verify(spec, it, pool, daily_spend):
                          "Keep stops between dayStart and dayEnd.", day=dt, item=s_.get("placeId"))
             busy += max(b - a, 0)
             prev_end, prev_place = b, (p if p.get("lat") is not None else prev_place)
+        if COUNT_RETURN_TRIP and stops and not trip_min and hotel_pt is not None and prev_place is not None \
+                and prev_place is not hotel_pt:
+            busy += math.floor(_km(prev_place, hotel_pt) / FASTEST_CITY_KMH * 60)   # the trip back to the hotel
         free = (day_end - day_start) - busy
         if stops and free < min_free and dt not in transfer_floor:
             rep.fail("free_time", f"{dt} has about {max(free, 0)} min free (needs {min_free})",
