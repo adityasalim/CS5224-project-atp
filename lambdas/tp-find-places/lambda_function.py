@@ -436,8 +436,9 @@ def _overpass_groups(cats):
 
 
 def _overpass(q, deadline):
-    """All categories in ONE request (each category has its own output limit). If that request fails, the
-    categories are searched in groups, restaurants and cafes first, with the time that is left."""
+    """All categories in ONE request (each category has its own output limit). If that request fails, or it
+    returns places of only one category although three or more were asked for, the categories are searched in
+    groups, restaurants and cafes first, with the time that is left."""
     deadline = min(deadline, time.time() + OVERPASS_SHARE_S)   # leave time for the fallbacks
     if not q["categories"]:
         return [], None
@@ -448,9 +449,11 @@ def _overpass(q, deadline):
 
     elements, err = _overpass_request(_overpass_query(cats, q, cap), deadline, ua)
     if not err:
-        return _parse_overpass(elements, q), None
-
-    _warnings.append(f"overpass: one request for all categories failed ({err}); trying category groups")
+        places = _parse_overpass(elements, q)
+        if not (len(cats) >= 3 and elements and len({p["category"] for p in places}) <= 1):
+            return places, None
+        err = "the single request returned only one category"
+    _warnings.append(f"overpass: one request for all categories was not usable ({err}); trying category groups")
     out, seen_ids, ok_groups, last_err = [], set(), 0, err
     for group in _overpass_groups(cats):
         if deadline - time.time() < 8:
