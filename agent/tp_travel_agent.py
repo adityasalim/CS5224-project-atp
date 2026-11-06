@@ -1520,6 +1520,10 @@ def _c_stay(s_):
         price_fields = {"price": "unknown"}
     item = {"id": s_["stayId"], "name": s_.get("name"), "stars": s_.get("starRating"),
             "review": s_.get("reviewScore"), **price_fields, "style": s_.get("style")}
+    if s_.get("distanceKm") is not None:      # how far from the search centre, so the planner can weigh location
+        item["distKm"] = s_["distanceKm"]
+    if s_.get("reviewCount") is not None:
+        item["reviews"] = s_["reviewCount"]
     for k in ("matches", "filterNote", "booked"):
         if s_.get(k): item[k] = s_[k]
     return item
@@ -2116,8 +2120,13 @@ def _order_flights(flights, spec=None):
     )
 
 
+LOC_SCALE_KM = 8.0        # a hotel this far from the search centre gets no location credit
+LOC_WEIGHT = 12.0         # how many ranking points the nearest hotel earns (packed pace earns more)
+REVIEW_PRIOR = 50         # reviews needed before a hotel's own score outweighs the average
+
+
 def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
-    """Order stays by requested/booked status, budget feasibility, comfort balance and preference matches."""
+    """Order stays by requested/booked status, budget feasibility, comfort balance, location and preference matches."""
     if not stays:
         return []
     if not isinstance(spec, dict):
@@ -2141,6 +2150,11 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     h_pref = ((spec.get("preferences") or {}).get("hotel") or {})
     want_styles = {str(s).lower() for s in (h_pref.get("style") or []) if str(s).strip()}
     want_name = str(h_pref.get("name") or "").strip().lower()
+    loc_weight = LOC_WEIGHT * (1.3 if spec.get("pace") == "packed" else 1.0)   # NEW
+
+    known_reviews = [float(x.get("reviewScore") or x.get("review")) for x in stays
+                     if (x.get("reviewScore") or x.get("review"))]            # NEW
+    mean_review = sum(known_reviews) / len(known_reviews) if known_reviews else 7.5   # NEW
 
     feasible_good_prices = sorted(
         _price(s_) for s_ in stays
@@ -2160,7 +2174,11 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
             return (2, 1000.0, -(_price(s_) or 0.0), str(s_.get("stayId") or ""))
         price = _price(s_)
         stars = float(s_.get("starRating") or s_.get("stars") or 3.0)
-        review = float(s_.get("reviewScore") or s_.get("review") or 7.5)
+        rev_raw = s_.get("reviewScore") or s_.get("review")
+        review = float(rev_raw) if rev_raw else 7.5
+        cnt = s_.get("reviewCount")                                            # NEW: a score from few reviews counts less
+        if rev_raw and isinstance(cnt, (int, float)) and not isinstance(cnt, bool) and cnt > 0:
+            review = (cnt / (cnt + REVIEW_PRIOR)) * review + (REVIEW_PRIOR / (cnt + REVIEW_PRIOR)) * mean_review
         styles = {str(x).lower() for x in (s_.get("style") or []) if isinstance(s_.get("style"), list)}
         if isinstance(s_.get("style"), str) and s_.get("style"):
             styles.add(s_["style"].lower())
@@ -2180,6 +2198,9 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
         qual = c_weight * ((review - 7.0) * 6.0 + (stars - 2.5) * 4.0) + len(matches) * 4.5
         if want_styles and (styles & want_styles):
             qual += 6.0
+        dist = s_.get("distanceKm")                                            # NEW: location credit
+        if isinstance(dist, (int, float)) and not isinstance(dist, bool):
+            qual += loc_weight * max(0.0, 1.0 - float(dist) / LOC_SCALE_KM)
         if rem_stay_budget is not None and price is not None:
             if rem_stay_budget <= 0:
                 # Minimize budget overrun when zero accommodation budget remains
@@ -2197,11 +2218,34 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     return sorted(stays, key=stay_key, reverse=True)
 
 
+def _spread_stays(ordered, n, cell_deg=0.015):
+    """First n stays in rank order, with at most max(2, n // 4) per neighbourhood (about 1.5 km) while other
+    stays remain, so the planner sees hotels from different areas."""
+    cap = max(2, n // 4)
+    out, ids, cells = [], set(), {}
+    for pass_cap in (cap, None):
+        for s_ in ordered:
+            if len(out) >= n:
+                break
+            sid = s_.get("stayId")
+            if sid in ids:
+                continue
+            lat, lng = s_.get("lat"), s_.get("lng")
+            cell = (round(lat / cell_deg), round(lng / cell_deg)) if lat is not None and lng is not None else None
+            if pass_cap is not None and cell is not None and cells.get(cell, 0) >= pass_cap:
+                continue
+            out.append(s_)
+            ids.add(sid)
+            if cell is not None:
+                cells[cell] = cells.get(cell, 0) + 1
+    return out
+
+
 def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:6]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    stays = [_c_stay(s_) for s_ in ordered_stays[:12]]
+    stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
     floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
@@ -2342,7 +2386,7 @@ def compact_pool_multi(spec, pool):
         other_stays = sum(v for k, v in min_by_leg.items() if k != i) + min_transfers
         leg_stays = _order_stays([s_ for s_ in pool["stays"] if s_.get("leg") == i],
                                  spec=spec, flights=ordered_flights, other_cost=other_stays)
-        stays = [_c_stay(s_) for s_ in leg_stays[:8]]
+        stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
         leg_places = [p for p in pool["places"] if p.get("leg") == i]
         places = [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)]
         floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
