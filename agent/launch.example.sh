@@ -15,4 +15,7 @@ ENVS=(
   --env "MEMORY_ID=<memory-id>"                      # AgentCore -> Memory -> your memory's ID (memory is OFF without it)
   --env "MEMORY_PREFERENCES_NAMESPACE=/users/{actorId}/preferences"   # must match the user-preference strategy
 )
-agentcore launch --auto-update-on-conflict "${ENVS[@]}"
+agentcore deploy \
+  --agent tp_travel_agent \
+  --auto-update-on-conflict \
+  "${ENVS[@]}"
