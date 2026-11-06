@@ -89,7 +89,66 @@ def violation_priority(v):
         return 5
     return 4  # no mandatory wording -> soft: never accepted (plan is unverified) but not refused; surfaced in metrics
 
+# Place IDs such as aloc:AQAA..., osm:node/123, gplace:..., mock:... must never reach the traveller.
+_ID_RE = re.compile(r"\b(?:aloc|osm|gplace|mock|booked|lite|duffel):[^\s)\],;]+", re.I)
+# "Priority 1 [day 2026-12-17]: " or "Priority 1 day 2026-12-17 " at the start of a finding.
+_PREFIX_RE = re.compile(r"^\s*Priority\s+\d+\s*(?:\[?\s*day\s+\d{4}-\d{2}-\d{2}\s*\]?)?\s*:?\s*", re.I)
+# "food stop (Matto) has unverified halal compliance (no explicitly tagged halal restaurant in pool)."
+_UNVERIFIED_RE = re.compile(
+    r"(?:food\s+)?stop\s+\((?P<name>[^()]+)\)\s+has unverified\s+(?P<what>.+?)(?:\s+compliance)?"
+    r"\s*(?:\((?P<why>[^()]*)\))?\s*\.?$", re.I)
+MAX_NOTES = 5
+MAX_NAMES_SHOWN = 6
 
+
+def _readable(name):
+    """A stop name for the traveller: never a raw ID."""
+    name = str(name or "").strip()
+    return "A planned stop" if (not name or _ID_RE.fullmatch(name)) else name
+
+
+def _tidy_reasons(reasons, limit=MAX_NOTES):
+    """Notes for the traveller: no place IDs, no 'Priority 1 [day ...]' prefixes, identical notes once, all
+    'unverified ...' notes of one kind merged into one sentence, and at most `limit` notes."""
+    groups, order = {}, []
+    for r in reasons:
+        text = re.sub(r"\s{2,}", " ", _PREFIX_RE.sub("", _ID_RE.sub("", str(r or "")))).strip()
+        if not text:
+            continue
+        m = _UNVERIFIED_RE.search(text)
+        if m:
+            key = (m.group("what").strip().lower(), (m.group("why") or "").strip().rstrip("."))
+            if key not in groups:
+                groups[key] = []
+                order.append(("group", key))
+            name = m.group("name").strip()
+            if name not in groups[key]:
+                groups[key].append(name)
+            continue
+        text = text[0].upper() + text[1:]
+        if text[-1] not in ".!?":
+            text += "."
+        if ("text", text) not in order:
+            order.append(("text", text))
+    notes = []
+    for kind, value in order:
+        if kind == "text":
+            notes.append(value)
+            continue
+        what, why = value
+        names = groups[value]
+        shown = ", ".join(names[:MAX_NAMES_SHOWN])
+        if len(names) > MAX_NAMES_SHOWN:
+            shown += f" and {len(names) - MAX_NAMES_SHOWN} more"
+        sentence = (f"{what[:1].upper() + what[1:]} could not be verified for {len(names)} "
+                    f"stop{'s' if len(names) != 1 else ''} ({shown}).")
+        if why:
+            sentence += f" {why[:1].upper() + why[1:]}."
+        notes.append(sentence)
+    if len(notes) > limit:
+        notes = notes[:limit - 1] + [f"{len(notes) - limit + 1} more minor notes are not shown."]
+    return notes
+  
 def classify_unknown_check(v):
     """'mandatory_likely' | 'soft' for a violation whose check name is not in the known table."""
     return "mandatory_likely" if violation_priority(v) == 1 else "soft"
@@ -239,6 +298,7 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
     for 'budget_warning'/'caveated', and ([], 'accepted') only when every hard check
     passed. verify_error (verification infrastructure failure) is never accepted and
     never blocked: it is delivered as caveated with the failure disclosed.
+    The reasons are written for the traveller: no IDs, similar notes merged, at most MAX_NOTES.
     """
     violations = [v for v in ((verify_res or {}).get("violations") or []) if isinstance(v, dict)]
     mandatory = [v for v in violations if violation_priority(v) == 1
@@ -246,7 +306,7 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
     diag_mandatory, diag_caveat = split_diag_issues(diag)
     mandatory += diag_mandatory
     if mandatory:
-        return STATE_BLOCKED, [_finding_text(v) for v in mandatory]
+        return STATE_BLOCKED, _tidy_reasons([_finding_text(v) for v in mandatory])
 
     verified = is_verified(verify_res)
     if not verified and is_budget_only_failure(verify_res):
@@ -279,14 +339,21 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
         t = _finding_text(i)
         if t:
             reasons.append(t)
-    for u in (unscheduled or []):
-        reasons.append(f"{u.get('name') or u.get('placeId')} didn't fit on {u.get('date')} and was left out.")
+    left_out = [f"{_readable(u.get('name') or u.get('placeId'))} ({u.get('date')})" for u in (unscheduled or [])]
+    if len(left_out) == 1:
+        u = unscheduled[0]
+        reasons.append(f"{_readable(u.get('name') or u.get('placeId'))} didn't fit on {u.get('date')} "
+                       f"and was left out.")
+    elif left_out:
+        reasons.append(f"{len(left_out)} stops didn't fit their day and were left out: "
+                       + ", ".join(left_out[:MAX_NAMES_SHOWN])
+                       + (f" and {len(left_out) - MAX_NAMES_SHOWN} more" if len(left_out) > MAX_NAMES_SHOWN else "") + ".")
     for b in (unpriced_bookings or []):
         kind = {"flight": "flight", "stay": "hotel", "transfer": "transfer"}.get(b.get("kind"), "booking")
-        name = b.get("name") or b.get("id") or "selected"
+        name = _readable(b.get("name") or b.get("id") or "selected")
         reasons.append(f"The price of the {kind} '{name}' is not available, so the total shown may be "
                        "understated and your budget fit could not be verified.")
 
     if verified and judge_ok and not unscheduled and not unpriced_bookings and not reasons:
         return STATE_ACCEPTED, []
-    return STATE_CAVEATED, reasons or ["This itinerary could not be fully verified."]
+    return STATE_CAVEATED, _tidy_reasons(reasons) or ["This itinerary could not be fully verified."]
