@@ -5,14 +5,16 @@
     "provider": "alibaba",
     "model": "qwen3.8-max-0902",
     "options": {
-      "enableThinking": true
+      "enableThinking": true,
+      "reasoningEffort": "medium"
     }
   },
   "executor": {
     "provider": "alibaba",
     "model": "deepseek-v4.1-flash",
     "options": {
-      "enableThinking": true
+      "enableThinking": true,
+      "reasoningEffort": "medium"
     }
   },
   "reviewer": {
