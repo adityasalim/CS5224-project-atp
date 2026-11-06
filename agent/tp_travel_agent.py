@@ -1242,6 +1242,22 @@ def _fit_result(short, res):
             return text
     return json.dumps({"ok": bool(res.get("ok")), "note": "result too large to show"}, separators=(",", ":"))
 
+def _sights_focus(spec, places, n=12):
+    """Middle (median) of the best-ranked sights: where the traveller will spend the days.
+    Food, outdoor and day-trip places are left out. Returns None when there are no usable coordinates."""
+    ranked = [p for p in _order_places(places, None, spec=spec)
+              if not _is_food_place(p) and p.get("lat") is not None and p.get("lng") is not None
+              and not p.get("dayTrip") and p.get("category") not in OUTDOOR]
+    top = ranked[:n]
+    if not top:
+        return None
+
+    def median(values):
+        values = sorted(values)
+        mid = len(values) // 2
+        return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    return {"lat": round(median([p["lat"] for p in top]), 5), "lng": round(median([p["lng"] for p in top]), 5)}
+
 
 def gather(spec, usage, metrics):
     """Standard searches need no model turn; retain model mode for paired comparisons."""
@@ -1267,13 +1283,9 @@ def gather(spec, usage, metrics):
         hotel.update(name=name, alreadyBooked=booked)
         if price:
             hotel["bookedPriceSGD"] = price
-    # radius and results per category come from with_prefs/search_sizes (they grow with the trip length)
     place_args = {"city": spec["destination"], "categories": cats, "keywords": keywords}
-    for tool, args, field, key in [
-        ("search_flights", flight, "offers", "flights"),
-        ("search_stays", hotel, "stays", "stays"),
-        ("find_places", place_args, "places", "places"),
-    ]:
+
+    def run(tool, args, field, key):
         calls.append(tool)
         yield ev("status", tool.replace("_", " ").capitalize() + "…")
         try:
@@ -1283,6 +1295,16 @@ def gather(spec, usage, metrics):
         if result.get("ok"):
             pool[key] = result.get(field, [])
             sources.add(f"{tool}:{result.get('source')}")
+
+    yield from run("search_flights", flight, "offers", "flights")
+    yield from run("find_places", place_args, "places", "places")
+
+    # Hotels are searched around the main sights (not the city centre) unless the traveller named a hotel or area.
+    area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
+    focus = _sights_focus(spec, pool["places"])
+    if focus and not area and not name:
+        hotel = {**hotel, "lat": focus["lat"], "lng": focus["lng"]}
+    yield from run("search_stays", hotel, "stays", "stays")
 
     # Relax-and-retry: too few candidates -> search once more without the soft filters and merge the results.
     for tool, args, field, key, id_key, wanted in [
@@ -1307,7 +1329,8 @@ def gather(spec, usage, metrics):
             relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
     counts = {k: len(v) for k, v in pool.items()}
-    print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed}))
+    print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
+                      "hotelFocus": focus if (focus and not area and not name) else None}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources),
                    gatherMode="single-city (code)", poolCounts=counts, relaxedSearches=relaxed)
     return pool
@@ -2270,8 +2293,8 @@ def compact_pool(pool, spec=None):
 def gather_multi(spec, usage, metrics):
     """Multi-city search, done in code (many calls with fixed arguments): an open-jaw international flight,
     hotels and places per city, and transfers per hop. Results are tagged with their city/leg.
-    Search sizes grow with the nights of each city; a city with too few results is searched once more
-    without the soft filters (free-only, indoor-only, star/review floors, hotel area)."""
+    Search sizes grow with the nights of each city. In each city the places are searched first and the hotels
+    around the main sights; a city with too few results is searched once more without the soft filters."""
     _, _, gw = _clients()
     legs, pax = spec["legs"], spec["pax"]
     pool = {"flights": [], "stays": [], "places": [], "transfers": []}
@@ -2304,22 +2327,27 @@ def gather_multi(spec, usage, metrics):
     })
     kws = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
            + list(spec.get("activities") or []))[:8]
+    area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
     leg_counts = []
     for i, leg in enumerate(legs):
-        yield ev("status", f"Searching hotels and places in {leg['city']} ({leg['nights']} nights)…")
+        yield ev("status", f"Searching places and hotels in {leg['city']} ({leg['nights']} nights)…")
         name, booked, price = _hotel_wish(spec, leg)
         extra = {"name": name, "alreadyBooked": booked, **({"bookedPriceSGD": price} if price else {})} if name else {}
-        stay_args = {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
-                     "guests": pax, **extra}
         place_args = {"city": leg["city"], "categories": cats, "keywords": kws,
                       **leg_search_sizes(spec, leg, len(cats))}
 
-        res = call("search_stays", stay_args)
-        for st in res.get("stays", []) if res.get("ok") else []:
-            pool["stays"].append({**st, "city": leg["city"], "leg": i})
         res = call("find_places", place_args)
         for pl in res.get("places", []) if res.get("ok") else []:
             pool["places"].append({**pl, "city": leg["city"], "leg": i})
+
+        stay_args = {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
+                     "guests": pax, **extra}
+        focus = _sights_focus(spec, [p for p in pool["places"] if p.get("leg") == i])
+        if focus and not area and not name:        # hotels around this city's main sights
+            stay_args = {**stay_args, "lat": focus["lat"], "lng": focus["lng"]}
+        res = call("search_stays", stay_args)
+        for st in res.get("stays", []) if res.get("ok") else []:
+            pool["stays"].append({**st, "city": leg["city"], "leg": i})
 
         # Relax-and-retry for this city when there are too few candidates.
         for tool, args, field, key, id_key, wanted in [
