@@ -188,7 +188,7 @@ def verify(spec, it, pool, daily_spend):
                   "transfer": str(transfer_cost), "dailySpendEstimate": str(spend),
                   "total": str(total), "budget": str(selected_budget),
                   "remaining": str(selected_budget-total),
-                  "dailySpendAssumption": f"{currency} {daily_cost} per person per day (food, local transport, entry fees)"}
+                  "dailySpendAssumption": f"{currency} {daily_cost:,.2f} per person per day (food, local transport, entry fees)"}
         if total > selected_budget:
             over = total-selected_budget
             rep.fail("budget", f"estimated total {currency} {total:,.2f} is over budget by {currency} {over:,.2f}",
