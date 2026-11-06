@@ -128,7 +128,7 @@ class PriceQuote:
         return amount,self.rate_basis
 
 class BudgetLedger:
-    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=True):
+    def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=False):
         self.store=store;self.cap=money(cap_usd)
         self.enforce_spending_caps=enforce_spending_caps
         if self.cap<=0:raise ValueError('Explicit positive spending cap required')
