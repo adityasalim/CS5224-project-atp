@@ -189,7 +189,7 @@ assert ad.records[-1]["thinkingTokens"] == 40 and ad.records[-1]["outputTokens"]
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", u, temperature=0.0, model_role="executor")
 c = ali.calls[-1]
 assert c["model"] == "deepseek-v4.1-flash" and c["extra_body"] == {"enable_thinking": True} and c["temperature"] == 0.0
-assert c["reasoning_effort"] == "medium" and c["stream"] is True
+assert c["reasoning_effort"] == "low" and c["stream"] is True
 assert c["stream_options"] == {"include_usage": True}
 # reviewer: Kimi K3 through InvokeModel at medium effort; evaluator at low; no sampling fields
 A.ask_json(A.REVIEWER_MODEL, "sys", "judge", u, temperature=0.0, model_role="reviewer")
