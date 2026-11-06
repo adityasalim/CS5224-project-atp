@@ -2169,16 +2169,18 @@ def compact_pool(pool, spec=None):
 
 def gather_multi(spec, usage, metrics):
     """Multi-city search, done in code (many calls with fixed arguments): an open-jaw international flight,
-    hotels and places per city, and transfers per hop. Results are tagged with their city/leg."""
+    hotels and places per city, and transfers per hop. Results are tagged with their city/leg.
+    Search sizes grow with the nights of each city; a city with too few results is searched once more
+    without the soft filters (free-only, indoor-only, star/review floors, hotel area)."""
     _, _, gw = _clients()
     legs, pax = spec["legs"], spec["pax"]
     pool = {"flights": [], "stays": [], "places": [], "transfers": []}
-    sources, calls = set(), []
+    sources, calls, relaxed = set(), [], []
 
-    def call(tool, args):
+    def call(tool, args, relax=False):
         calls.append(tool)
         try:
-            res = gw.call(tool, with_prefs(tool, spec, args))
+            res = gw.call(tool, with_prefs(tool, spec, args, relax=relax))
         except GatewayError as e:
             res = {"ok": False, "error": "gateway_error", "message": str(e)}
         if res.get("ok"):
@@ -2201,19 +2203,45 @@ def gather_multi(spec, usage, metrics):
         if c in PLACE_CATEGORIES
     })
     kws = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-           + list(spec.get("activities") or []))[:5]
+           + list(spec.get("activities") or []))[:8]
+    leg_counts = []
     for i, leg in enumerate(legs):
         yield ev("status", f"Searching hotels and places in {leg['city']} ({leg['nights']} nights)…")
         name, booked, price = _hotel_wish(spec, leg)
         extra = {"name": name, "alreadyBooked": booked, **({"bookedPriceSGD": price} if price else {})} if name else {}
-        res = call("search_stays", {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
-                                    "guests": pax, **extra})
+        stay_args = {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
+                     "guests": pax, **extra}
+        place_args = {"city": leg["city"], "categories": cats, "keywords": kws,
+                      **leg_search_sizes(spec, leg, len(cats))}
+
+        res = call("search_stays", stay_args)
         for st in res.get("stays", []) if res.get("ok") else []:
             pool["stays"].append({**st, "city": leg["city"], "leg": i})
-        res = call("find_places", {"city": leg["city"], "categories": cats, "keywords": kws, "radiusKm": 6,
-                                   "maxPerCategory": 6})
+        res = call("find_places", place_args)
         for pl in res.get("places", []) if res.get("ok") else []:
             pool["places"].append({**pl, "city": leg["city"], "leg": i})
+
+        # Relax-and-retry for this city when there are too few candidates.
+        for tool, args, field, key, id_key, wanted in [
+            ("find_places", place_args, "places", "places", "placeId", int(leg_places_target(spec, leg) * 0.6)),
+            ("search_stays", stay_args, "stays", "stays", "stayId", MIN_STAYS_WANTED),
+        ]:
+            if sum(1 for x in pool[key] if x.get("leg") == i) >= wanted:
+                continue
+            if with_prefs(tool, spec, args, relax=True) == with_prefs(tool, spec, args):   # nothing to relax
+                continue
+            yield ev("status", f"Widening the {'places' if key == 'places' else 'hotel'} search in {leg['city']}…")
+            res = call(tool, args, relax=True)
+            if res.get("ok"):
+                have = {x[id_key] for x in pool[key] if x.get("leg") == i}
+                for x in res.get(field, []):
+                    if x[id_key] not in have:
+                        pool[key].append({**x, "city": leg["city"], "leg": i})
+                relaxed.append(f"{tool}:{leg['city']}")
+        leg_counts.append({"city": leg["city"], "nights": leg["nights"],
+                           "places": sum(1 for x in pool["places"] if x.get("leg") == i),
+                           "stays": sum(1 for x in pool["stays"] if x.get("leg") == i)})
+
     for i, (a, b) in enumerate(zip(legs, legs[1:])):
         yield ev("status", f"Finding ways to get from {a['city']} to {b['city']} on {a['checkOut']}…")
         res = call("search_transfers", {"from": {"city": a["city"], "airport": a["airport"]},
@@ -2222,7 +2250,9 @@ def gather_multi(spec, usage, metrics):
         for o in res.get("options", []) if res.get("ok") else []:
             pool["transfers"].append({**o, "hop": i})
     yield from gather_specials(spec, pool, calls, sources)
-    metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)")
+    print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
+    metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
+                   poolCounts=leg_counts, relaxedSearches=relaxed)
     return pool
 
 
