@@ -39,7 +39,8 @@ import requests  # from the tp-deps layer
 DUFFEL_URL = "https://api.duffel.com/air/offer_requests"
 SERPAPI_URL = "https://serpapi.com/search"
 SERPAPI_CLASS = {"economy": 1, "premium_economy": 2, "business": 3, "first": 4}
-MAX_RESULTS = 5
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "15"))
+RETURNS_PER_LOOKUP = int(os.environ.get("SERPAPI_RETURNS_PER_LOOKUP", "8"))   # kept from each return lookup, no extra calls
 CABINS = {"economy", "premium_economy", "business", "first"}
 
 # Approximate conversion rates to SGD, fixed for reproducibility. Update and re-date when needed.
@@ -193,9 +194,8 @@ def _apply_prefs(offers, q):
         offers[0]["filterNote"] = "; ".join(notes)
     return offers
 
-
 def _cache_key(q):
-    return "flights:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v2:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -374,7 +374,7 @@ def _call_serpapi(q, key):
             continue
         rets = sorted((r for r in (back.get("best_flights") or []) + (back.get("other_flights") or [])
                        if r.get("price")), key=lambda r: r["price"])
-        for r in rets[:3]:
+        for r in rets[:RETURNS_PER_LOOKUP]:
             o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url)
             if o:
                 offers.append(o)
