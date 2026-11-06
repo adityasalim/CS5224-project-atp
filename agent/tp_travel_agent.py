@@ -148,19 +148,44 @@ POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner nee
 MIN_PLACES_TARGET = 30
 MIN_STAYS_WANTED = 8
 
-MEAL_MAX_KM = 2.5   # a meal stop further than this from the day's other stops is swapped for a closer one
+MEAL_MAX_KM = 2.5               # a meal stop further than this from the day's other stops is swapped for a closer one
+MEAL_SWAP_SCORE_SLACK = 6.0     # a replacement may score at most this much lower than the meal it replaces
+_MEAL_WINDOWS = {"cafe": [(10 * 60, 17 * 60)], "dessert": [(10 * 60, 17 * 60)]}
+_DEFAULT_MEAL_WINDOWS = [(12 * 60, 14 * 60), (18 * 60, 20 * 60)]     # lunch or dinner
+
+
+def _cuisine_hit(p, cuisines):
+    blob = f'{p.get("cuisine") or ""} {p.get("name") or ""} {p.get("description") or ""} {" ".join(p.get("tags") or [])}'.lower()
+    return any(c in blob or c.replace("_", " ") in blob for c in cuisines)
+
+
+def _meal_hours_ok(c, original):
+    """A replacement must not lose known hours, and when its hours are known it must be open around a meal time."""
+    hours = c.get("openSimple")
+    if not hours:
+        return not original.get("openSimple")        # unknown hours only replace unknown hours
+    try:
+        o, cl = _hm(hours["open"]), _hm(hours["close"])
+    except (KeyError, ValueError, TypeError):
+        return not original.get("openSimple")
+    windows = _MEAL_WINDOWS.get(str(c.get("category") or "").lower(), _DEFAULT_MEAL_WINDOWS)
+    return any(o < hi and cl > lo for lo, hi in windows)
 
 
 def _balance_meals(spec, pool, plan):
     """For every normal day, swap a restaurant/cafe/dessert stop that is far from the day's sightseeing stops for
-    the nearest unused candidate of the same category that is still compatible (dietary, accessibility, avoid,
-    same city). Pinned, requested and day-trip places are never swapped. Changes plan["days"] in place;
-    returns the list of swaps (empty when nothing changed, so calling it twice is harmless)."""
+    the nearest unused candidate of the same category that is still a good replacement: same city, compatible
+    with dietary, accessibility and avoid needs, the same cuisine and vibe, no loss of known opening hours, and a
+    preference score close to the original. Pinned, requested and day-trip places are never swapped. Changes
+    plan["days"] in place; returns the list of swaps (empty when nothing changed, so calling it twice is harmless)."""
     byid = {p["placeId"]: p for p in pool.get("places", [])}
     used = {pid for d in plan.get("days", []) for pid in (d.get("placeIds") or [])}
     prefs = spec.get("preferences") or {}
     dietary = prefs.get("dietary") or []
     access = prefs.get("accessibility") or []
+    vibe = prefs.get("vibe", "balanced")
+    cuisines = [str(x).lower().strip() for x in (spec.get("cuisines") or ([spec["cuisine"]] if spec.get("cuisine") else []))
+                if str(x).strip()]
     avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
     pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
     swaps = []
@@ -173,7 +198,18 @@ def _balance_meals(spec, pool, plan):
         if access and _accessibility_status(c, access) == "conflict":
             return False
         blob = f'{c.get("name", "")} {c.get("category", "")} {c.get("cuisine", "")} {c.get("description", "")}'.lower()
-        return not any(a in blob for a in avoid)
+        if any(a in blob for a in avoid):
+            return False
+        if cuisines and _cuisine_hit(original, cuisines) and not _cuisine_hit(c, cuisines):
+            return False
+        tags_o, tags_c = original.get("tags") or [], c.get("tags") or []
+        if vibe == "hidden_gems" and "local pick" in tags_o and "local pick" not in tags_c:
+            return False
+        if vibe == "classic" and "well-known" in tags_o and "well-known" not in tags_c:
+            return False
+        if not _meal_hours_ok(c, original):
+            return False
+        return _place_score(c, spec) >= _place_score(original, spec) - MEAL_SWAP_SCORE_SLACK
 
     for d in plan.get("days", []):
         ids = list(d.get("placeIds") or [])
@@ -189,14 +225,21 @@ def _balance_meals(spec, pool, plan):
             if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("dayTrip")
                     or p.get("lat") is None or _km(centre, p) <= MEAL_MAX_KM):
                 continue
-            cands = [c for c in pool.get("places", [])
-                     if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
-                     and c.get("lat") is not None and not c.get("dayTrip")
-                     and (not d.get("city") or c.get("city") == d.get("city")) and compatible(c, p)]
-            if not cands:
-                continue
-            best = min(cands, key=lambda c: _km(centre, c))
-            if _km(centre, best) < _km(centre, p) - 0.5:       # only swap if it is clearly closer
+            cands = sorted(
+                (c for c in pool.get("places", [])
+                 if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
+                 and c.get("lat") is not None and not c.get("dayTrip")
+                 and (not d.get("city") or c.get("city") == d.get("city"))),
+                key=lambda c: _km(centre, c))
+            limit_km = _km(centre, p) - 0.5          # only swap if the replacement is clearly closer
+            best = None
+            for c in cands:
+                if _km(centre, c) >= limit_km:
+                    break
+                if compatible(c, p):
+                    best = c
+                    break
+            if best:
                 ids[idx] = best["placeId"]
                 used.discard(pid)
                 used.add(best["placeId"])
