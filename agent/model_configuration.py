@@ -8,7 +8,7 @@ PROVIDERS = {'bedrock', 'google', 'alibaba'}
 # model_adapter.py imports this set, and parse() rejects any other Alibaba model when the config is loaded,
 # so a mismatch fails at start-up instead of on the first planner call.
 ALIBABA_MODELS = {'qwen3.8-max', 'qwen3.8-max-0902', 'qwen3.8-flash', 'qwen3.7-plus',
-                  'deepseek-v4.1-flash-1017', 'deepseek-v4-pro-0813', 'glm-5.3'}
+                  'deepseek-v4.1-flash-1017', 'deepseek-v4-pro-0813', 'glm-5.3', 'deepseek-v4.1-flash'}
 
 @dataclass(frozen=True)
 class ModelSelection:
