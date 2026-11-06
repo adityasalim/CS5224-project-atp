@@ -4053,7 +4053,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             print("repair failed:", e)
             stop_reason = STOP_REPAIR_FAILED
             break
-        _balance_meals(spec, pool, next_plan
+        _balance_meals(spec, pool, next_plan)
         next_sig = _plan_signature(next_plan)
         if not strict_mode and (not next_sig or next_sig in seen_plans):
             stop_reason = STOP_NO_PROGRESS
