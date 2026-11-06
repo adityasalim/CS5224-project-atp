@@ -57,7 +57,13 @@ TIMING_RULES = """- Flight and transfer timing: respect the chosen flight's arri
   places (opening >= 16:00, bars, nightlife) late in the day, never in the morning. Treat omitted "hours" as unknown;
   never invent operating hours or travel durations.
 - Geography and prices: group stops with close lat/lng coordinates on the same day (distanceKm is hotel/city-centre
-  distance, not inter-stop travel time). Pool prices are totals for all travellers and all nights or the whole journey."""
+  distance, not inter-stop travel time). Choose each day's restaurant, cafe and dessert stops from candidates close to
+  that day's other stops, so a meal never means a long detour (food candidates can be up to about 5 km from the centre).
+  Pool prices are totals for all travellers and all nights or the whole journey."""
+
+POOL_NOTE = """- The candidate pool is deliberately larger than the plan needs (roughly 2-3 candidates per stop you will plan).
+  Pick the best fits for this traveller and for each day's area; do not try to use many of them, and do not fill a
+  day just because more candidates exist."""
 
 INTAKE = """ROLE: intake parser for a travel planner.
 Today's date is {today}. Convert the traveller's request (and any earlier details) into a TripSpec JSON object.
@@ -152,6 +158,8 @@ to replace with the traveller's real value; it is NOT a default. Use "" or null 
   "missing": [], "question": ""}}"""
 
 # Used only by the legacy GATHER_MODE=model path; the role adapter does not support tool calling.
+# The system fills in search sizes (radiusKm, maxPerCategory for find_places; limit, maxResults, comfort for
+# search_stays) from the trip length, so the model does not choose them.
 GATHER = """ROLE: research step of a travel planner. You collect candidate options with tools; you do NOT plan yet.
 
 Trip: {spec}
@@ -161,11 +169,16 @@ Call the tools to gather options:
   For flightType "round", include returnDate = endDate.
   For flightType "oneway", omit returnDate and returnFrom entirely.
   Never invent a return flight for a one-way trip.
-- search_stays once (destination city, checkIn = startDate, checkOut = endDate, guests = pax).
+- search_stays (destination city, checkIn = startDate, checkOut = endDate, guests = pax). One call is normally
+  enough: it returns many hotels, ranked by location, reviews, stars and price. Do not set limit or maxResults.
+  If the result says filterNote or returns very few hotels, search once more with fewer filters (drop minStars,
+  minReviewScore, area).
 - find_places for the traveller's interests as categories. Always include "restaurant" (and "cafe" if relevant).
   Pass the cuisine if the traveller mentioned food preferences. Put the trip's "activities" (and any interest that
   is not an allowed category) in keywords, e.g. keywords: ["bouldering gym"]. Outdoor categories and keywords
-  automatically search further out for day trips. You may call find_places up to 3 times.
+  automatically search further out for day trips. Do not set radiusKm or maxPerCategory: the system sizes the search
+  to the trip length (longer trips need many more candidates). You may call find_places up to 4 times, for example
+  once for sights and once for food, or again with fewer filters (drop freeOnly, indoorOnly) if too few places came back.
 - Personalise every search: read trip.preferences and the request, and use each tool's preference parameters
   (find_places: vibe, dietary, accessibility, audience, indoorOnly, freeOnly, avoid; search_stays: style, minStars,
   minReviewScore, sortBy, a neighbourhood in city; search_flights: maxStops, time windows, airlines, sortBy). Turn
@@ -217,6 +230,7 @@ Rules:
   trip.cuisines; never use supermarkets or convenience stores as food or sightseeing stops.
 - Diversify categories across the trip and within each day; respect rememberedPreferences unless overridden. Give each
   day a coherent 3-6 word theme.
+<<POOL>>
 <<TIMING>>
 <<PERSONALISE>>
 {special}
@@ -238,6 +252,7 @@ Rules:
 - Full-day stops by pace (dining/cafes count): relaxed 2-3, moderate 3-4, packed 5-6.
 - Include authentic dining/cafes on full days matching trip.cuisines and dietary needs (never supermarkets), diversify
   categories across days, and respect rememberedPreferences. Give each day a coherent 3-6 word theme.
+<<POOL>>
 <<TIMING>>
 <<PERSONALISE_MULTI>>
 {special}
@@ -437,6 +452,7 @@ Reply in at most 120 words of plain text. If natural, end with one short example
 
 # Insert the shared rule blocks (they contain no braces, so str.format() on the prompts still works).
 _SHARED = {"<<GUARD>>": DATA_GUARD, "<<SCORES>>": SCORE_RULES, "<<TIMING>>": TIMING_RULES,
+           "<<POOL>>": POOL_NOTE,
            "<<PERSONALISE_MULTI>>": PERSONALISE_RULES_MULTI, "<<PERSONALISE>>": PERSONALISE_RULES}
 
 
