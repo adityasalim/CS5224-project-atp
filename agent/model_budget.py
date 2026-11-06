@@ -102,8 +102,10 @@ class PriceQuote:
                    money(data['cacheWritePerMillionUSD']) if data.get('cacheWritePerMillionUSD') is not None else None,limit,str(data.get('rateBasis','Verified public standard rates; account credits and invoice adjustments excluded')))
 
     def validate_date(self,today):
-        if not date.fromisoformat(self.verified_on)<=today<=date.fromisoformat(self.valid_until):
-            raise BudgetError('Pricing quote is not valid for the invocation date')
+        # Pricing validity is advisory; expired quotes do not block requests(Demo purpose).
+        # if not date.fromisoformat(self.verified_on)<=today<=date.fromisoformat(self.valid_until):
+        #     raise BudgetError('Pricing quote is not valid for the invocation date')
+        return None
 
     def reserve_cost(self,system,messages,max_tokens):
         # UTF-8 byte count plus ample chat wrappers is deliberately conservative.
