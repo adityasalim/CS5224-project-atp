@@ -7,6 +7,7 @@ from datetime import datetime,timezone
 from google_transport import GoogleTransport,GoogleTransportError
 from model_configuration import ModelConfiguration, ALIBABA_MODELS   # ALIBABA_MODELS: one list, defined in model_configuration
 import logging
+import httpx2
 
 ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
 # Request timeouts. A planner reply can be up to 8000 tokens, which takes longer than the old 90 s on a large trip.
@@ -52,6 +53,13 @@ class ModelAdapter:
             key=next((value.get(k) for k in ('api_key','API_KEY','DASHSCOPE_API_KEY','ALIBABA_API_KEY') if value.get(k)),None)
             if not isinstance(key,str) or not key:raise ValueError('Alibaba secret lacks a supported API-key field')
             result=OpenAI(api_key=key,base_url='https://dashscope-intl.aliyuncs.com/compatible-mode/v1',timeout=ALIBABA_TIMEOUT_SECONDS,max_retries=0)
+            def log_request(request):
+                logging.getLogger(__name__).warning(
+                    "Alibaba HTTP request: timeout=%s",
+                    request.extensions.get("timeout")
+                )
+            
+            result._client.event_hooks["request"].append(log_request)
             logging.getLogger(__name__).warning(
                 "Alibaba timeout diagnostics: configured=%s client=%s http=%s",
                 ALIBABA_TIMEOUT_SECONDS,
