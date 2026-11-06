@@ -154,8 +154,9 @@ MEAL_MAX_KM = 2.5   # a meal stop further than this from the day's other stops i
 def _balance_meals(spec, pool, plan):
     """For every normal day, swap a restaurant/cafe/dessert stop that is far from the day's sightseeing stops for
     the nearest unused candidate of the same category that is still compatible (dietary, accessibility, avoid,
-    same city). Pinned and requested places are never swapped. Changes plan["days"] in place; returns the swaps."""
-    byid = {p["placeId"]: p for p in pool["places"]}
+    same city). Pinned, requested and day-trip places are never swapped. Changes plan["days"] in place;
+    returns the list of swaps (empty when nothing changed, so calling it twice is harmless)."""
+    byid = {p["placeId"]: p for p in pool.get("places", [])}
     used = {pid for d in plan.get("days", []) for pid in (d.get("placeIds") or [])}
     prefs = spec.get("preferences") or {}
     dietary = prefs.get("dietary") or []
@@ -175,9 +176,9 @@ def _balance_meals(spec, pool, plan):
         return not any(a in blob for a in avoid)
 
     for d in plan.get("days", []):
-        if d.get("dayTrip"):
-            continue
         ids = list(d.get("placeIds") or [])
+        if d.get("dayTrip") or any(byid.get(i, {}).get("dayTrip") for i in ids):
+            continue
         anchors = [byid[i] for i in ids if i in byid and not _is_food_place(byid[i]) and byid[i].get("lat") is not None]
         if not anchors:
             continue
@@ -185,10 +186,10 @@ def _balance_meals(spec, pool, plan):
                   "lng": sum(p["lng"] for p in anchors) / len(anchors)}
         for idx, pid in enumerate(ids):
             p = byid.get(pid)
-            if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("lat") is None
-                    or _km(centre, p) <= MEAL_MAX_KM):
+            if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("dayTrip")
+                    or p.get("lat") is None or _km(centre, p) <= MEAL_MAX_KM):
                 continue
-            cands = [c for c in pool["places"]
+            cands = [c for c in pool.get("places", [])
                      if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
                      and c.get("lat") is not None and not c.get("dayTrip")
                      and (not d.get("city") or c.get("city") == d.get("city")) and compatible(c, p)]
@@ -210,7 +211,6 @@ def trip_days(spec):
         return (date.fromisoformat(spec["endDate"]) - date.fromisoformat(spec["startDate"])).days + 1
     except (KeyError, TypeError, ValueError):
         return 3
-
 
 def places_target(spec, days=None):
     """How many candidate places the pool should hold: 2.5 x (days x stops per day), at least 30."""
@@ -2473,8 +2473,9 @@ def _used_place_ids(plan_or_seq):
     return used
 
 
-def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, limit=3):
-    """Select top-ranked unused candidates from pool['places'] matching optional predicate and city."""
+def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, limit=3, near=None):
+    """Select top-ranked unused candidates from pool['places'] matching optional predicate and city.
+    With near={lat,lng} (e.g. the middle of the day), the best-ranked candidates are re-sorted by distance to it."""
     cands = [
         p for p in _order_places(pool.get("places", []), spec=spec)
         if p.get("placeId") not in exclude_ids
@@ -2482,6 +2483,12 @@ def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, 
         and (not city or not p.get("city") or str(p.get("city")).lower() == str(city).lower())
         and (predicate is None or predicate(p))
     ]
+    if near is not None:
+        shortlist = cands[:max(limit * 6, 12)]
+        shortlist.sort(key=lambda p: _km(near, p) if p.get("lat") is not None else 1e9)
+        return [f"{p['placeId']} ({p.get('name')}, {p.get('category')}"
+                + (f", {_km(near, p):.1f} km from the day's stops)" if p.get("lat") is not None else ")")
+                for p in shortlist[:limit]]
     return [f"{p['placeId']} ({p.get('name')}, {p.get('category')})" for p in cands[:limit]]
 
 
@@ -2778,13 +2785,20 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
         elif chk in ("far_from_base", "city_mismatch") and item.get("day"):
             day_obj = next((d for d in (plan.get("days") or []) if d.get("date") == item["day"]), {})
             city = day_obj.get("city")
-            repls = _top_replacement_places(spec, pool, used_ids, city=city, limit=2)
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, city=city, limit=2, near=near)
             if repls:
                 item["repairHint"] = (f"{hint} Replace {item.get('item', 'stop')} on {item['day']} with {city} option: {', '.join(repls)}.").strip()
         elif chk in ("opening_hours", "hours") and item.get("day"):
-            repls = _top_replacement_places(spec, pool, used_ids, limit=2)
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, limit=2, near=near)
             if repls:
                 item["repairHint"] = (f"{hint} Move {item.get('item', 'stop')} from {item['day']} to an open day or swap with {', '.join(repls)}.").strip()
+        elif chk == "travel_time" and item.get("day"):
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, limit=2, near=near)
+            if repls:
+                item["repairHint"] = (f"{hint} Swap {item.get('item', 'the stop')} on {item['day']} for a closer option: {', '.join(repls)}.").strip()
         enriched.append(item)
 
     for u in (unscheduled or []):
@@ -2804,7 +2818,6 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
 
     enriched.sort(key=lambda x: (x.get("priority", 6), str(x.get("day") or ""), str(x.get("check") or "")))
     return enriched
-
 
 def repair(spec, pool, plan, verify_res, judge_res, unscheduled, usage, change=None):
     adapter = getattr(usage, "adapter", None)
