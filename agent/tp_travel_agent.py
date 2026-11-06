@@ -142,7 +142,136 @@ _DIET_NEED_RE = re.compile(
     r"\b(?:diet\w*|vegan|vegetarian|pescatarian|halal|kosher|gluten|lactose|dairy|meat|pork|beef|chicken|"
     r"seafood|shellfish|fish|nuts?|peanuts?|eggs?|soy|sesame|allerg\w*|intoleran\w*|celiac|coeliac)\b", re.I)
 
+# ---- search sizing (new) ------------------------------------------------------------------
+STOPS_PER_DAY = {"relaxed": 4, "moderate": 5, "packed": 7}   # same table as trip_spec_for_tools
+POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner needs
+MIN_PLACES_TARGET = 30
+MIN_STAYS_WANTED = 8
 
+MEAL_MAX_KM = 2.5               # a meal stop further than this from the day's other stops is swapped for a closer one
+MEAL_SWAP_SCORE_SLACK = 6.0     # a replacement may score at most this much lower than the meal it replaces
+_MEAL_WINDOWS = {"cafe": [(10 * 60, 17 * 60)], "dessert": [(10 * 60, 17 * 60)]}
+_DEFAULT_MEAL_WINDOWS = [(12 * 60, 14 * 60), (18 * 60, 20 * 60)]     # lunch or dinner
+
+
+def _cuisine_hit(p, cuisines):
+    blob = f'{p.get("cuisine") or ""} {p.get("name") or ""} {p.get("description") or ""} {" ".join(p.get("tags") or [])}'.lower()
+    return any(c in blob or c.replace("_", " ") in blob for c in cuisines)
+
+
+def _meal_hours_ok(c, original):
+    """A replacement must not lose known hours, and when its hours are known it must be open around a meal time."""
+    hours = c.get("openSimple")
+    if not hours:
+        return not original.get("openSimple")        # unknown hours only replace unknown hours
+    try:
+        o, cl = _hm(hours["open"]), _hm(hours["close"])
+    except (KeyError, ValueError, TypeError):
+        return not original.get("openSimple")
+    windows = _MEAL_WINDOWS.get(str(c.get("category") or "").lower(), _DEFAULT_MEAL_WINDOWS)
+    return any(o < hi and cl > lo for lo, hi in windows)
+
+
+def _balance_meals(spec, pool, plan):
+    """For every normal day, swap a restaurant/cafe/dessert stop that is far from the day's sightseeing stops for
+    the nearest unused candidate of the same category that is still a good replacement: same city, compatible
+    with dietary, accessibility and avoid needs, the same cuisine and vibe, no loss of known opening hours, and a
+    preference score close to the original. Pinned, requested and day-trip places are never swapped. Changes
+    plan["days"] in place; returns the list of swaps (empty when nothing changed, so calling it twice is harmless)."""
+    byid = {p["placeId"]: p for p in pool.get("places", [])}
+    used = {pid for d in plan.get("days", []) for pid in (d.get("placeIds") or [])}
+    prefs = spec.get("preferences") or {}
+    dietary = prefs.get("dietary") or []
+    access = prefs.get("accessibility") or []
+    vibe = prefs.get("vibe", "balanced")
+    cuisines = [str(x).lower().strip() for x in (spec.get("cuisines") or ([spec["cuisine"]] if spec.get("cuisine") else []))
+                if str(x).strip()]
+    avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
+    swaps = []
+
+    def compatible(c, original):
+        if dietary:
+            status = _dietary_status(c, dietary)
+            if status == "conflict" or (_dietary_status(original, dietary) == "verified" and status != "verified"):
+                return False
+        if access and _accessibility_status(c, access) == "conflict":
+            return False
+        blob = f'{c.get("name", "")} {c.get("category", "")} {c.get("cuisine", "")} {c.get("description", "")}'.lower()
+        if any(a in blob for a in avoid):
+            return False
+        if cuisines and _cuisine_hit(original, cuisines) and not _cuisine_hit(c, cuisines):
+            return False
+        tags_o, tags_c = original.get("tags") or [], c.get("tags") or []
+        if vibe == "hidden_gems" and "local pick" in tags_o and "local pick" not in tags_c:
+            return False
+        if vibe == "classic" and "well-known" in tags_o and "well-known" not in tags_c:
+            return False
+        if not _meal_hours_ok(c, original):
+            return False
+        return _place_score(c, spec) >= _place_score(original, spec) - MEAL_SWAP_SCORE_SLACK
+
+    for d in plan.get("days", []):
+        ids = list(d.get("placeIds") or [])
+        if d.get("dayTrip") or any(byid.get(i, {}).get("dayTrip") for i in ids):
+            continue
+        anchors = [byid[i] for i in ids if i in byid and not _is_food_place(byid[i]) and byid[i].get("lat") is not None]
+        if not anchors:
+            continue
+        centre = {"lat": sum(p["lat"] for p in anchors) / len(anchors),
+                  "lng": sum(p["lng"] for p in anchors) / len(anchors)}
+        for idx, pid in enumerate(ids):
+            p = byid.get(pid)
+            if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("dayTrip")
+                    or p.get("lat") is None or _km(centre, p) <= MEAL_MAX_KM):
+                continue
+            cands = sorted(
+                (c for c in pool.get("places", [])
+                 if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
+                 and c.get("lat") is not None and not c.get("dayTrip")
+                 and (not d.get("city") or c.get("city") == d.get("city"))),
+                key=lambda c: _km(centre, c))
+            limit_km = _km(centre, p) - 0.5          # only swap if the replacement is clearly closer
+            best = None
+            for c in cands:
+                if _km(centre, c) >= limit_km:
+                    break
+                if compatible(c, p):
+                    best = c
+                    break
+            if best:
+                ids[idx] = best["placeId"]
+                used.discard(pid)
+                used.add(best["placeId"])
+                swaps.append({"date": d.get("date"), "from": pid, "to": best["placeId"]})
+        d["placeIds"] = ids
+    if swaps:
+        print(json.dumps({"stage": "balance-meals", "swaps": len(swaps)}))
+    return swaps
+  
+def trip_days(spec):
+    try:
+        return (date.fromisoformat(spec["endDate"]) - date.fromisoformat(spec["startDate"])).days + 1
+    except (KeyError, TypeError, ValueError):
+        return 3
+
+def places_target(spec, days=None):
+    """How many candidate places the pool should hold: 2.5 x (days x stops per day), at least 30."""
+    days = days or trip_days(spec)
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    return max(MIN_PLACES_TARGET, -(-days * stops * POOL_FACTOR_X10 // 10))
+
+
+def search_sizes(spec, n_categories=5, days=None):
+    """Search sizes that grow with trip length (a 14-day trip needs a much bigger pool than a 3-day one)."""
+    days = days or trip_days(spec)
+    target = places_target(spec, days)
+    per_cat = max(6, min(40, -(-target // max(1, n_categories))))
+    radius = 6 if days <= 4 else 8 if days <= 9 else 10
+    comfort = (spec.get("preferenceScores") or {}).get("comfort", 5)
+    return {"places": {"radiusKm": radius, "maxPerCategory": per_cat},
+            "stays": {"limit": 100 if days <= 7 else 150, "maxResults": 30, "comfort": comfort},
+            "target": target}
 def _clear_dietary_from_message(spec, message):
     """Clear remembered/carried dietary values only when the message says there are none AND names no other food
     need anywhere (so 'no dietary restrictions except shellfish' keeps every restriction). Returns True if cleared.
@@ -161,7 +290,49 @@ def _clear_dietary_from_message(spec, message):
     prefs["dietary"] = []
     print(f"dietary cleared by traveller message: old={old} message={text[:120]!r}")
     return True
+def leg_places_target(spec, leg):
+    """Candidate places wanted for one city of a multi-city trip: 2.5 x (nights x stops per day), at least 25."""
+    nights = max(1, int(leg.get("nights") or 1))
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    return max(25, -(-nights * stops * POOL_FACTOR_X10 // 10))
 
+
+def leg_search_sizes(spec, leg, n_categories=5):
+    """find_places sizes for one city of a multi-city trip."""
+    nights = max(1, int(leg.get("nights") or 1))
+    per_cat = max(6, min(40, -(-leg_places_target(spec, leg) // max(1, n_categories))))
+    radius = 6 if nights <= 3 else 8 if nights <= 8 else 10
+    return {"radiusKm": radius, "maxPerCategory": per_cat}
+
+
+def _is_food_place(p):
+    return str(p.get("category") or "").lower() in _FOOD_CATS and not _is_supermarket(p)
+
+
+def _select_places(places, target, spec):
+    """Best `target` places in rank order, with at least 35% food/cafe stops (every full day needs 1-2 of them).
+    Requested, day-trip and pinned places are never dropped."""
+    chosen = _order_places(places, target, spec=spec)
+    min_food = int(target * 0.35)
+    if sum(1 for p in chosen if _is_food_place(p)) >= min_food:
+        return chosen
+    ranked = _order_places(places, None, spec=spec)            # the full ranking
+    rank = {p["placeId"]: i for i, p in enumerate(ranked)}
+    ids = {p["placeId"] for p in chosen}
+    need = min_food - sum(1 for p in chosen if _is_food_place(p))
+    add = [p for p in ranked if p["placeId"] not in ids and _is_food_place(p)][:need]
+    if not add:
+        return chosen
+    pinned = {x.get("placeId") for x in ((spec or {}).get("pinned") or []) if isinstance(x, dict)}
+    drops = max(0, len(add) - max(target - len(chosen), 0))
+    keep = list(chosen)
+    for p in reversed(chosen):                                  # drop the lowest-ranked non-food stops
+        if drops <= 0:
+            break
+        if not _is_food_place(p) and not p.get("requested") and not p.get("dayTrip") and p["placeId"] not in pinned:
+            keep.remove(p)
+            drops -= 1
+    return sorted(keep + add, key=lambda p: rank.get(p["placeId"], 10 ** 6))
 
 def _real_values(v):
     """List of meaningful strings: drops blanks and placeholders such as 'None', 'n/a', 'no restrictions'."""
@@ -1042,19 +1213,10 @@ def pref_args(tool, spec):
             a["cuisine"] = spec["cuisine"]
     elif tool == "search_stays":
         h = p["hotel"]
-        a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"], "sortBy": h["sortBy"]}
-
-        comfort = (spec.get("preferenceScores") or {}).get("comfort", 5)
-
-        if comfort >= 8:
-            if not a["minStars"]:
-                a["minStars"] = 3
-            if not a["minReviewScore"]:
-                a["minReviewScore"] = 8
-            if a["sortBy"] == "price":
-                a["sortBy"] = "value"
-        elif comfort <= 3 and a["sortBy"] == "price":
-            a["sortBy"] = "price"
+        # Only what the traveller asked for is sent. The comfort score no longer forces star/review floors:
+        # tp-search-stays uses it to weight its ranking, and relaxes any filter that would leave too few hotels.
+        a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"],
+             "sortBy": h["sortBy"], "comfort": (spec.get("preferenceScores") or {}).get("comfort", 5)}
     elif tool == "search_flights":
         f = p["flight"]
         a = {k: f[k] for k in ("maxStops", "departAfter", "departBefore", "returnDepartAfter", "returnDepartBefore",
@@ -1067,18 +1229,30 @@ def pref_args(tool, spec):
                                                      "economy") or (k == "avoidOvernight" and v is False)}
 
 
-def with_prefs(tool, spec, args):
+def with_prefs(tool, spec, args, relax=False):
     """Tool arguments with the traveller's preferences filled in. Values the model chose itself win, so the model
-    can still refine them; preferences it forgot are added, so no personal wish is silently dropped."""
+    can still refine them; preferences it forgot are added, so no personal wish is silently dropped.
+    Search sizes (radius, results per category, hotel limit) are filled in from the trip length unless given.
+    relax=True drops the soft filters (free-only, indoor-only, star/review floors, hotel area) for a retry."""
     out = {**pref_args(tool, spec), **(args or {})}
     if 'budget' in spec:
         out.pop('maxPricePerNightSGD', None)
+    if relax:
+        for k in ("freeOnly", "indoorOnly", "minStars", "minReviewScore"):
+            out.pop(k, None)
+    if tool == "find_places" and (out.get("categories") or out.get("keywords")):
+        n_cats = max(1, len(out.get("categories") or []))
+        for k, v in search_sizes(spec, n_cats)["places"].items():
+            out.setdefault(k, v)
+    if tool == "search_stays":
+        for k, v in search_sizes(spec)["stays"].items():
+            out.setdefault(k, v)
     if tool == "search_stays" and not is_multi(spec) and "name" not in (args or {}):
         name, booked, price = _hotel_wish(spec)
         if name:
             out.update(name=name, alreadyBooked=booked, **({"bookedPriceSGD": price} if price else {}))
     area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
-    if tool == "search_stays" and area and out.get("lat") is None and "," not in str(out.get("city", "")):
+    if tool == "search_stays" and area and not relax and out.get("lat") is None and "," not in str(out.get("city", "")):
         out["city"] = f'{area}, {out.get("city") or spec.get("destination")}'
     return out
 
@@ -1111,6 +1285,22 @@ def _fit_result(short, res):
             return text
     return json.dumps({"ok": bool(res.get("ok")), "note": "result too large to show"}, separators=(",", ":"))
 
+def _sights_focus(spec, places, n=12):
+    """Middle (median) of the best-ranked sights: where the traveller will spend the days.
+    Food, outdoor and day-trip places are left out. Returns None when there are no usable coordinates."""
+    ranked = [p for p in _order_places(places, None, spec=spec)
+              if not _is_food_place(p) and p.get("lat") is not None and p.get("lng") is not None
+              and not p.get("dayTrip") and p.get("category") not in OUTDOOR]
+    top = ranked[:n]
+    if not top:
+        return None
+
+    def median(values):
+        values = sorted(values)
+        mid = len(values) // 2
+        return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    return {"lat": round(median([p["lat"] for p in top]), 5), "lng": round(median([p["lng"] for p in top]), 5)}
+
 
 def gather(spec, usage, metrics):
     """Standard searches need no model turn; retain model mode for paired comparisons."""
@@ -1120,7 +1310,7 @@ def gather(spec, usage, metrics):
         return (yield from gather_model(spec, usage, metrics))
     _, _, gw = _clients()
     pool = {"flights": [], "stays": [], "places": [], "transfers": []}
-    calls, sources = [], set()
+    calls, sources, relaxed = [], set(), []
     flight = {"origin": spec["originAirport"], "destination": spec["destinationAirport"],
               "departDate": spec["startDate"], "pax": spec["pax"]}
     if spec.get("flightType") != "oneway":
@@ -1128,7 +1318,7 @@ def gather(spec, usage, metrics):
     cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
                   | {"restaurant"})
     keywords = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-                + list(spec.get("activities") or []))[:5]
+                + list(spec.get("activities") or []))[:8]
     name, booked, price = _hotel_wish(spec)
     hotel = {"city": spec["destination"], "checkIn": spec["startDate"],
              "checkOut": spec["endDate"], "guests": spec["pax"]}
@@ -1136,12 +1326,9 @@ def gather(spec, usage, metrics):
         hotel.update(name=name, alreadyBooked=booked)
         if price:
             hotel["bookedPriceSGD"] = price
-    for tool, args, field, key in [
-        ("search_flights", flight, "offers", "flights"),
-        ("search_stays", hotel, "stays", "stays"),
-        ("find_places", {"city": spec["destination"], "categories": cats,
-                         "keywords": keywords, "radiusKm": 6, "maxPerCategory": 6}, "places", "places"),
-    ]:
+    place_args = {"city": spec["destination"], "categories": cats, "keywords": keywords}
+
+    def run(tool, args, field, key):
         calls.append(tool)
         yield ev("status", tool.replace("_", " ").capitalize() + "…")
         try:
@@ -1151,9 +1338,44 @@ def gather(spec, usage, metrics):
         if result.get("ok"):
             pool[key] = result.get(field, [])
             sources.add(f"{tool}:{result.get('source')}")
+
+    yield from run("search_flights", flight, "offers", "flights")
+    yield from run("find_places", place_args, "places", "places")
+
+    # Hotels are searched around the main sights (not the city centre) unless the traveller named a hotel or area.
+    area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
+    focus = _sights_focus(spec, pool["places"])
+    if focus and not area and not name:
+        hotel = {**hotel, "lat": focus["lat"], "lng": focus["lng"]}
+    yield from run("search_stays", hotel, "stays", "stays")
+
+    # Relax-and-retry: too few candidates -> search once more without the soft filters and merge the results.
+    for tool, args, field, key, id_key, wanted in [
+        ("find_places", place_args, "places", "places", "placeId", int(places_target(spec) * 0.6)),
+        ("search_stays", hotel, "stays", "stays", "stayId", MIN_STAYS_WANTED),
+    ]:
+        if len(pool[key]) >= wanted:
+            continue
+        first, loose = with_prefs(tool, spec, args), with_prefs(tool, spec, args, relax=True)
+        if loose == first:      # nothing to relax
+            continue
+        yield ev("status", "Widening the " + ("places" if key == "places" else "hotel") + " search…")
+        calls.append(tool)
+        try:
+            result = gw.call(tool, loose)
+        except GatewayError:
+            result = {"ok": False}
+        if result.get("ok"):
+            have = {x[id_key] for x in pool[key]}
+            pool[key] += [x for x in result.get(field, []) if x[id_key] not in have]
+            sources.add(f"{tool}:{result.get('source')}")
+            relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
+    counts = {k: len(v) for k, v in pool.items()}
+    print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
+                      "hotelFocus": focus if (focus and not area and not name) else None}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources),
-                   gatherMode="single-city (code)")
+                   gatherMode="single-city (code)", poolCounts=counts, relaxedSearches=relaxed)
     return pool
 
 
@@ -1364,6 +1586,10 @@ def _c_stay(s_):
         price_fields = {"price": "unknown"}
     item = {"id": s_["stayId"], "name": s_.get("name"), "stars": s_.get("starRating"),
             "review": s_.get("reviewScore"), **price_fields, "style": s_.get("style")}
+    if s_.get("distanceKm") is not None:      # how far from the search centre, so the planner can weigh location
+        item["distKm"] = s_["distanceKm"]
+    if s_.get("reviewCount") is not None:
+        item["reviews"] = s_["reviewCount"]
     for k in ("matches", "filterNote", "booked"):
         if s_.get(k): item[k] = s_[k]
     return item
@@ -1960,8 +2186,13 @@ def _order_flights(flights, spec=None):
     )
 
 
+LOC_SCALE_KM = 8.0        # a hotel this far from the search centre gets no location credit
+LOC_WEIGHT = 12.0         # how many ranking points the nearest hotel earns (packed pace earns more)
+REVIEW_PRIOR = 50         # reviews needed before a hotel's own score outweighs the average
+
+
 def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
-    """Order stays by requested/booked status, budget feasibility, comfort balance and preference matches."""
+    """Order stays by requested/booked status, budget feasibility, comfort balance, location and preference matches."""
     if not stays:
         return []
     if not isinstance(spec, dict):
@@ -1985,6 +2216,11 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     h_pref = ((spec.get("preferences") or {}).get("hotel") or {})
     want_styles = {str(s).lower() for s in (h_pref.get("style") or []) if str(s).strip()}
     want_name = str(h_pref.get("name") or "").strip().lower()
+    loc_weight = LOC_WEIGHT * (1.3 if spec.get("pace") == "packed" else 1.0)   # NEW
+
+    known_reviews = [float(x.get("reviewScore") or x.get("review")) for x in stays
+                     if (x.get("reviewScore") or x.get("review"))]            # NEW
+    mean_review = sum(known_reviews) / len(known_reviews) if known_reviews else 7.5   # NEW
 
     feasible_good_prices = sorted(
         _price(s_) for s_ in stays
@@ -2004,7 +2240,11 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
             return (2, 1000.0, -(_price(s_) or 0.0), str(s_.get("stayId") or ""))
         price = _price(s_)
         stars = float(s_.get("starRating") or s_.get("stars") or 3.0)
-        review = float(s_.get("reviewScore") or s_.get("review") or 7.5)
+        rev_raw = s_.get("reviewScore") or s_.get("review")
+        review = float(rev_raw) if rev_raw else 7.5
+        cnt = s_.get("reviewCount")                                            # NEW: a score from few reviews counts less
+        if rev_raw and isinstance(cnt, (int, float)) and not isinstance(cnt, bool) and cnt > 0:
+            review = (cnt / (cnt + REVIEW_PRIOR)) * review + (REVIEW_PRIOR / (cnt + REVIEW_PRIOR)) * mean_review
         styles = {str(x).lower() for x in (s_.get("style") or []) if isinstance(s_.get("style"), list)}
         if isinstance(s_.get("style"), str) and s_.get("style"):
             styles.add(s_["style"].lower())
@@ -2024,6 +2264,9 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
         qual = c_weight * ((review - 7.0) * 6.0 + (stars - 2.5) * 4.0) + len(matches) * 4.5
         if want_styles and (styles & want_styles):
             qual += 6.0
+        dist = s_.get("distanceKm")                                            # NEW: location credit
+        if isinstance(dist, (int, float)) and not isinstance(dist, bool):
+            qual += loc_weight * max(0.0, 1.0 - float(dist) / LOC_SCALE_KM)
         if rem_stay_budget is not None and price is not None:
             if rem_stay_budget <= 0:
                 # Minimize budget overrun when zero accommodation budget remains
@@ -2041,16 +2284,50 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     return sorted(stays, key=stay_key, reverse=True)
 
 
+def _spread_stays(ordered, n, cell_deg=0.015):
+    """First n stays in rank order, with at most max(2, n // 4) per neighbourhood (about 1.5 km) while other
+    stays remain, so the planner sees hotels from different areas."""
+    cap = max(2, n // 4)
+    out, ids, cells = [], set(), {}
+    for pass_cap in (cap, None):
+        for s_ in ordered:
+            if len(out) >= n:
+                break
+            sid = s_.get("stayId")
+            if sid in ids:
+                continue
+            lat, lng = s_.get("lat"), s_.get("lng")
+            cell = (round(lat / cell_deg), round(lng / cell_deg)) if lat is not None and lng is not None else None
+            if pass_cap is not None and cell is not None and cells.get(cell, 0) >= pass_cap:
+                continue
+            out.append(s_)
+            ids.add(sid)
+            if cell is not None:
+                cells[cell] = cells.get(cell, 0) + 1
+    return out
+
+
 def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:6]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    stays = [_c_stay(s_) for s_ in ordered_stays[:8]]
-    places = [_c_place(p) for p in _order_places(pool["places"], 60, spec=spec)]
+    stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
+    days = trip_days(spec) if spec else 20
+    target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
+    floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
+    places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
+
     def dump():
         return json.dumps({"flights": flights, "stays": stays, "places": places}, separators=(",", ":"))
     out = dump()
-    while len(out) > MAX_POOL_CHARS and len(places) > 10:   # places are ranked: drop the lowest ranked first
+    if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions
+        for p in places:
+            p.pop("about", None)
+        out = dump()
+    while len(out) > MAX_POOL_CHARS and len(places) > floor:   # then drop the lowest ranked places
+        del places[-max(1, len(places) // 10):]
+        out = dump()
+    while len(out) > MAX_POOL_CHARS and len(places) > 10:      # last resort, as before
         del places[-max(1, len(places) // 10):]
         out = dump()
     return out
@@ -2058,16 +2335,18 @@ def compact_pool(pool, spec=None):
 
 def gather_multi(spec, usage, metrics):
     """Multi-city search, done in code (many calls with fixed arguments): an open-jaw international flight,
-    hotels and places per city, and transfers per hop. Results are tagged with their city/leg."""
+    hotels and places per city, and transfers per hop. Results are tagged with their city/leg.
+    Search sizes grow with the nights of each city. In each city the places are searched first and the hotels
+    around the main sights; a city with too few results is searched once more without the soft filters."""
     _, _, gw = _clients()
     legs, pax = spec["legs"], spec["pax"]
     pool = {"flights": [], "stays": [], "places": [], "transfers": []}
-    sources, calls = set(), []
+    sources, calls, relaxed = set(), [], []
 
-    def call(tool, args):
+    def call(tool, args, relax=False):
         calls.append(tool)
         try:
-            res = gw.call(tool, with_prefs(tool, spec, args))
+            res = gw.call(tool, with_prefs(tool, spec, args, relax=relax))
         except GatewayError as e:
             res = {"ok": False, "error": "gateway_error", "message": str(e)}
         if res.get("ok"):
@@ -2090,19 +2369,50 @@ def gather_multi(spec, usage, metrics):
         if c in PLACE_CATEGORIES
     })
     kws = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-           + list(spec.get("activities") or []))[:5]
+           + list(spec.get("activities") or []))[:8]
+    area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
+    leg_counts = []
     for i, leg in enumerate(legs):
-        yield ev("status", f"Searching hotels and places in {leg['city']} ({leg['nights']} nights)…")
+        yield ev("status", f"Searching places and hotels in {leg['city']} ({leg['nights']} nights)…")
         name, booked, price = _hotel_wish(spec, leg)
         extra = {"name": name, "alreadyBooked": booked, **({"bookedPriceSGD": price} if price else {})} if name else {}
-        res = call("search_stays", {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
-                                    "guests": pax, **extra})
-        for st in res.get("stays", []) if res.get("ok") else []:
-            pool["stays"].append({**st, "city": leg["city"], "leg": i})
-        res = call("find_places", {"city": leg["city"], "categories": cats, "keywords": kws, "radiusKm": 6,
-                                   "maxPerCategory": 6})
+        place_args = {"city": leg["city"], "categories": cats, "keywords": kws,
+                      **leg_search_sizes(spec, leg, len(cats))}
+
+        res = call("find_places", place_args)
         for pl in res.get("places", []) if res.get("ok") else []:
             pool["places"].append({**pl, "city": leg["city"], "leg": i})
+
+        stay_args = {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
+                     "guests": pax, **extra}
+        focus = _sights_focus(spec, [p for p in pool["places"] if p.get("leg") == i])
+        if focus and not area and not name:        # hotels around this city's main sights
+            stay_args = {**stay_args, "lat": focus["lat"], "lng": focus["lng"]}
+        res = call("search_stays", stay_args)
+        for st in res.get("stays", []) if res.get("ok") else []:
+            pool["stays"].append({**st, "city": leg["city"], "leg": i})
+
+        # Relax-and-retry for this city when there are too few candidates.
+        for tool, args, field, key, id_key, wanted in [
+            ("find_places", place_args, "places", "places", "placeId", int(leg_places_target(spec, leg) * 0.6)),
+            ("search_stays", stay_args, "stays", "stays", "stayId", MIN_STAYS_WANTED),
+        ]:
+            if sum(1 for x in pool[key] if x.get("leg") == i) >= wanted:
+                continue
+            if with_prefs(tool, spec, args, relax=True) == with_prefs(tool, spec, args):   # nothing to relax
+                continue
+            yield ev("status", f"Widening the {'places' if key == 'places' else 'hotel'} search in {leg['city']}…")
+            res = call(tool, args, relax=True)
+            if res.get("ok"):
+                have = {x[id_key] for x in pool[key] if x.get("leg") == i}
+                for x in res.get(field, []):
+                    if x[id_key] not in have:
+                        pool[key].append({**x, "city": leg["city"], "leg": i})
+                relaxed.append(f"{tool}:{leg['city']}")
+        leg_counts.append({"city": leg["city"], "nights": leg["nights"],
+                           "places": sum(1 for x in pool["places"] if x.get("leg") == i),
+                           "stays": sum(1 for x in pool["stays"] if x.get("leg") == i)})
+
     for i, (a, b) in enumerate(zip(legs, legs[1:])):
         yield ev("status", f"Finding ways to get from {a['city']} to {b['city']} on {a['checkOut']}…")
         res = call("search_transfers", {"from": {"city": a["city"], "airport": a["airport"]},
@@ -2111,7 +2421,9 @@ def gather_multi(spec, usage, metrics):
         for o in res.get("options", []) if res.get("ok") else []:
             pool["transfers"].append({**o, "hop": i})
     yield from gather_specials(spec, pool, calls, sources)
-    metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)")
+    print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
+    metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
+                   poolCounts=leg_counts, relaxedSearches=relaxed)
     return pool
 
 
@@ -2132,6 +2444,7 @@ def compact_pool_multi(spec, pool):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:5]]
     cities = []
+    floors = []
     min_by_leg = {}
     for i in range(len(spec["legs"])):
         leg_prices = [p for p in (known_price(s_) for s_ in pool["stays"] if s_.get("leg") == i) if p is not None]
@@ -2144,8 +2457,10 @@ def compact_pool_multi(spec, pool):
         other_stays = sum(v for k, v in min_by_leg.items() if k != i) + min_transfers
         leg_stays = _order_stays([s_ for s_ in pool["stays"] if s_.get("leg") == i],
                                  spec=spec, flights=ordered_flights, other_cost=other_stays)
-        stays = [_c_stay(s_) for s_ in leg_stays[:5]]
-        places = [_c_place(p) for p in _order_places([p for p in pool["places"] if p.get("leg") == i], 22, spec=spec)]
+        stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
+        leg_places = [p for p in pool["places"] if p.get("leg") == i]
+        places = [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)]
+        floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
                        "checkOut": leg["checkOut"], "stays": stays, "places": places})
     hops = []
@@ -2155,14 +2470,24 @@ def compact_pool_multi(spec, pool):
              "arrive": t.get("arriveAt"), "minutes": t.get("durationMinutes"), **({"price": t["price"]} if "price" in t else ({"priceSGD": t["priceTotalSGD"]} if t.get("priceTotalSGD") is not None else {"price": "unknown"})),
              "estimate": t.get("estimate"), "overnight": t.get("overnight", False), "matches": t.get("matches") or []}
             for t in pool["transfers"] if t.get("hop") == i]})
+
     def dump():
         return json.dumps({"internationalFlights": flights, "cities": cities, "transfers": hops}, separators=(",", ":"))
     out = dump()
+    if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions
+        for c in cities:
+            for p in c["places"]:
+                p.pop("about", None)
+        out = dump()
     while len(out) > MAX_POOL_CHARS:
-        biggest = max(cities, key=lambda c: len(c["places"]))
-        if len(biggest["places"]) <= 6:
-            break
-        del biggest["places"][-max(1, len(biggest["places"]) // 8):]
+        spare = [(len(c["places"]) - floors[i], i) for i, c in enumerate(cities) if len(c["places"]) > floors[i]]
+        if spare:                                           # trim the city that is furthest above its floor
+            i = max(spare)[1]
+        else:                                               # last resort, as before: down to 6 per city
+            i = max(range(len(cities)), key=lambda k: len(cities[k]["places"]))
+            if len(cities[i]["places"]) <= 6:
+                break
+        del cities[i]["places"][-max(1, len(cities[i]["places"]) // 8):]
         out = dump()
     return out
 
@@ -2263,8 +2588,9 @@ def _used_place_ids(plan_or_seq):
     return used
 
 
-def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, limit=3):
-    """Select top-ranked unused candidates from pool['places'] matching optional predicate and city."""
+def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, limit=3, near=None):
+    """Select top-ranked unused candidates from pool['places'] matching optional predicate and city.
+    With near={lat,lng} (e.g. the middle of the day), the best-ranked candidates are re-sorted by distance to it."""
     cands = [
         p for p in _order_places(pool.get("places", []), spec=spec)
         if p.get("placeId") not in exclude_ids
@@ -2272,6 +2598,12 @@ def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, 
         and (not city or not p.get("city") or str(p.get("city")).lower() == str(city).lower())
         and (predicate is None or predicate(p))
     ]
+    if near is not None:
+        shortlist = cands[:max(limit * 6, 12)]
+        shortlist.sort(key=lambda p: _km(near, p) if p.get("lat") is not None else 1e9)
+        return [f"{p['placeId']} ({p.get('name')}, {p.get('category')}"
+                + (f", {_km(near, p):.1f} km from the day's stops)" if p.get("lat") is not None else ")")
+                for p in shortlist[:limit]]
     return [f"{p['placeId']} ({p.get('name')}, {p.get('category')})" for p in cands[:limit]]
 
 
@@ -2568,13 +2900,20 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
         elif chk in ("far_from_base", "city_mismatch") and item.get("day"):
             day_obj = next((d for d in (plan.get("days") or []) if d.get("date") == item["day"]), {})
             city = day_obj.get("city")
-            repls = _top_replacement_places(spec, pool, used_ids, city=city, limit=2)
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, city=city, limit=2, near=near)
             if repls:
                 item["repairHint"] = (f"{hint} Replace {item.get('item', 'stop')} on {item['day']} with {city} option: {', '.join(repls)}.").strip()
         elif chk in ("opening_hours", "hours") and item.get("day"):
-            repls = _top_replacement_places(spec, pool, used_ids, limit=2)
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, limit=2, near=near)
             if repls:
                 item["repairHint"] = (f"{hint} Move {item.get('item', 'stop')} from {item['day']} to an open day or swap with {', '.join(repls)}.").strip()
+        elif chk == "travel_time" and item.get("day"):
+            near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
+            repls = _top_replacement_places(spec, pool, used_ids, limit=2, near=near)
+            if repls:
+                item["repairHint"] = (f"{hint} Swap {item.get('item', 'the stop')} on {item['day']} for a closer option: {', '.join(repls)}.").strip()
         enriched.append(item)
 
     for u in (unscheduled or []):
@@ -2594,7 +2933,6 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
 
     enriched.sort(key=lambda x: (x.get("priority", 6), str(x.get("day") or ""), str(x.get("check") or "")))
     return enriched
-
 
 def repair(spec, pool, plan, verify_res, judge_res, unscheduled, usage, change=None):
     adapter = getattr(usage, "adapter", None)
@@ -3630,6 +3968,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     no_progress_streak = 0
     stop_reason = STOP_ROUND_LIMIT
     while True:
+        _balance_meals(spec, pool, plan)
         cur_sig = _plan_signature(plan)
         if cur_sig: seen_plans.add(cur_sig)
         yield ev("status", "Ordering each day around opening hours and travel times…")
@@ -3714,6 +4053,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             print("repair failed:", e)
             stop_reason = STOP_REPAIR_FAILED
             break
+        _balance_meals(spec, pool, next_plan
         next_sig = _plan_signature(next_plan)
         if not strict_mode and (not next_sig or next_sig in seen_plans):
             stop_reason = STOP_NO_PROGRESS

@@ -12,8 +12,12 @@ Input event:
               {"id": "osm:way/123", "lat": 35.71, "lng": 139.79}],
    "mode": "walk"}          # "walk" or "car"
 
-Output: {"ok": true, "ids": [...], "minutes": [[0, 23], [24, 0]], "source": "amazon-location" | "estimate"}
-Public transit is not modelled; the estimate uses walking or taxi speeds. State this in the report.
+Output: {"ok": true, "ids": [...], "minutes": [[0, 23], [24, 0]], "source": "amazon-location" | "estimate",
+         "cellsEstimated": n, "cellsTotal": n, "estimatedShare": 0.0-1.0, "requests": n}
+Large matrices are requested in blocks of 10 x 10 (Amazon Location allows at most 15 origins and 100
+origin-destination pairs per request with an unbounded routing boundary). A block that fails is filled with
+the estimate. The cache ignores the order of the points. Public transit is not modelled (Amazon Location
+offers Car, Pedestrian, Scooter and Truck only); the estimate uses walking or taxi speeds. State this in the report.
 """
 import hashlib
 import json
@@ -24,7 +28,8 @@ from decimal import Decimal
 
 import boto3
 
-MAX_POINTS = 25           # keeps Location calls small; larger sets use the estimate
+MAX_POINTS = 25           # larger sets use the estimate
+BLOCK = 10                # origins and destinations per request: 10 x 10 = 100 pairs, the unbounded-boundary limit
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5  # city traffic, plus pickup time
 
@@ -58,26 +63,40 @@ def _estimate(points, mode):
 
 
 def _location(points, mode):
+    """Route matrix from Amazon Location in blocks of BLOCK x BLOCK. A block that fails is filled with the
+    estimate. Returns (minutes, cells filled with the estimate, requests made, error messages)."""
     client = boto3.client("geo-routes")
+    n = len(points)
     pos = [{"Position": [p["lng"], p["lat"]]} for p in points]
-    resp = client.calculate_route_matrix(
-        Origins=pos, Destinations=pos,
-        TravelMode="Car" if mode == "car" else "Pedestrian",
-        RoutingBoundary={"Unbounded": True})
     est = _estimate(points, mode)
-    out, filled = [], 0
-    for i, row in enumerate(resp["RouteMatrix"]):
-        out_row = []
-        for j, cell in enumerate(row):
-            if i == j:
-                out_row.append(0)
-            elif cell.get("Error") or cell.get("Duration") is None:
-                out_row.append(est[i][j])   # fill gaps with the estimate
-                filled += 1
-            else:
-                out_row.append(math.ceil(cell["Duration"] / 60) + (CAR_OVERHEAD_MIN if mode == "car" else 0))
-        out.append(out_row)
-    return out, filled
+    out = [[0] * n for _ in range(n)]
+    filled, requests_made, errors = 0, 0, []
+    for r0 in range(0, n, BLOCK):
+        for c0 in range(0, n, BLOCK):
+            rows, cols = pos[r0:r0 + BLOCK], pos[c0:c0 + BLOCK]
+            try:
+                resp = client.calculate_route_matrix(
+                    Origins=rows, Destinations=cols,
+                    TravelMode="Car" if mode == "car" else "Pedestrian",
+                    RoutingBoundary={"Unbounded": True})
+                requests_made += 1
+                matrix = resp["RouteMatrix"]
+            except Exception as e:  # noqa: BLE001 — fill this block with the estimate
+                errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+                matrix = None
+            for ri in range(len(rows)):
+                for ci in range(len(cols)):
+                    i, j = r0 + ri, c0 + ci
+                    if i == j:
+                        out[i][j] = 0
+                        continue
+                    cell = matrix[ri][ci] if matrix else None
+                    if not cell or cell.get("Error") or cell.get("Duration") is None:
+                        out[i][j] = est[i][j]   # fill gaps with the estimate
+                        filled += 1
+                    else:
+                        out[i][j] = math.ceil(cell["Duration"] / 60) + (CAR_OVERHEAD_MIN if mode == "car" else 0)
+    return out, filled, requests_made, errors
 
 
 def _validate(event):
@@ -97,6 +116,19 @@ def _validate(event):
     if mode not in ("walk", "car"):
         return None, _err("bad_input", "mode must be 'walk' or 'car'")
     return {"points": clean, "mode": mode}, None
+
+
+def _canonical_order(points):
+    """Original indexes sorted by (id, lat, lng): the same set of points always gives the same cache key,
+    whatever order the caller lists them in."""
+    return sorted(range(len(points)), key=lambda i: (points[i]["id"], points[i]["lat"], points[i]["lng"], i))
+
+
+def _reorder(matrix, order):
+    """Matrix computed for the canonical order -> matrix for the caller's original order."""
+    pos = {orig: k for k, orig in enumerate(order)}
+    n = len(order)
+    return [[matrix[pos[i]][pos[j]] for j in range(n)] for i in range(n)]
 
 
 def _cache_get(key):
@@ -126,25 +158,35 @@ def lambda_handler(event, context):
         return error
     pts, mode = q["points"], q["mode"]
     ids = [p["id"] for p in pts]
+    n = len(pts)
 
-    if os.environ.get("MOCK_MODE", "true").lower() == "true" or len(pts) > MAX_POINTS:
-        reason = "mock mode" if len(pts) <= MAX_POINTS else f"more than {MAX_POINTS} points"
+    if os.environ.get("MOCK_MODE", "true").lower() == "true" or n > MAX_POINTS:
+        reason = "mock mode" if n <= MAX_POINTS else f"more than {MAX_POINTS} points"
         return {"ok": True, "source": "estimate", "reason": reason, "mode": mode, "ids": ids,
                 "minutes": _estimate(pts, mode)}
 
-    key = "route:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    order = _canonical_order(pts)
+    cpts = [pts[i] for i in order]
+    key = "route-v2:" + hashlib.sha256(json.dumps({"points": cpts, "mode": mode}, sort_keys=True).encode()).hexdigest()[:32]
     cached = _cache_get(key)
     if cached:
-        return {**cached, "source": cached["source"] + "-cache"}
+        return {"ok": True, "source": cached["source"] + "-cache", "mode": mode, "ids": ids,
+                "minutes": _reorder(cached["minutes"], order), "cellsEstimated": cached.get("cellsEstimated", 0),
+                "cellsTotal": cached.get("cellsTotal", n * (n - 1)),
+                "estimatedShare": cached.get("estimatedShare", 0.0)}
 
-    try:
-        minutes, filled = _location(pts, mode)
-        result = {"ok": True, "source": "amazon-location", "mode": mode, "ids": ids, "minutes": minutes,
-                  "cellsEstimated": filled}
-    except Exception as e:  # noqa: BLE001 — never fail the plan because of routing
-        print("location failed:", e)
-        result = {"ok": True, "source": "estimate", "reason": f"location error: {str(e)[:150]}",
-                  "mode": mode, "ids": ids, "minutes": _estimate(pts, mode)}
-        return result  # don't cache errors
-    _cache_put(key, result)
-    return result
+    minutes, filled, requests_made, errors = _location(cpts, mode)
+    total = n * (n - 1)
+    if requests_made == 0:     # nothing worked: say why and use the estimate for everything
+        print("location failed:", errors[:3])
+        return {"ok": True, "source": "estimate", "reason": f"location error: {'; '.join(errors[:2])[:200]}",
+                "mode": mode, "ids": ids, "minutes": _estimate(pts, mode)}
+    share = round(filled / total, 3) if total else 0.0
+    result = {"ok": True, "source": "amazon-location", "mode": mode, "minutes": minutes,
+              "cellsEstimated": filled, "cellsTotal": total, "estimatedShare": share}
+    if errors:                 # some blocks failed: don't cache a partly estimated matrix
+        print("location blocks failed:", errors[:3])
+        result["blocksFailed"] = len(errors)
+    else:
+        _cache_put(key, result)
+    return {**result, "ids": ids, "minutes": _reorder(minutes, order), "requests": requests_made}

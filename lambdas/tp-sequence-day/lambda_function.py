@@ -5,6 +5,10 @@ feasible schedule that respects opening hours and travel times, starting from th
 Travel times come from the tp-route-matrix function (Amazon Location) when
 ROUTE_MATRIX_FUNCTION is set; otherwise from the same distance estimate it uses.
 
+Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day starts no earlier
+than 11:30 and is nudged into the 12:00-14:00 window; any later restaurant or street-food stop starts no earlier
+than 17:30 (dinner). Cafes and desserts have no time floor, so a morning coffee is possible.
+
 Environment variables:
   CACHE_TABLE            DynamoDB cache table — used to look up places/stays by ID (candidate pool)
   ROUTE_MATRIX_FUNCTION  optional, e.g. "tp-route-matrix" (role needs lambda:InvokeFunction on it)
@@ -29,7 +33,15 @@ DEFAULT_VISIT = {"museum": 120, "gallery": 90, "temple": 60, "shrine": 45, "chur
                  "viewpoint": 45, "park": 75, "garden": 75, "zoo": 150, "market": 75, "shopping": 90,
                  "restaurant": 75, "cafe": 45, "bar": 75,
                  "climbing": 150, "hiking": 240, "nature": 150, "onsen": 120, "beach": 150, "activity": 120,
-                 "requested": 90}
+                 "requested": 90,
+                 # categories that used to fall back to 60 minutes
+                 "theme_park": 240, "aquarium": 120, "historic": 75, "spa": 90, "dessert": 30,
+                 "street_food": 45, "nightlife": 90, "bookshop": 30, "playground": 45}
+# Meal stops: the first one of the day is lunch (not before 11:30), a later one is dinner (not before 17:30).
+# Cafes and desserts are not meals, so they have no time floor.
+MEAL_CATEGORIES = ("restaurant", "street_food")
+LUNCH_FLOOR = 11 * 60 + 30
+DINNER_FLOOR = 17 * 60 + 30
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
 MAX_WALK_MINUTES = 30  # longer walks switch to the car/taxi time for that hop (mode "walk")
@@ -170,10 +182,12 @@ def _resolve(event):
 
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
-    opening time if needed); a lunch-category stop is preferred around 12:00-14:00."""
+    opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
+    11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
+    meals_done = 0                              # meal stops (restaurant / street food) already scheduled
     while remaining:
         best = None
         for i in remaining:
@@ -183,9 +197,9 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             open_t, close_t = 0, 24 * 60 - 1
             if s.get("openSimple"):
                 open_t, close_t = _hm(s["openSimple"]["open"]), _hm(s["openSimple"]["close"])
-            begin = max(arrive, open_t)
-            if lunch and s.get("category") in ("restaurant", "cafe") and begin < 11 * 60 + 30:
-                begin = 11 * 60 + 30            # don't schedule lunch spots at breakfast time
+            is_meal = lunch and s.get("category") in MEAL_CATEGORIES
+            floor = (DINNER_FLOOR if meals_done else LUNCH_FLOOR) if is_meal else 0
+            begin = max(arrive, open_t, floor)
             end = begin + s["visitMinutes"]
             back, _ = _hop(walk_m, car_m, i, 0, mode)
             if end > close_t or end + back > day_end:
@@ -193,8 +207,8 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             score = end
             if long_first and s["visitMinutes"] >= 120:
                 score -= 10000 + s["visitMinutes"] * 10   # long activities (hikes, climbing) first
-            if lunch and s.get("category") in ("restaurant", "cafe") and 12 * 60 <= begin <= 14 * 60:
-                score -= 60                     # nudge food stops into the lunch window
+            if is_meal and not meals_done and 12 * 60 <= begin <= 14 * 60:
+                score -= 60                     # nudge the lunch into the lunch window
             if best is None or score < best[0]:
                 best = (score, i, travel, how, arrive, begin, end)
         if best is None:
@@ -205,6 +219,8 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                     "lat": s["lat"], "lng": s["lng"], "travelMinutesFromPrev": travel, "travelBy": how,
                     "arriveAt": _fmt(begin), "departAt": _fmt(end),
                     "waitMinutes": max(begin - arrive, 0), "visitMinutes": s["visitMinutes"]})
+        if lunch and s.get("category") in MEAL_CATEGORIES:
+            meals_done += 1
         t, cur = end, i
         remaining.remove(i)
     back_minutes = _hop(walk_m, car_m, cur, 0, mode)[0] if out else 0

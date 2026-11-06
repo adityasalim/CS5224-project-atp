@@ -1,6 +1,6 @@
 {
   "name": "find_places",
-  "description": "Find real places to visit, eat or do near a city, neighbourhood or point, matched to the traveller's personal style. Returns placeId, name, category, coordinates, opening hours, links, plus 'tags' (e.g. local pick, well-known, wheelchair, vegetarian, halal, free entry, indoor, family), 'matches' (which of the requested preferences the place meets) and a short description when known. Translate EVERY preference in the request into these parameters, not just the interests: diet, mobility, kids, weather, budget, 'like a local' and things to avoid. Call it separately for different areas or day trips (pass the day-trip town as city). When the traveller names a specific place, put it in 'names' so the real place is in the pool. Only placeIds returned here may be used in a plan.",
+  "description": "Find real places to visit, eat or do near a city, neighbourhood or point, matched to the traveller's personal style. Places are searched around the city centre (or the given lat/lng); distanceKm is the distance from that centre. Returns placeId, name, category, coordinates, opening hours, links, plus 'tags' (e.g. local pick, well-known, wheelchair, vegetarian, halal, free entry, indoor, family), 'matches' (which of the requested preferences the place meets) and a short description when known. Translate EVERY preference in the request into these parameters, not just the interests: diet, mobility, kids, weather, budget, 'like a local' and things to avoid. Call it separately for different areas or day trips (pass the day-trip town as city). When the traveller names a specific place, put it in 'names' so the real place is in the pool. Only placeIds returned here may be used in a plan.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -28,7 +28,7 @@
         "items": {
           "type": "string"
         },
-        "description": "Free-text searches for anything the categories don't cover, as short phrases (max 5): 'bouldering gym', 'cooking class', 'kayaking', 'jazz bar', 'tea ceremony', 'vintage shops', 'night market', 'sunset spot', 'northern lights viewing'. Use the traveller's own words for unusual wishes."
+        "description": "Free-text searches for anything the categories don't cover, as short phrases (max 8): 'bouldering gym', 'cooking class', 'kayaking', 'jazz bar', 'tea ceremony', 'vintage shops', 'night market', 'sunset spot', 'northern lights viewing'. Use the traveller's own words for unusual wishes."
       },
       "cuisine": {
         "type": "string",
@@ -73,11 +73,15 @@
       },
       "radiusKm": {
         "type": "number",
-        "description": "Search radius in km (default 4). Food stays within 1.5 km; city sights up to 15 km; outdoor categories and keywords search up to 50 km automatically for day trips."
+        "description": "Search radius in km (default 4) for city sights, up to 15 km. Food uses foodRadiusKm. Outdoor categories and keywords search up to 50 km automatically for day trips."
+      },
+      "foodRadiusKm": {
+        "type": "number",
+        "description": "Search radius in km for restaurants, cafes, bars, desserts and street food, 1-15 (default 5)."
       },
       "maxPerCategory": {
         "type": "integer",
-        "description": "Results per category or keyword, 1-20 (default 8). Use 10-12 for long trips."
+        "description": "Results per category or keyword, 1-40 (default 8). The agent sets this from the trip length: use about 10-12 for short trips and up to 40 for long ones."
       },
       "names": {
         "type": "array",
