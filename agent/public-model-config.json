@@ -14,7 +14,7 @@
     "model": "deepseek-v4.1-flash",
     "options": {
       "enableThinking": true,
-      "reasoningEffort": "medium"
+      "reasoningEffort": "low"
     }
   },
   "reviewer": {
