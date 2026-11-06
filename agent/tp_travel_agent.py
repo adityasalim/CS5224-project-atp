@@ -2311,7 +2311,7 @@ def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:6]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
+    stays = [_c_stay(s_) for s_ in _spread_stays(ordered_stays, 12)]
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
     floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
