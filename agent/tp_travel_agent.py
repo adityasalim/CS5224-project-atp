@@ -81,6 +81,7 @@ FALLBACK_CHAINS = [
 MAX_PROMPT_CHARS = 4000      # longest user message accepted
 MAX_REQUEST_CHARS = 3000     # longest accumulated request (original + recent changes) kept in state / saved
 MAX_POOL_CHARS = 60000       # budget for the candidate pool text sent to the planner
+MAX_FLIGHTS_SHOWN = int(os.environ.get("MAX_FLIGHTS_SHOWN", "15"))   # flights the planner sees
 MAX_TOOL_RESULT_CHARS = 8000 # budget for one tool result shown to the gather model
 MAX_OUTPUT_TOKENS = 8000     # hard cap of the role adapter
 MAX_REPAIR_ROUNDS = max(0, int(os.environ.get("MAX_REPAIR_ROUNDS", "3")))
@@ -2309,7 +2310,7 @@ def _spread_stays(ordered, n, cell_deg=0.015):
 
 def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
-    flights = [_c_flight(f) for f in ordered_flights[:6]]
+      flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
     stays = [_c_stay(s_) for s_ in _spread_stays(ordered_stays, 12)]
     days = trip_days(spec) if spec else 20
@@ -2442,7 +2443,7 @@ def multi_pool_gaps(spec, pool):
 
 def compact_pool_multi(spec, pool):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
-    flights = [_c_flight(f) for f in ordered_flights[:5]]
+    flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     cities = []
     floors = []
     min_by_leg = {}
