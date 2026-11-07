@@ -1,5 +1,5 @@
 
-"""hours_util.py - shared opening-hours parser: one place + one date -> usable intervals (minutes)."""
+"""hours_util.py - shared opening-hours parser: one place + one date -> usable intervals (minutes). """
 import re
 from datetime import date
 
