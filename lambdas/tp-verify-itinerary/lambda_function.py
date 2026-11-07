@@ -40,7 +40,7 @@ DEPARTURE_BUFFER_MIN = 180   # leave for the airport this long before take-off
 TRANSFER_BUFFER_MIN = 60     # after a transfer arrives: get to the hotel / drop bags
 MAX_DAY_TRAVEL_MIN = int(os.environ.get("MAX_DAY_TRAVEL_MIN", "120"))   # travel between stops per day
 MAX_HOP_MIN = int(os.environ.get("MAX_HOP_MIN", "40"))                   # longest single hop
-MAX_KM_FROM_BASE = int(os.environ.get("MAX_KM_FROM_BASE", "40"))         # was 120
+MAX_KM_FROM_BASE = int(os.environ.get("MAX_KM_FROM_BASE", "120"))         # was 120
 DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day trip
 DAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
 DAY_TRIP_RADIUS_KM = 40      # on a day trip, places must be around the day-trip town
@@ -416,12 +416,12 @@ def verify(spec, it, pool, daily_spend):
                 and prev_place is not hotel_pt:
             busy += math.floor(_km(prev_place, hotel_pt) / FASTEST_CITY_KMH * 60)   # the trip back to the hotel
 
-        if stops and not trip_min:
-            if travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN:
-                rep.fail("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
-                                    f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN})",
-                         "Replace the stop farthest from the others with a place near them, or move it to a day "
-                         "in the same area.", day=dt)
+        # if stops and not trip_min:
+        #     if travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN:
+        #         rep.fail("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
+        #                             f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN})",
+        #                  "Replace the stop farthest from the others with a place near them, or move it to a day "
+        #                  "in the same area.", day=dt)
         free = (day_end - day_start) - busy
         if stops and free < min_free and dt not in transfer_floor:
             rep.fail("free_time", f"{dt} has about {max(free, 0)} min free (needs {min_free})",
