@@ -5,9 +5,16 @@ feasible schedule that respects opening hours and travel times, starting from th
 Travel times come from the tp-route-matrix function (Amazon Location) when
 ROUTE_MATRIX_FUNCTION is set; otherwise from the same distance estimate it uses.
 
+Opening hours are read for the planned date (hours_util): weekday rules, lunch breaks and closed days are
+respected, and a place that is closed that day is returned in "unscheduled".
+
 Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day starts no earlier
 than 11:30 and is nudged into the 12:00-14:00 window; any later restaurant or street-food stop starts no earlier
-than 17:30 (dinner). Cafes and desserts have no time floor, so a morning coffee is possible.
+than 17:30 (dinner). A keyword result such as "halal restaurant" (category "activity") counts as a restaurant.
+Cafes and desserts have no time floor, so a morning coffee is possible.
+
+Optional limits (0 or missing = no limit): "maxStops" and "minFreeMinutes" keep the day within the verifier's
+pacing and free-time rules; stops that do not fit are returned in "unscheduled".
 
 Environment variables:
   CACHE_TABLE            DynamoDB cache table — used to look up places/stays by ID (candidate pool)
@@ -17,7 +24,8 @@ Input event (places can be given by ID only; details are read from the pool):
   {"date": "2026-12-11", "stayId": "mock:stay_1",
    "placeIds": ["osm:way/123", "osm:node/456"],
    "visitMinutes": {"osm:way/123": 90},          # optional overrides
-   "dayStart": "09:00", "dayEnd": "21:00", "mode": "walk", "lunch": true}
+   "dayStart": "09:00", "dayEnd": "21:00", "mode": "walk", "lunch": true,
+   "maxStops": 6, "minFreeMinutes": 60}
   Instead of stayId/placeIds you can pass full objects:
   "start": {"id": "hotel", "lat": .., "lng": ..},
   "stops": [{"placeId": "..", "name": "..", "lat": .., "lng": .., "visitMinutes": 90,
@@ -26,8 +34,10 @@ Input event (places can be given by ID only; details are read from the pool):
 import json
 import math
 import os
-from hours_util import hours_for, fit_visit
+
 import boto3
+
+from hours_util import fit_visit, hours_for
 
 DEFAULT_VISIT = {"museum": 120, "gallery": 90, "temple": 60, "shrine": 45, "church": 45, "attraction": 90,
                  "viewpoint": 45, "park": 75, "garden": 75, "zoo": 150, "market": 75, "shopping": 90,
@@ -40,6 +50,9 @@ DEFAULT_VISIT = {"museum": 120, "gallery": 90, "temple": 60, "shrine": 45, "chur
 # Meal stops: the first one of the day is lunch (not before 11:30), a later one is dinner (not before 17:30).
 # Cafes and desserts are not meals, so they have no time floor.
 MEAL_CATEGORIES = ("restaurant", "street_food")
+# Keyword searches that really mean "a place to eat" (e.g. "halal restaurant"). Food tours and cooking classes
+# are not in this list on purpose: they stay long activities.
+FOOD_KEYWORDS = ("restaurant", "eatery", "dining")
 LUNCH_FLOOR = 11 * 60 + 30
 DINNER_FLOOR = 17 * 60 + 30
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
@@ -125,10 +138,19 @@ def _hop(walk_m, car_m, i, j, mode):
     return w, "walk"
 
 
+def _is_meal(s):
+    """A restaurant / street-food stop, or a keyword result such as 'halal restaurant' (category 'activity')."""
+    if s.get("category") in MEAL_CATEGORIES:
+        return True
+    return s.get("category") == "activity" and any(w in (s.get("activity") or "").lower() for w in FOOD_KEYWORDS)
+
+
 def _default_visit(p):
     """Typical visit length; free-text activities guess from their keyword."""
     if p.get("category") == "activity":
         kw = (p.get("activity") or "").lower()
+        if any(w in kw for w in FOOD_KEYWORDS):
+            return DEFAULT_VISIT["restaurant"]          # a meal, not a 2-hour activity
         if any(w in kw for w in ("hike", "hiking", "trek", "trail", "mountain")):
             return 240
         if any(w in kw for w in ("climb", "boulder")):
@@ -163,14 +185,16 @@ def _resolve(event):
             missing.append(pid)
             continue
         stops.append({"placeId": pid, "name": p["name"], "category": p.get("category"),
+                      "activity": p.get("activity"),
                       "lat": p["lat"], "lng": p["lng"],
                       "hours": hours_for(p, event.get("date")),
                       "visitMinutes": int(overrides.get(pid, _default_visit(p)))})
     for s in event.get("stops") or []:
         stops.append({"placeId": str(s["placeId"]), "name": s.get("name", s["placeId"]),
-                      "category": s.get("category"), "lat": float(s["lat"]), "lng": float(s["lng"]),
+                      "category": s.get("category"), "activity": s.get("activity"),
+                      "lat": float(s["lat"]), "lng": float(s["lng"]),
                       "hours": hours_for({"openSimple": s.get("openSimple")}),
-                      "visitMinutes": int(s.get("visitMinutes") or DEFAULT_VISIT.get(s.get("category"), 60))})
+                      "visitMinutes": int(s.get("visitMinutes") or _default_visit(s))})
     if missing:
         return None, None, _err("not_in_pool", f"placeIds not found (expired or never searched): {missing}",
                                 missing=missing)
@@ -179,6 +203,7 @@ def _resolve(event):
     if len(stops) > 12:
         return None, None, _err("bad_input", "at most 12 stops per day")
     return start, stops, None
+
 
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
              max_stops=0, min_free=0):
@@ -199,7 +224,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             s = stops[i - 1]
             travel, how = _hop(walk_m, car_m, cur, i, mode)
             arrive = t + travel
-            is_meal = lunch and s.get("category") in MEAL_CATEGORIES
+            is_meal = lunch and _is_meal(s)
             floor = (DINNER_FLOOR if meals_done else LUNCH_FLOOR) if is_meal else 0
             begin = fit_visit(s["hours"], max(arrive, floor), s["visitMinutes"])
             if begin is None:                   # closed that day, or never fits an opening interval
@@ -225,7 +250,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                     "lat": s["lat"], "lng": s["lng"], "travelMinutesFromPrev": travel, "travelBy": how,
                     "arriveAt": _fmt(begin), "departAt": _fmt(end),
                     "waitMinutes": max(begin - arrive, 0), "visitMinutes": s["visitMinutes"]})
-        if lunch and s.get("category") in MEAL_CATEGORIES:
+        if lunch and _is_meal(s):
             meals_done += 1
         busy += travel + s["visitMinutes"]
         t, cur = end, i
@@ -237,6 +262,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                                else "does not fit opening hours, the day window or the free-time limit")}
                    for i in remaining]
     return out, unscheduled, back_minutes, max(day_end - day_start - busy_total, 0)
+
 
 def lambda_handler(event, context):
     if isinstance(event, str):
@@ -266,10 +292,10 @@ def lambda_handler(event, context):
         car_m, _ = _matrix(points, "car")
 
     lunch = bool(event.get("lunch", True))
-    # Try "earliest finish first" and "long activities first"; keep the one that fits the most stops,
-    # then the one with the least waiting.
     max_stops = int(event.get("maxStops") or 0)
     min_free = int(event.get("minFreeMinutes") or 0)
+    # Try "earliest finish first" and "long activities first"; keep the one that fits the most stops,
+    # then the one with the least waiting.
     options = [schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
                         max_stops=max_stops, min_free=min_free)
                for lf in (False, True)]
