@@ -1,7 +1,15 @@
 """Session-scoped optimized website protocol. No global agent-function patching."""
-import copy,time,threading
+import copy,os,time,threading
 from contextlib import contextmanager
 from model_adapter import ModelAdapter
+
+def _seconds(name,default):
+ try:return max(10,int(os.environ.get(name,default)))
+ except ValueError:return default
+
+# Read timeout for Bedrock calls on the website path (Kimi K3 reviewer/evaluator use non-streaming invoke_model and
+# regularly need more than the old fixed 45 s). Override with PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS.
+BEDROCK_READ_TIMEOUT_SECONDS=_seconds('PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS',120)
 PLANNING="""Before returning the existing JSON schema, silently audit your choices:
 1. Copy candidate IDs exactly. Respect the selected flight's actual local arrival DATE and departure DATE. Days before arrival have zero stops. Allow immigration, airport transport and rest before sightseeing; protect the final airport departure buffer.
 2. Cover every requested interest with actual suitable candidates. A generic historic site is not a temple. Prefer well-reviewed suitable venues over low-rated supermarkets for a food experience. Do not invent a romantic evening, nightlife, cuisine, hotel stars or accessibility unsupported by the selected items.
@@ -47,7 +55,7 @@ class PublicProtocolAdapter(ModelAdapter):
   if provider=='bedrock':
    import boto3
    from botocore.config import Config
-   client=boto3.client('bedrock-runtime',region_name='ap-southeast-1',config=Config(connect_timeout=10,read_timeout=45,retries={'total_max_attempts':1}))
+   client=boto3.client('bedrock-runtime',region_name='ap-southeast-1',config=Config(connect_timeout=10,read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,retries={'total_max_attempts':1}))
   elif provider=='alibaba':client=super()._client(provider).with_options(timeout=45,max_retries=0)
   else:client=super()._client(provider)
   self.clients[provider]=client
