@@ -195,7 +195,7 @@ def _apply_prefs(offers, q):
     return offers
 
 def _cache_key(q):
-    return "flights-v3:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
