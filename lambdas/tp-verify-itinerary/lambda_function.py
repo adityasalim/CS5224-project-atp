@@ -28,7 +28,7 @@ import json
 import math
 import os
 from datetime import date, datetime, timedelta
-
+from hours_util import hours_for, fit_visit
 import boto3
 
 from trip_currency import normalize_cached_pool
@@ -218,7 +218,6 @@ def verify(spec, it, pool, daily_spend):
         else:
             rep.ok("budget", f"SGD {total:,.2f} of SGD {budget:,.2f}")
 
-
     # 3. Day count and dates
     expected = [(start + timedelta(days=i)).isoformat() for i in range(n_days)]
     got = [d.get("date") for d in days]
@@ -375,7 +374,6 @@ def verify(spec, it, pool, daily_spend):
                                  "Run sequence_day for this day, or move this stop to another day.",
                                  day=dt, item=s_.get("placeId"))
                 busy += int(need)
-            hours = p.get("openSimple")
             if idx == 0 and trip_min and a < day_start + trip_min:
                 rep.fail("day_trip", f"{dt}: {name} at {s_['arriveAt']} is before you can reach "
                                      f"{dtrip.get('place')} ({trip_min} min from the hotel)",
@@ -384,10 +382,15 @@ def verify(spec, it, pool, daily_spend):
             if idx == len(stops) - 1 and trip_min and b + trip_min > day_end + 90:
                 rep.fail("day_trip", f"{dt}: leaving {dtrip.get('place')} at {s_['departAt']} gets you back after "
                                      f"the day ends", "End the day-trip stops earlier.", day=dt, item=s_.get("placeId"))
-            if hours and (a < _hm(hours["open"]) or b > _hm(hours["close"])):
-                rep.fail("opening_hours", f"{dt}: {name} is open {hours['open']}-{hours['close']}, "
+
+            # Opening hours for THIS date (weekday rules, lunch breaks, closed days)
+            info = hours_for(p, dt)
+            if info["known"] and fit_visit(info, a, b - a) != a:
+                shown = ", ".join(f"{_fmt(o)}-{_fmt(c)}" for o, c in info["intervals"]) or "closed"
+                rep.fail("opening_hours", f"{dt}: {name} is open {shown} that day, "
                                           f"planned {s_['arriveAt']}-{s_['departAt']}",
                          "Move the visit inside opening hours, or to another day.", day=dt, item=s_.get("placeId"))
+
             if dt == spec["startDate"] and arrival_floor is not None and a < arrival_floor:
                 rep.fail("flight_times", f"{dt}: {name} at {s_['arriveAt']} is before you can reach the city "
                                          f"after landing", "Start day 1 later or drop this stop.",
@@ -418,7 +421,6 @@ def verify(spec, it, pool, daily_spend):
     checks = list(rep.checks.values())
     return {"ok": True, "passed": all(c["passed"] for c in checks), "checks": checks,
             "violations": rep.violations, "totals": totals}
-
 
 def lambda_handler(event, context):
     if isinstance(event, str):
