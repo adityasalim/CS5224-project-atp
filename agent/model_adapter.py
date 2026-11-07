@@ -144,8 +144,16 @@ class ModelAdapter:
                 if value is not None:kwargs['temperature']=value
                 row['temperatureApplied']=value
                 # GLM's minimal request is the currently verified compatible shape.
-                if 'enableThinking' in selected.options:kwargs['extra_body']={'enable_thinking':selected.options['enableThinking']}
-                if 'reasoningEffort' in selected.options:kwargs['reasoning_effort']=selected.options['reasoningEffort']
+                extra_body={}
+                if 'enableThinking' in selected.options:extra_body['enable_thinking']=selected.options['enableThinking']
+                if 'thinkingBudget' in selected.options:
+                    # Separate reasoning cap: with thinking_budget set, max_tokens limits only the final answer.
+                    # Qwen 3.8 rejects reasoning_effort together with thinking_budget, so effort is skipped below.
+                    extra_body['enable_thinking']=True
+                    extra_body['thinking_budget']=selected.options['thinkingBudget']
+                    row['thinkingBudget']=selected.options['thinkingBudget']
+                if extra_body:kwargs['extra_body']=extra_body
+                if 'reasoningEffort' in selected.options and 'thinkingBudget' not in selected.options:kwargs['reasoning_effort']=selected.options['reasoningEffort']
                 logging.getLogger(__name__).warning(
                     "Alibaba request diagnostics: model=%s timeout=%s",
                     selected.model_id,

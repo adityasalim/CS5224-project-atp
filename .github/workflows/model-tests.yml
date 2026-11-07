@@ -1,0 +1,58 @@
+name: model-tests
+# Fast checks for the model adapter, model configuration and the planner thinking budget.
+# No AWS account or provider keys needed: every provider is faked inside the tests.
+# Runs on pushes to test_fixes and main, on pull requests, and by hand (Actions tab -> Run workflow).
+on:
+  push:
+    branches: [test_fixes, main]
+    paths:
+      - "agent/**"
+      - "tests/offline/**"
+      - ".github/workflows/model-tests.yml"
+  pull_request:
+    paths:
+      - "agent/**"
+      - "tests/offline/**"
+      - ".github/workflows/model-tests.yml"
+  workflow_dispatch:
+
+jobs:
+  model-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PYTHONPATH: agent:tests/offline
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - name: Install agent dependencies
+        run: pip install -r agent/requirements.txt
+
+      - name: Syntax check
+        run: python -m compileall -q agent tests
+
+      - name: Model selection (role adapter, config validation, thinking budget)
+        run: python tests/offline/test_model_selection.py 2>&1 | tee model-selection.log
+
+      - name: Adapter and agent unit tests
+        run: python -m unittest discover -s agent -p "test_*.py" -v 2>&1 | tee agent-unit-tests.log
+
+      - name: Public model and protocol tests
+        run: python -m unittest discover -s tests/offline -p "test_public_*.py" -v 2>&1 | tee public-tests.log
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-test-logs
+          path: |
+            model-selection.log
+            agent-unit-tests.log
+            public-tests.log
+          if-no-files-found: ignore
