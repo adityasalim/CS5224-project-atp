@@ -49,7 +49,10 @@ class FPDF:
 f.FPDF = FPDF; sys.modules["fpdf"] = f
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), REPO / "lambdas" / name / "lambda_function.py")
+    lam_dir = REPO / "lambdas" / name
+    if str(lam_dir) not in sys.path:
+        sys.path.append(str(lam_dir))   # append, so shared/ still wins for names it already has
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), lam_dir / "lambda_function.py")
     m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
 os.environ.update(MOCK_MODE="true", CACHE_TABLE="tp-dev-api-cache", PLANS_BUCKET="b", ITINERARIES_TABLE="tp-dev-itineraries")
 
