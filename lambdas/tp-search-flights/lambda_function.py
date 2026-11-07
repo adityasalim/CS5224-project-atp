@@ -358,9 +358,11 @@ def _call_serpapi(q, key):
         return [o for o in offers if o], None
     lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "2")), 0), 4)
     # look up returns for the cheapest outbound and, if different, the best-ranked one
+    shortest = min((o for o in first if o.get("departure_token")),
+                   key=lambda o: o.get("total_duration") or 10 ** 6, default=None)
     picks = []
-    for o in [first[0]] + list(data.get("best_flights") or []) + first[1:] if first else []:
-        if o.get("departure_token") and o not in picks:
+    for o in ([first[0], shortest] + list(data.get("best_flights") or []) + first[1:]) if first else []:
+        if o and o.get("departure_token") and o not in picks:
             picks.append(o)
         if len(picks) >= lookups:
             break
