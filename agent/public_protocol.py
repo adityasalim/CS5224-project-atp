@@ -8,8 +8,8 @@ def _seconds(name,default):
  except ValueError:return default
 
 # Read timeout for Bedrock calls on the website path (Kimi K3 reviewer/evaluator use non-streaming invoke_model and
-# regularly need more than the old fixed 45 s). Override with PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS.
-BEDROCK_READ_TIMEOUT_SECONDS=_seconds('PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS',120)
+# exceeded both the old 45 s and 120 s). Override with PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS.
+BEDROCK_READ_TIMEOUT_SECONDS=_seconds('PUBLIC_BEDROCK_READ_TIMEOUT_SECONDS',240)
 PLANNING="""Before returning the existing JSON schema, silently audit your choices:
 1. Copy candidate IDs exactly. Respect the selected flight's actual local arrival DATE and departure DATE. Days before arrival have zero stops. Allow immigration, airport transport and rest before sightseeing; protect the final airport departure buffer.
 2. Cover every requested interest with actual suitable candidates. A generic historic site is not a temple. Prefer well-reviewed suitable venues over low-rated supermarkets for a food experience. Do not invent a romantic evening, nightlife, cuisine, hotel stars or accessibility unsupported by the selected items.
