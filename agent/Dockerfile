@@ -23,6 +23,7 @@ COPY public-model-config.json .
 COPY public-model-prices.json .
 COPY feedback_routing.py .
 COPY acceptance.py .
+COPY hours_util.py .
 
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8080
