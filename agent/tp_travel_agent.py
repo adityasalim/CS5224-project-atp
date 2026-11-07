@@ -1492,7 +1492,25 @@ def _km(a, b):
     h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * 6371.0 * math.asin(math.sqrt(h))
 
+ZONE_RADIUS_KM = 2.5
 
+
+def assign_zones(places, radius_km=ZONE_RADIUS_KM):
+    """Neighbourhood zones: a place joins the first zone whose centre is within radius_km, else starts a new one.
+    Sorted by placeId first so the numbering is stable and the cached prompt block does not change between rounds."""
+    centers = []
+    for p in sorted(places, key=lambda x: str(x.get("placeId"))):
+        if p.get("lat") is None or p.get("lng") is None:
+            continue
+        for c in centers:
+            if _km(c, p) <= radius_km:
+                p["zone"] = c["zone"]
+                break
+        else:
+            c = {"lat": p["lat"], "lng": p["lng"], "zone": f"Z{len(centers) + 1}"}
+            centers.append(c)
+            p["zone"] = c["zone"]
+          
 def gather_specials(spec, pool, calls, sources, only=None):
     """Code-driven lookups for things the traveller named: specific places (pinned, must be in the plan) and
     day-trip towns (their own places, tagged dayTrip). Works for single- and multi-city trips.
@@ -1599,6 +1617,8 @@ def _c_stay(s_):
 
 def _c_place(p, with_hours=True):
     item = {"id": p["placeId"], "name": p.get("name"), "category": p.get("category"), "distanceKm": p.get("distanceKm"), "rating": p.get("rating"), "lat": p.get("lat"), "lng": p.get("lng")}
+    if p.get("zone"):
+        item["zone"] = p["zone"]
     for k in ("requested", "dayTrip"):
         if p.get(k):
             item[k] = p[k]
@@ -2309,6 +2329,7 @@ def _spread_stays(ordered, n, cell_deg=0.015):
 
 
 def compact_pool(pool, spec=None):
+    assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
@@ -2442,6 +2463,7 @@ def multi_pool_gaps(spec, pool):
 
 
 def compact_pool_multi(spec, pool):
+    assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     cities = []
