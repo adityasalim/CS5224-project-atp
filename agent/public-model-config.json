@@ -6,7 +6,7 @@
     "model": "qwen3.8-max-0902",
     "options": {
       "enableThinking": true,
-      "reasoningEffort": "medium"
+      "thinkingBudget": 4000
     }
   },
   "executor": {
