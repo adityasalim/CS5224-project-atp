@@ -36,6 +36,9 @@ REASONING_EFFORTS = {
     'kimi_k3': {'none', 'low', 'medium', 'high', 'xhigh', 'max'},
 }
 
+# Upper bound accepted for a separate reasoning (thinking) token budget.
+MAX_THINKING_BUDGET = 16384
+
 
 @dataclass(frozen=True)
 class ModelSelection:
@@ -100,6 +103,7 @@ class ModelConfiguration:
                 or set(options) - {
                     'thinkingLevel',
                     'enableThinking',
+                    'thinkingBudget',
                     'temperature',
                     'reasoningEffort',
                 }
@@ -145,6 +149,32 @@ class ModelConfiguration:
                 raise ValueError(
                     'enableThinking must be an Alibaba boolean option'
                 )
+
+            if 'thinkingBudget' in options:
+                if provider != 'alibaba' or model not in QWEN38_MODELS:
+                    raise ValueError(
+                        'thinkingBudget is supported only for Qwen 3.8 models on Alibaba'
+                    )
+
+                budget = options['thinkingBudget']
+
+                if (
+                    type(budget) is not int
+                    or not 1 <= budget <= MAX_THINKING_BUDGET
+                ):
+                    raise ValueError(
+                        f'thinkingBudget must be an integer from 1 to {MAX_THINKING_BUDGET}'
+                    )
+
+                if 'reasoningEffort' in options:
+                    raise ValueError(
+                        'thinkingBudget and reasoningEffort cannot be combined'
+                    )
+
+                if options.get('enableThinking') is False:
+                    raise ValueError(
+                        'thinkingBudget requires thinking to be enabled'
+                    )
 
             if (
                 provider == 'google'
