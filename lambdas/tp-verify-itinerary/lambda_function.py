@@ -41,7 +41,8 @@ TRANSFER_BUFFER_MIN = 60     # after a transfer arrives: get to the hotel / drop
 MAX_DAY_TRAVEL_MIN = int(os.environ.get("MAX_DAY_TRAVEL_MIN", "120"))   # travel between stops per day
 MAX_HOP_MIN = int(os.environ.get("MAX_HOP_MIN", "40"))                   # longest single hop
 MAX_KM_FROM_BASE = int(os.environ.get("MAX_KM_FROM_BASE", "40"))         # was 120
-DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day tripDAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
+DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day trip
+DAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
 DAY_TRIP_RADIUS_KM = 40      # on a day trip, places must be around the day-trip town
 COUNT_RETURN_TRIP = os.environ.get("VERIFY_COUNT_RETURN", "true").lower() == "true"
 
