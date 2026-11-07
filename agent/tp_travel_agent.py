@@ -2310,7 +2310,7 @@ def _spread_stays(ordered, n, cell_deg=0.015):
 
 def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
-      flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
+    flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
     stays = [_c_stay(s_) for s_ in _spread_stays(ordered_stays, 12)]
     days = trip_days(spec) if spec else 20
