@@ -47,6 +47,7 @@ PREF_FIELDS = {
 }
 MAX_TEXT = 1000
 SESSION_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
+ITIN_RE = re.compile(r"^\[Itinerary v\d+\]\s*(.+?):\s")   # agent saves "[Itinerary v1] <title>: <summary>"
 MAX_SESSIONS = 50
 MAX_EVENT_PAGES = 5
 
@@ -165,6 +166,16 @@ def _session_events(user_id, session_id, max_pages=MAX_EVENT_PAGES):
     return events
 
 
+def _chat_title(msgs):
+    """Plan title from the first '[Itinerary vN] <title>: ...' reply; else the first thing the user said."""
+    for m in msgs:
+        if m["role"] != "user":
+            hit = ITIN_RE.match(m["text"])
+            if hit:
+                return hit.group(1).strip()[:80]
+    return next((m["text"] for m in msgs if m["role"] == "user"), "")[:60]
+
+
 # ---------------------------------------------------------------- route handlers
 def list_trips(event, user_id):
     resp = _table("TRIPS_TABLE").query(KeyConditionExpression=Key("userId").eq(user_id),
@@ -260,7 +271,7 @@ def put_prefs(event, user_id):
 
 
 def list_chats(event, user_id):
-    """My chat sessions, newest first. The title is the first thing I said in that session."""
+    """My chat sessions, newest first. The title is the plan title, else the first thing I said."""
     sessions, token = [], None
     while len(sessions) < MAX_SESSIONS:
         kwargs = {"memoryId": os.environ["MEMORY_ID"], "actorId": user_id, "maxResults": MAX_SESSIONS}
@@ -277,8 +288,7 @@ def list_chats(event, user_id):
         title = ""
         try:
             first = _session_events(user_id, sid, max_pages=1)
-            msgs = [m for e in first for m in _event_messages(e)]
-            title = next((m["text"] for m in msgs if m["role"] == "user"), "")[:60]
+            title = _chat_title([m for e in first for m in _event_messages(e)])
         except Exception as e:  # noqa: BLE001 — a session without a title is still listed
             print("chat title lookup failed:", repr(e))
         out.append({"sessionId": sid, "createdAt": _iso(s.get("createdAt")), "title": title or "Conversation"})
