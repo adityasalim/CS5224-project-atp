@@ -509,7 +509,7 @@ def lambda_handler(event, context):
               "offersFound": len(every), "fxAsOf": FX_AS_OF, "fallbacksTried": attempts}
     if source == "google_flights":
         result["note"] = "Real Google Flights prices (all travellers, SGD). Book via each offer's bookingUrl."
-    _pool_put(offers, q
+    _pool_put(offers, q)
     print(json.dumps({"stage": "flights", "source": source, "offersFound": len(every),
                       "returned": len(offers), "cached": False}))
     return result
