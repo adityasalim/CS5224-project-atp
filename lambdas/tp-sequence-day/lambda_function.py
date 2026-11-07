@@ -26,7 +26,7 @@ Input event (places can be given by ID only; details are read from the pool):
 import json
 import math
 import os
-
+from hours_util import hours_for, fit_visit
 import boto3
 
 DEFAULT_VISIT = {"museum": 120, "gallery": 90, "temple": 60, "shrine": 45, "church": 45, "attraction": 90,
@@ -163,12 +163,13 @@ def _resolve(event):
             missing.append(pid)
             continue
         stops.append({"placeId": pid, "name": p["name"], "category": p.get("category"),
-                      "lat": p["lat"], "lng": p["lng"], "openSimple": p.get("openSimple"),
+                      "lat": p["lat"], "lng": p["lng"],
+                      "hours": hours_for(p, event.get("date")),
                       "visitMinutes": int(overrides.get(pid, _default_visit(p)))})
     for s in event.get("stops") or []:
         stops.append({"placeId": str(s["placeId"]), "name": s.get("name", s["placeId"]),
                       "category": s.get("category"), "lat": float(s["lat"]), "lng": float(s["lng"]),
-                      "openSimple": s.get("openSimple"),
+                      "hours": hours_for({"openSimple": s.get("openSimple")}),
                       "visitMinutes": int(s.get("visitMinutes") or DEFAULT_VISIT.get(s.get("category"), 60))})
     if missing:
         return None, None, _err("not_in_pool", f"placeIds not found (expired or never searched): {missing}",
@@ -179,31 +180,36 @@ def _resolve(event):
         return None, None, _err("bad_input", "at most 12 stops per day")
     return start, stops, None
 
-
-def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False):
+def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
+             max_stops=0, min_free=0):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
     opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
-    11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted."""
+    11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted.
+    max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
     meals_done = 0                              # meal stops (restaurant / street food) already scheduled
+    busy = 0                                    # visit + travel minutes used so far
     while remaining:
+        if max_stops and len(out) >= max_stops:
+            break
         best = None
         for i in remaining:
             s = stops[i - 1]
             travel, how = _hop(walk_m, car_m, cur, i, mode)
             arrive = t + travel
-            open_t, close_t = 0, 24 * 60 - 1
-            if s.get("openSimple"):
-                open_t, close_t = _hm(s["openSimple"]["open"]), _hm(s["openSimple"]["close"])
             is_meal = lunch and s.get("category") in MEAL_CATEGORIES
             floor = (DINNER_FLOOR if meals_done else LUNCH_FLOOR) if is_meal else 0
-            begin = max(arrive, open_t, floor)
+            begin = fit_visit(s["hours"], max(arrive, floor), s["visitMinutes"])
+            if begin is None:                   # closed that day, or never fits an opening interval
+                continue
             end = begin + s["visitMinutes"]
             back, _ = _hop(walk_m, car_m, i, 0, mode)
-            if end > close_t or end + back > day_end:
+            if end + back > day_end:
                 continue
+            if min_free and busy + travel + s["visitMinutes"] + back > (day_end - day_start) - min_free:
+                continue                        # would leave less free time than required
             score = end
             if long_first and s["visitMinutes"] >= 120:
                 score -= 10000 + s["visitMinutes"] * 10   # long activities (hikes, climbing) first
@@ -221,14 +227,16 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                     "waitMinutes": max(begin - arrive, 0), "visitMinutes": s["visitMinutes"]})
         if lunch and s.get("category") in MEAL_CATEGORIES:
             meals_done += 1
+        busy += travel + s["visitMinutes"]
         t, cur = end, i
         remaining.remove(i)
     back_minutes = _hop(walk_m, car_m, cur, 0, mode)[0] if out else 0
-    busy = sum(o["visitMinutes"] + o["travelMinutesFromPrev"] for o in out) + back_minutes
+    busy_total = sum(o["visitMinutes"] + o["travelMinutesFromPrev"] for o in out) + back_minutes
     unscheduled = [{"placeId": stops[i - 1]["placeId"], "name": stops[i - 1]["name"],
-                    "reason": "does not fit opening hours or the day window"} for i in remaining]
-    return out, unscheduled, back_minutes, max(day_end - day_start - busy, 0)
-
+                    "reason": ("closed on this weekday" if stops[i - 1]["hours"]["closed"]
+                               else "does not fit opening hours, the day window or the free-time limit")}
+                   for i in remaining]
+    return out, unscheduled, back_minutes, max(day_end - day_start - busy_total, 0)
 
 def lambda_handler(event, context):
     if isinstance(event, str):
@@ -260,7 +268,10 @@ def lambda_handler(event, context):
     lunch = bool(event.get("lunch", True))
     # Try "earliest finish first" and "long activities first"; keep the one that fits the most stops,
     # then the one with the least waiting.
-    options = [schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf)
+    max_stops = int(event.get("maxStops") or 0)
+    min_free = int(event.get("minFreeMinutes") or 0)
+    options = [schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
+                        max_stops=max_stops, min_free=min_free)
                for lf in (False, True)]
     ordered, unscheduled, back, free = max(
         options, key=lambda o: (len(o[0]), -sum(x["waitMinutes"] for x in o[0]), o[3]))
