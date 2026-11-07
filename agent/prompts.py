@@ -59,6 +59,8 @@ TIMING_RULES = """- Flight and transfer timing: respect the chosen flight's arri
 - Geography and prices: group stops with close lat/lng coordinates on the same day (distanceKm is hotel/city-centre
   distance, not inter-stop travel time). Choose each day's restaurant, cafe and dessert stops from candidates close to
   that day's other stops, so a meal never means a long detour (food candidates can be up to about 5 km from the centre).
+  Each place has a "zone" (Z1, Z2, ...): keep every day's stops inside one zone, or two neighbouring zones, and never
+  mix more than two zones in a day.
   Pool prices are totals for all travellers and all nights or the whole journey."""
 
 POOL_NOTE = """- The candidate pool is deliberately larger than the plan needs (roughly 2-3 candidates per stop you will plan).
