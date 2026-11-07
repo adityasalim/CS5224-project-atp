@@ -2927,6 +2927,18 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
             repls = _top_replacement_places(spec, pool, used_ids, city=city, limit=2, near=near)
             if repls:
                 item["repairHint"] = (f"{hint} Replace {item.get('item', 'stop')} on {item['day']} with {city} option: {', '.join(repls)}.").strip()
+        elif chk == "commute" and item.get("day"):
+            dayobj = next((d for d in plan.get("days") or [] if d.get("date") == item["day"]), {})
+            day_ids = list(dayobj.get("placeIds") or []) or [s.get("placeId") for s in dayobj.get("stops") or []]
+            pts = [p for p in pool.get("places", []) if p.get("placeId") in day_ids and p.get("lat") is not None]
+            if pts:
+                centre = {"lat": sum(p["lat"] for p in pts) / len(pts), "lng": sum(p["lng"] for p in pts) / len(pts)}
+                near = sorted((p for p in pool.get("places", [])
+                               if p.get("placeId") not in used_ids and p.get("lat") is not None
+                               and not _is_supermarket(p)),
+                              key=lambda p: _km(centre, p))[:3]
+                item["repairHint"] = ("Replace the stop farthest from the others on " + str(item["day"]) +
+                                      " with a nearby place: " + ", ".join(f"{p['placeId']} ({p['name']})" for p in near)).strip()
         elif chk in ("opening_hours", "hours") and item.get("day"):
             near = _day_centre(pool, plan, item["day"], exclude_id=item.get("item"))
             repls = _top_replacement_places(spec, pool, used_ids, limit=2, near=near)
