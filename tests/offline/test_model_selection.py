@@ -67,11 +67,11 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-# the approved public combination: Qwen and DeepSeek think; Kimi reviews at medium effort, evaluates at low
+# the approved public combination: Qwen thinks with a separate budget; DeepSeek thinks; Kimi reviews at medium effort, evaluates at low
 assert (S["planner"].provider, S["planner"].model_id, S["planner"].options) == (
     "alibaba",
     "qwen3.8-max-0902",
-    {"enableThinking": True, "reasoningEffort": "medium"})
+    {"enableThinking": True, "thinkingBudget": 4000})
 assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash", {"enableThinking": True, "reasoningEffort": "low"})
 assert (S["reviewer"].provider, S["reviewer"].model_id, S["reviewer"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "medium"})
 assert (S["independent_evaluator"].provider, S["independent_evaluator"].model_id, S["independent_evaluator"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "low"})
@@ -112,6 +112,14 @@ raises(
         )
     ),
     "reasoning effort")
+# thinkingBudget caps reasoning separately from max_tokens: Qwen 3.8 on Alibaba only, never combined with reasoningEffort
+ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "thinkingBudget": 2000}))
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "thinkingBudget": 4000, "reasoningEffort": "low"})), "cannot be combined")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": False, "thinkingBudget": 4000})), "requires thinking")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "thinkingBudget": 0})), "integer")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "thinkingBudget": True})), "integer")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("executor", options={"enableThinking": True, "thinkingBudget": 2000})), "Qwen 3.8")
+raises(ValueError, lambda: ModelConfiguration.parse(with_("reviewer", options={"thinkingBudget": 2000})), "Qwen 3.8")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", options={"enableThinking": True, "temperature": 1.5})), "temperature")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="glm-5.3", options={"enableThinking": False})), "GLM")
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="qwen3.7-max")), "verified experiment pool")
@@ -176,15 +184,16 @@ MSG = [{"role": "user", "content": [{"text": "q"}]}]
 ad, ali, kimi = make_adapter()
 u = A.Usage(adapter=ad, trip_id="t1")
 
-# planner: Qwen with thinking ON, temperature passed, system first, system sections joined
+# planner: Qwen with thinking ON and a separate thinking budget, temperature passed, system first, system sections joined
 assert A.ask_json(A.PLANNER_MODEL, ["CTX", "ROLE: planner"], "plan", u, max_tokens=3000, temperature=0.3, think=True, cache=True, model_role="planner") == {"ok": True}
 c = ali.calls[-1]
 print("planner request:", {k: v for k, v in c.items() if k != "messages"})
-assert c["model"] == "qwen3.8-max-0902" and c["extra_body"] == {"enable_thinking": True} and c["max_tokens"] == 3000
-assert c["temperature"] == 0.3 and c["reasoning_effort"] == "medium"
+assert c["model"] == "qwen3.8-max-0902" and c["extra_body"] == {"enable_thinking": True, "thinking_budget": 4000} and c["max_tokens"] == 3000
+assert c["temperature"] == 0.3 and "reasoning_effort" not in c, "Qwen 3.8 rejects reasoning_effort together with thinking_budget"
 assert c["stream"] is True and c["stream_options"] == {"include_usage": True}
 assert c["messages"][0] == {"role": "system", "content": "CTX\n\nROLE: planner"} and c["messages"][1]["role"] == "user"
 assert ad.records[-1]["thinkingTokens"] == 40 and ad.records[-1]["outputTokens"] == 50   # reasoning counts inside the output
+assert ad.records[-1]["thinkingBudget"] == 4000, "the thinking cap is recorded with the call"
 # executor: DeepSeek flash with thinking ON
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", u, temperature=0.0, model_role="executor")
 c = ali.calls[-1]
