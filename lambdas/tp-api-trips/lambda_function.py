@@ -1,6 +1,6 @@
 """
 tp-api-trips — REST API backend (behind API Gateway + Cognito authorizer) for trip history,
-PDF links, feedback and stated preferences.
+PDF links, feedback, stated preferences and chat history.
 
 Routes (API Gateway REST API, Lambda proxy integration):
   GET  /trips                       list my trips, newest first
@@ -11,9 +11,11 @@ Routes (API Gateway REST API, Lambda proxy integration):
                                      optional 1-5: usefulness, personalization, trust, easeOfUse, satisfaction}
   GET  /me/preferences              my stated preferences
   PUT  /me/preferences              {"homeCity": "...", "homeAirport": "SIN", ...}
+  GET  /chats                       my chat sessions, newest first (read from AgentCore Memory)
+  GET  /chats/{sessionId}           the messages of one of my chat sessions
 
 The user is ALWAYS taken from the Cognito token (requestContext.authorizer.claims.sub),
-never from the request body, so nobody can read another user's trips.
+never from the request body, so nobody can read another user's trips or chats.
 
 Environment variables:
   TRIPS_TABLE        tp-dev-trips        (PK userId, SK tripId)
@@ -21,10 +23,14 @@ Environment variables:
   FEEDBACK_TABLE     tp-dev-feedback     (PK tripId, SK createdAt)
   USERS_TABLE        tp-dev-users        (PK userId)
   PLANS_BUCKET       tp-dev-plans-<suffix>
+  MEMORY_ID          AgentCore Memory id (the same one the agent uses); needed for /chats
   ALLOWED_ORIGINS    comma-separated, e.g. "https://dxxxx.cloudfront.net,http://localhost:5173"
+
+IAM for /chats: bedrock-agentcore:ListSessions and bedrock-agentcore:ListEvents on the memory.
 """
 import json
 import os
+import re
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -34,11 +40,15 @@ from botocore.config import Config
 
 _dynamodb = boto3.resource("dynamodb")
 _s3 = None
+_agentcore = None
 PREF_FIELDS = {
     "homeCity": str, "homeAirport": str, "budgetStyle": str, "pace": str,
     "dietary": list, "interests": list, "notes": str,
 }
 MAX_TEXT = 1000
+SESSION_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,99}$")
+MAX_SESSIONS = 50
+MAX_EVENT_PAGES = 5
 
 
 # ---------------------------------------------------------------- response helpers
@@ -112,6 +122,47 @@ def _presign(key):
                            config=Config(signature_version="s3v4"))
     return _s3.generate_presigned_url("get_object", Params={"Bucket": os.environ["PLANS_BUCKET"], "Key": key},
                                       ExpiresIn=900)
+
+
+def _mem():
+    global _agentcore
+    if _agentcore is None:
+        _agentcore = boto3.client("bedrock-agentcore", region_name=os.environ.get("AWS_REGION", "ap-southeast-1"))
+    return _agentcore
+
+
+def _iso(ts):
+    if isinstance(ts, datetime):
+        return ts.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return str(ts or "")
+
+
+def _event_messages(ev):
+    """Chat messages inside one AgentCore event: [{role, text, at}]."""
+    out = []
+    for part in ev.get("payload") or []:
+        conv = part.get("conversational") or {}
+        text = ((conv.get("content") or {}).get("text") or "").strip()
+        if text:
+            out.append({"role": str(conv.get("role") or "").lower() or "assistant", "text": text,
+                        "at": _iso(ev.get("eventTimestamp"))})
+    return out
+
+
+def _session_events(user_id, session_id, max_pages=MAX_EVENT_PAGES):
+    events, token = [], None
+    for _ in range(max_pages):
+        kwargs = {"memoryId": os.environ["MEMORY_ID"], "actorId": user_id, "sessionId": session_id,
+                  "includePayloads": True, "maxResults": 100}
+        if token:
+            kwargs["nextToken"] = token
+        page = _mem().list_events(**kwargs)
+        events.extend(page.get("events", []))
+        token = page.get("nextToken")
+        if not token:
+            break
+    events.sort(key=lambda e: e.get("eventTimestamp") or datetime.min.replace(tzinfo=timezone.utc))
+    return events
 
 
 # ---------------------------------------------------------------- route handlers
@@ -208,6 +259,43 @@ def put_prefs(event, user_id):
     return _resp(event, 200, {"saved": sorted(updates), "ignored": sorted(unknown)})
 
 
+def list_chats(event, user_id):
+    """My chat sessions, newest first. The title is the first thing I said in that session."""
+    sessions, token = [], None
+    while len(sessions) < MAX_SESSIONS:
+        kwargs = {"memoryId": os.environ["MEMORY_ID"], "actorId": user_id, "maxResults": MAX_SESSIONS}
+        if token:
+            kwargs["nextToken"] = token
+        page = _mem().list_sessions(**kwargs)
+        sessions.extend(page.get("sessionSummaries", []))
+        token = page.get("nextToken")
+        if not token:
+            break
+    out = []
+    for s in sessions[:MAX_SESSIONS]:
+        sid = s.get("sessionId")
+        title = ""
+        try:
+            first = _session_events(user_id, sid, max_pages=1)
+            msgs = [m for e in first for m in _event_messages(e)]
+            title = next((m["text"] for m in msgs if m["role"] == "user"), "")[:60]
+        except Exception as e:  # noqa: BLE001 — a session without a title is still listed
+            print("chat title lookup failed:", repr(e))
+        out.append({"sessionId": sid, "createdAt": _iso(s.get("createdAt")), "title": title or "Conversation"})
+    out.sort(key=lambda x: x["createdAt"], reverse=True)
+    return _resp(event, 200, {"sessions": out})
+
+
+def get_chat(event, user_id, session_id):
+    if not session_id or not SESSION_RE.match(session_id):
+        return _error(event, 400, "bad_input", "invalid session id")
+    events = _session_events(user_id, session_id)      # scoped by actorId = my Cognito sub
+    messages = [m for e in events for m in _event_messages(e)]
+    if not messages:
+        return _error(event, 404, "not_found", "chat not found")
+    return _resp(event, 200, {"sessionId": session_id, "messages": messages})
+
+
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
     method = event.get("httpMethod", "")
@@ -220,6 +308,7 @@ def lambda_handler(event, context):
     if not user_id:
         return _error(event, 401, "unauthorized", "missing or invalid sign-in token")
     trip_id = (event.get("pathParameters") or {}).get("tripId")
+    session_id = (event.get("pathParameters") or {}).get("sessionId")
 
     try:
         if resource == "/trips" and method == "GET":
@@ -234,6 +323,10 @@ def lambda_handler(event, context):
             return get_prefs(event, user_id)
         if resource == "/me/preferences" and method == "PUT":
             return put_prefs(event, user_id)
+        if resource == "/chats" and method == "GET":
+            return list_chats(event, user_id)
+        if resource == "/chats/{sessionId}" and method == "GET":
+            return get_chat(event, user_id, session_id)
         return _error(event, 404, "no_route", f"{method} {resource} is not a known route")
     except KeyError as e:  # usually a missing environment variable
         print("config error:", repr(e))
