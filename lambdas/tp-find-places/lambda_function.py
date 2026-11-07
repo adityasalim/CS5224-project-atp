@@ -103,6 +103,11 @@ CATEGORY_TAGS = {
     "playground": ['["leisure"="playground"]'],
 }
 FOOD = {"restaurant", "cafe", "bar", "dessert", "street_food"}
+FOOD_KEYWORDS = ("restaurant", "eatery", "dining")   # keyword searches that mean "a place to eat"
+
+
+def _is_food_keyword(kw):
+    return any(w in (kw or "") for w in FOOD_KEYWORDS)
 INDOOR = {"museum", "gallery", "shopping", "aquarium", "restaurant", "cafe", "bar", "nightlife", "dessert",
           "street_food", "spa", "bookshop", "onsen", "climbing", "temple", "shrine", "church"}
 FAMILY = {"zoo", "aquarium", "theme_park", "park", "playground", "museum", "beach", "garden", "dessert"}
@@ -299,7 +304,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places-v3:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -695,7 +700,7 @@ def _matches(p, prefs):
         m.append("classic sight")
     for diet in prefs.get("dietary", []):
         ok = (diet.replace("_", "-"),) + (("vegan",) if diet == "vegetarian" else ())   # vegan suits vegetarians
-        named = diet.replace("_", " ") in f'{p.get("name", "")} {p.get("activity") or ""}'.lower()
+        named = diet.replace("_", " ") in f'{p.get("name", "")}'.lower()
         if named or any(t.startswith(ok) for t in tags):
             m.append(diet.replace("_", "-"))
     if prefs.get("accessibility") and "wheelchair" in tags:
@@ -749,8 +754,21 @@ def _rank(places, q):
     out = []
     for cat in q["categories"]:
         out.extend(best([p for p in places if p["category"] == cat]))
+    seen = {_dupe_key(p) for p in out}
     for kw in q.get("keywords", []):
-        out.extend(best([p for p in places if p["category"] == "activity" and p.get("activity") == kw]))
+        group = best([p for p in places if p["category"] == "activity" and p.get("activity") == kw])
+        if _is_food_keyword(kw):                      # "halal restaurant" results are restaurants
+            relabelled = []
+            for p in group:
+                if _dupe_key(p) in seen:              # already found through OpenStreetMap
+                    continue
+                seen.add(_dupe_key(p))
+                p["category"] = "restaurant"
+                if "indoor" not in p["tags"]:
+                    p["tags"].append("indoor")
+                relabelled.append(p)
+            group = relabelled
+        out.extend(group)
     return out
 
 
