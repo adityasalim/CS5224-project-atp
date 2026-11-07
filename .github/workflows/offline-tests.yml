@@ -11,7 +11,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install requests boto3
-      - run: pip install requests
       - name: Syntax check
         run: python -m compileall -q lambdas agent tests
       - name: Offline tests (Lambdas, agent single + multi-city, Gateway smoke test)
