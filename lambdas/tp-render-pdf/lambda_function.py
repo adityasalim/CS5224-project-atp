@@ -260,7 +260,7 @@ def build_pdf(event, pool, daily_spend):
     pdf.set_font(_FAMILY, "I", 8.5)
     pdf.set_text_color(120, 120, 120)
     pdf.multi_cell(0, 4.5, _t(f"Generated {datetime.utcnow():%d %b %Y %H:%M} UTC. Place data may include "
-                              f"OpenStreetMap contributors' data. Check opening hours before you go."),
+                              f"OpenStreetMap contributors' data. Ratings from Google Maps. Check opening hours before you go."),
                    new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output()), round(total, 2)
 

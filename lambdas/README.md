@@ -114,7 +114,12 @@ Set `MOCK_MODE=false` per function. Fallbacks, all labelled in the `source` fiel
   1 + `SERPAPI_RETURN_LOOKUPS` (default 2) SerpApi searches; results are cached 6 h (`google_flights-cache`).
   SerpApi's free plan is 250 searches/month.
 - stays: Duffel Stays → liteAPI → mock (`mock-fallback`)
-- places: Overpass (2 servers) → Amazon Location Places → Google Places → mock (`mock-fallback`); the whole chain finishes within `TIME_BUDGET_SECONDS` (default 40) so it never hits the 60 s Lambda timeout
+- places: Overpass (2 servers) → Amazon Location Places → Google Places → mock (`mock-fallback`); the whole chain finishes within `TIME_BUDGET_SECONDS` (default 40) so it never hits the 60 s Lambda timeout.
+  With `GOOGLE_MAPS_KEY` in the secret, restaurants, cafes and desserts come from Google Places Text Search first
+  (rating 4.0+, 50+ reviews). Google food is never cached, so cached calls ask Google again: one Tokyo + Kyoto plan
+  makes about 40 Text Search requests. Set a daily Places API (New) Text Search quota of about 2,000 (50 plans), a
+  billing budget alert, and restrict the key to Places API (New). Past the quota, food falls back to the free chain
+  without an error.
 - route matrix: Amazon Location → distance estimate (`estimate`)
 - transfers: one-way flights from Google Flights via SerpApi (`google_flights+estimate`, 1 SerpApi search per hop,
   cached 6 h) → Duffel (`duffel+estimate`) → ground estimate only (`estimate`)

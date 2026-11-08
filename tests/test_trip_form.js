@@ -36,4 +36,18 @@ for (const currency of ["SGD","USD","SAR","EUR","GBP","CNY","JPY"]) {
   assert.equal(chosen.currency,currency);
 }
 assert.throws(() => context.selectedTripBudget({currency:"XYZ",budget:100}));
-console.log("PASS: automatic dates and original budget currency preserved");
+const form = context.initialTripForm();
+form.cities = [{city: "Tokyo", nights: 7, hotelArea: ""}, {city: "Kyoto", nights: 4, hotelArea: ""}];
+let prompt = context.buildTripPrompt(form);
+assert(!prompt.includes("Flight preferences") && !prompt.includes("Hotel preferences"), "defaults add no lines");
+Object.assign(form.flight, {cabin: "business", stops: "direct", departAfter: "09:00", returnDepartAfter: "17:00"});
+Object.assign(form.hotel, {minStars: 4, chain: " Hilton "});
+form.cities[0].hotelArea = "Shinjuku"; form.cities[1].hotelArea = "Gion";
+prompt = context.buildTripPrompt(form).split("\n");
+assert(prompt.includes("Flight preferences: business cabin; direct flights only; outbound departs after 09:00; return departs after 17:00"));
+assert(prompt.includes("Hotel preferences: 4+ stars; chain Hilton; area in Tokyo: Shinjuku; area in Kyoto: Gion"));
+Object.assign(form.flight, {cabin: "premium_economy", stops: "one", departAfter: "", returnDepartAfter: ""});
+Object.assign(form.hotel, {minStars: 5, chain: ""}); form.cities[0].hotelArea = ""; form.cities[1].hotelArea = "";
+prompt = context.buildTripPrompt(form).split("\n");
+assert(prompt.includes("Flight preferences: premium economy cabin; at most 1 stop") && prompt.includes("Hotel preferences: 5 stars"));
+console.log("PASS: automatic dates, original budget currency preserved, flight and hotel lines only when set");

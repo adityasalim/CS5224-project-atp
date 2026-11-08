@@ -14,7 +14,7 @@ function initialTripForm() {
   return {
     origin: "",
     originLocation: null,
-    cities: [{ city: "", location: null, nights: 3 }],
+    cities: [{ city: "", location: null, nights: 3, hotelArea: "" }],
     flightType: "round",
     startDate: "",
     endDate: "",
@@ -33,6 +33,8 @@ function initialTripForm() {
     },
     cuisines: [],
     dietary: [],
+    flight: { cabin: "economy", stops: "any", departAfter: "", returnDepartAfter: "" },
+    hotel: { minStars: 0, chain: "" },
     notes: ""
   };
 }
@@ -162,6 +164,8 @@ function renderTripForm() {
     nights.max = 60;
 
     cityBox.append(tripField("Nights", nights));
+    cityBox.append(tripField("Hotel area (optional)",
+      tripInput("text", leg.hotelArea, v => leg.hotelArea = v)));
 
     if (tripFormState.cities.length > 1) {
       cityBox.append(tripButton("Remove city", () => {
@@ -174,7 +178,7 @@ function renderTripForm() {
 
   const addCity = tripButton("+ Add another city", () => {
     if (tripFormState.cities.length >= 5) return;
-    tripFormState.cities.push({ city: "", location: null, nights: 2 });
+    tripFormState.cities.push({ city: "", location: null, nights: 2, hotelArea: "" });
     renderTripForm();
   });
   addCity.disabled = tripFormState.cities.length >= 5;
@@ -186,6 +190,17 @@ function renderTripForm() {
       ["oneway", "One-way / open-jaw"]
     ], tripFormState.flightType,
     v => tripFormState.flightType = v)));
+
+  route.append(tripField("Cabin class", tripChoiceGroup([
+    ["economy", "Economy"], ["premium_economy", "Premium economy"], ["business", "Business"], ["first", "First"]
+  ], tripFormState.flight.cabin, v => tripFormState.flight.cabin = v)));
+  route.append(tripField("Stops", tripChoiceGroup([
+    ["any", "Any"], ["direct", "Direct only"], ["one", "At most 1 stop"]
+  ], tripFormState.flight.stops, v => tripFormState.flight.stops = v)));
+  route.append(tripField("Outbound departs after (optional)",
+    tripInput("time", tripFormState.flight.departAfter, v => tripFormState.flight.departAfter = v)));
+  route.append(tripField("Return departs after (optional)",
+    tripInput("time", tripFormState.flight.returnDepartAfter, v => tripFormState.flight.returnDepartAfter = v)));
 
   root.append(route);
 
@@ -259,6 +274,11 @@ function renderTripForm() {
     ["compare", "Custom trip + agency options"], ["custom_only", "Custom trip only"],
     ["packages_only", "Prefer agency packages"]
   ], tripFormState.packageMode, v => tripFormState.packageMode = v)));
+  details.append(tripField("Hotel stars", tripChoiceGroup([
+    [0, "Any"], [3, "3+"], [4, "4+"], [5, "5"]
+  ], tripFormState.hotel.minStars, v => tripFormState.hotel.minStars = v)));
+  details.append(tripField("Hotel chain (optional)",
+    tripInput("text", tripFormState.hotel.chain, v => tripFormState.hotel.chain = v)));
   root.append(details);
 
   const ratings = tripCard("Rate your preferences (1–10)");
@@ -722,6 +742,19 @@ function buildTripPrompt(state = tripFormState) {
     `${index + 1}. ${leg.city} — ${leg.nights} nights`
   ).join("\n");
 
+  const f = state.flight, h = state.hotel;
+  const flight = [
+    f.cabin !== "economy" ? `${f.cabin.replace("_", " ")} cabin` : "",
+    {direct: "direct flights only", one: "at most 1 stop"}[f.stops] || "",
+    f.departAfter ? `outbound departs after ${f.departAfter}` : "",
+    f.returnDepartAfter ? `return departs after ${f.returnDepartAfter}` : ""
+  ].filter(Boolean);
+  const hotel = [
+    h.minStars ? `${h.minStars}${h.minStars < 5 ? "+" : ""} stars` : "",
+    h.chain.trim() ? `chain ${h.chain.trim()}` : "",
+    ...state.cities.map(leg => leg.hotelArea.trim() ? `area in ${leg.city}: ${leg.hotelArea.trim()}` : "")
+  ].filter(Boolean);
+
   const r = state.ratings;
 
   return [
@@ -730,6 +763,7 @@ function buildTripPrompt(state = tripFormState) {
     `Flying from: ${state.origin}`,
     `Destinations in travel order:\n${route}`,
     `Flight type: ${state.flightType === "round" ? "Round trip, returning to origin" : "One-way / open-jaw, ending at final destination"}`,
+    ...(flight.length ? [`Flight preferences: ${flight.join("; ")}`] : []),
     `Departure date: ${state.startDate}`,
     `Trip end date: ${state.endDate}`,
     `Total budget: ${state.currency || "SGD"} ${state.budget}`,
@@ -745,6 +779,7 @@ function buildTripPrompt(state = tripFormState) {
     `Nature and outdoors: ${r.nature}/10`,
     `Hotel comfort: ${r.comfort}/10`,
     `Activity intensity: ${r.intensity}/10`,
+    ...(hotel.length ? [`Hotel preferences: ${hotel.join("; ")}`] : []),
     "",
     `Preferred cuisines: ${state.cuisines.length ? state.cuisines.join(", ") : "No preference"}`,
     `Dietary requirements: ${state.dietary.length ? state.dietary.join(", ") : "None"}`,

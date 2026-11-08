@@ -1,6 +1,6 @@
 """Offline checks that the search tools honour the personal-preference parameters in their schemas,
 plus the search-size, ranking and fallback behaviour added for longer trips and big cities."""
-import os, sys, time
+import json, os, sys, time
 sys.path.insert(0, os.path.dirname(__file__))
 from fakes import load
 
@@ -136,6 +136,49 @@ assert fl.lambda_handler({**base, "departAfter": "9am"}, None)["error"] == "bad_
 hop = {"from": {"city": "Copenhagen", "airport": "CPH"}, "to": {"city": "Lofoten", "airport": "BOO"},
        "date": "2026-12-13", "pax": 2}
 assert tr.lambda_handler({**hop, "prefer": "ground", "avoidOvernight": False}, None)["options"][0]["mode"] == "ground"
+
+# Tokyo -> Kyoto is a Shinkansen corridor: one rail option from the fare table and no flight search
+r = tr.lambda_handler({"from": {"city": "Tokyo", "airport": "HND"}, "to": {"city": "Kyoto", "airport": "KIX"},
+                       "date": "2026-12-17", "pax": 3}, None)
+assert [o["mode"] for o in r["options"]] == ["ground"], r["options"]
+o = r["options"][0]
+assert (o["durationMinutes"], o["priceTotalSGD"], o["departAt"][11:], o["arriveAt"][11:]) == (165, 382.59, "09:00", "11:45"), o
+assert o["summary"] == "Shinkansen Nozomi Tokyo → Kyoto (fare estimate)" and o["estimate"] and "rome2rio" in o["bookingUrl"]
+assert tr.lambda_handler({"from": {"city": "Osaka, Japan", "lat": 34.69, "lng": 135.50}, "to": {"city": "Tokyo"}, "date": "2026-12-17", "pax": 1},
+                         None)["options"][0]["summary"] == "Shinkansen Nozomi Osaka, Japan → Tokyo (fare estimate)"
+
+# a named theme park takes the day; other named places keep 90 minutes
+sd = load("tp-sequence-day")
+assert sd._default_visit({"category": "requested", "name": "Tokyo DisneySea"}) == 480
+assert sd._default_visit({"category": "requested", "name": "teamLab Planets"}) == 90
+
+# nature uses the 20 km outdoor floor; hiking still searches 40 km out
+qn, _ = fp._validate({"city": "Kyoto", "categories": ["nature", "hiking"]})
+assert fp._radius_km("nature", qn) == 20.0 and fp._radius_km("hiking", qn) == 40.0
+
+# a coffee keyword comes back as a cafe, a restaurant keyword as a restaurant
+qk, _ = fp._validate({"city": "Kyoto", "keywords": ["pour-over coffee", "halal restaurant"]})
+kw_places = [fp._place(f"t:{i}", f"Place {i}", "activity", 35.0 + i / 100, 135.76, qk, activity=k)
+             for i, k in enumerate(["pour-over coffee", "halal restaurant"])]
+assert [p["category"] for p in fp._rank(kw_places, qk)] == ["cafe", "restaurant"]
+
+# "Cafés & desserts" and "Fine dining" from the form: the chip becomes the cafe and dessert categories, the cap is 6
+qc, _ = fp._validate({"city": "Kyoto", "categories": ["temple"],
+                      "cuisine": "japanese|italian|french|turkish|middle_eastern|cafés_&_desserts|fine_dining|american"})
+assert qc["categories"] == ["cafe", "dessert", "temple"], qc["categories"]
+assert qc["cuisine"] == "japanese|italian|french|turkish|middle_eastern|fine_dining|american", qc["cuisine"]
+qr, _ = fp._validate({"city": "Kyoto", "categories": ["restaurant"], "cuisine": qc["cuisine"]})
+assert [t[1] for t in fp._text_targets(qr)][-1] == "fine dining restaurant" and len(fp._text_targets(qr)) == 6
+assert fp._validate({"city": "Kyoto", "keywords": ["specialty coffee"]})[0]["categories"] == ["cafe"]
+
+# the PDF footer credits Google Maps for ratings
+import fakes
+pdf_text = []
+fakes.FPDF.multi_cell = lambda self, w, h, text="", **k: pdf_text.append(text)
+pdf_event = json.load(open(fakes.REPO / "lambdas" / "test-events" / "tp-render-pdf.json"))
+assert load("tp-render-pdf").lambda_handler(pdf_event, None)["ok"]
+assert any("Ratings from Google Maps" in t for t in pdf_text)
+del fakes.FPDF.multi_cell
 print("TOOL PREFERENCES OK")
 
 

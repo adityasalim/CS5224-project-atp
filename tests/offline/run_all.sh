@@ -4,6 +4,7 @@ set -euo pipefail
 unset PUBLIC_MODEL_CONFIGURATION
 cd "$(dirname "$0")"
 python3 test_lambdas.py
+python3 test_google_food.py | tail -1
 python3 test_tool_preferences.py
 python3 test_robust_tools.py | tail -1
 python3 test_serpapi_flights.py | grep " OK"

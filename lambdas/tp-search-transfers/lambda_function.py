@@ -47,6 +47,12 @@ FX_AS_OF = "2026-10-01"
 # price per person ~SGD 0.22 per km + SGD 10. Rough, labelled as an estimate everywhere.
 DETOUR, GROUND_KMH, SGD_PER_KM, SGD_BASE = 1.3, 70.0, 0.22, 10.0
 GROUND_DEPART = "09:00"
+# Rail corridors with a published fare: (door-to-door minutes, JPY per adult, train). Nozomi takes about 130 min to
+# Kyoto (https://global.jr-central.co.jp/en/onlinebooking/contents/kyoto/) and about 150 min to Shin-Osaka; smartEX
+# reserved fares are JPY 13,970 and 14,520 (https://smart-ex.jp/en/product/plan/service/pdf/service_fares_reserved.pdf,
+# as of 2025-04-01), ticket-office fares about JPY 200 more. 30 min covers getting to and from the stations.
+RAIL = {("kyoto", "tokyo"): (165, 14170, "Shinkansen Nozomi"), ("osaka", "tokyo"): (180, 14720, "Shinkansen Nozomi")}
+
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osaka": (34.6937, 135.5023),
                 "singapore": (1.2903, 103.8520), "seoul": (37.5665, 126.9780), "bangkok": (13.7563, 100.5018),
                 "bali": (-8.6500, 115.2167), "hong kong": (22.3193, 114.1694), "taipei": (25.0330, 121.5654),
@@ -187,21 +193,28 @@ def _to_sgd(amount, currency):
     return round(float(amount) * rate, 2) if rate else None
 
 
+def _rail(q):
+    return RAIL.get(tuple(sorted(str(q[k]).split(",")[0].strip().lower() for k in ("fromCity", "toCity"))))
+
+
 def _ground(q):
     road_km = q["km"] * DETOUR
-    minutes = int(road_km / GROUND_KMH * 60 + 30)
+    rail = _rail(q)
+    minutes = rail[0] if rail else int(road_km / GROUND_KMH * 60 + 30)
     depart = datetime.fromisoformat(f"{q['date']}T{GROUND_DEPART}:00")
     arrive = depart + timedelta(minutes=minutes)
-    price = round((SGD_BASE + SGD_PER_KM * road_km) * q["pax"], 2)
+    price = round(rail[1] * FX_TO_SGD["JPY"] * q["pax"], 2) if rail else round((SGD_BASE + SGD_PER_KM * road_km) * q["pax"], 2)
     tid = "tgr:" + hashlib.sha256(json.dumps([q["fromCity"], q["toCity"], q["date"], q["pax"]]).encode()).hexdigest()[:16]
     return {"transferId": tid, "mode": "ground", "estimate": True,
-            "summary": f"Train / bus / ferry {q['fromCity']} → {q['toCity']} (estimated)",
+            "summary": (f"{rail[2]} {q['fromCity']} → {q['toCity']} (fare estimate)" if rail
+                        else f"Train / bus / ferry {q['fromCity']} → {q['toCity']} (estimated)"),
             "fromCity": q["fromCity"], "toCity": q["toCity"], "date": q["date"],
             "departAt": depart.isoformat(timespec="minutes"), "arriveAt": arrive.isoformat(timespec="minutes"),
             "durationMinutes": minutes, "overnight": arrive.date() > depart.date() or arrive.hour >= 22,
             "priceTotalSGD": price, "currency": "SGD", "distanceKm": round(road_km),
             "bookingUrl": f"https://www.rome2rio.com/map/{quote(q['fromCity'])}/{quote(q['toCity'])}",
-            "note": "Estimate from distance; check real timetables and prices with the link."}
+            "note": ("Estimate from the published fare; check timetables and the seasonal price with the link." if rail
+                     else "Estimate from distance; check real timetables and prices with the link.")}
 
 
 def _flight_option(offer, q):
@@ -370,12 +383,12 @@ def lambda_handler(event, context):
     if error:
         return error
     want_flight = bool(q["fromAirport"] and q["toAirport"] and q["fromAirport"] != q["toAirport"]
-                       and q["km"] >= FLIGHT_MIN_KM)
+                       and q["km"] >= FLIGHT_MIN_KM and not _rail(q))
     notes = []
     if _mock_mode():
         options, source = (_mock_flight(q) if want_flight else []), "mock"
     else:
-        key = "transfers:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+        key = "transfers-v2:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
         cached = _cache(key)
         if cached and _secret("SERPAPI_KEY") and not str(cached.get("source", "")).startswith("google_flights") \
                 and any(o.get("mode") == "flight" for o in cached.get("options", [])):
