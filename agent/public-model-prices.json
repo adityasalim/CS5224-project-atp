@@ -82,7 +82,7 @@
       "modelId": "claude-sonnet-5-5",
       "inputPerMillionUSD": "2",
       "outputPerMillionUSD": "10",
-      "cacheReadPerMillionUSD": ".10",
+      "cacheReadPerMillionUSD": ".20",
       "cacheWritePerMillionUSD": "2.50",
       "inputIncludesCache": false,
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
@@ -92,7 +92,7 @@
       "validUntil": "2026-12-31",
       "verified": true,
       "inputLimit": 1000000,
-      "rateBasis": "Standard rate across the 1M-token context (model ID claude-sonnet-5-5; 5-minute cache write USD 2.50, cache read USD 0.10 per million). Adaptive thinking; effort low to max, default high, so the role sets medium. Web search, if used, is USD 10 per 1,000 searches."
+      "rateBasis": "Standard rate across the 1M-token context (model ID claude-sonnet-5-5; 5-minute cache write USD 2.50, cache read USD 0.20 per million). Adaptive thinking; effort low to max, default high, so the role sets medium. Web search, if used, is USD 10 per 1,000 searches."
     },
     {
       "provider": "anthropic",

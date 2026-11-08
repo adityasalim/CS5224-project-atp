@@ -382,7 +382,7 @@ from model_budget import PriceQuote
 QUOTES = {(q.provider, q.model_id): q for q in (PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"])}
 assert all((s.provider, s.model_id) in QUOTES for s in S.values()), "a website model lacks a price quote"
 sq = QUOTES[("anthropic", "claude-sonnet-5-5")]
-assert (sq.input_per_million, sq.output_per_million, sq.cache_read_per_million, sq.cache_write_per_million) == (2, 10, Decimal(".1"), Decimal("2.5"))
+assert (sq.input_per_million, sq.output_per_million, sq.cache_read_per_million, sq.cache_write_per_million) == (2, 10, Decimal(".2"), Decimal("2.5"))
 assert sq.source.startswith("https://platform.claude.com/")
 truncated = ModelAdapter(ad_c.configuration, clients={"anthropic": FakeAnthropic("", "max_tokens")},
                          budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t3", system="s", messages=MSG)
