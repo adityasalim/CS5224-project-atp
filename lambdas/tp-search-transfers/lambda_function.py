@@ -94,6 +94,9 @@ RAIL = {  # country (ISO 3166 alpha-2): (km/h, base, rate per rail km, currency,
     # (https://6abc.com/post/what-know-amtraks-new-high-speed-nextgen-acela-train/17671294/)
     "US": (160, 0, 0.37, "USD", "US mid-range advance fare, indicative"),
 }
+# A hop between two of these countries takes the lower v and the higher base and rate of the two rows (in SGD).
+# CH is not EU but is on the mainland rail network; GB to the continent keeps the generic estimate.
+RAIL_EU = {"FR", "ES", "IT", "DE", "NL", "AT", "SE", "CH"}
 
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671, "JP"), "kyoto": (35.0116, 135.7681, "JP"), "osaka": (34.6937, 135.5023, "JP"),
                 "singapore": (1.2903, 103.8520, "SG"), "seoul": (37.5665, 126.9780, "KR"), "bangkok": (13.7563, 100.5018, "TH"),
@@ -227,6 +230,7 @@ def _validate(event):
             "toAirport": ta if iata.match(ta) else None, "date": d.isoformat(), "pax": pax,
             "from": [round(a[0], 4), round(a[1], 4)], "to": [round(b[0], 4), round(b[1], 4)],
             "km": round(_km(a, b), 1), "cc": a[2] if a[2] == b[2] else None,
+            **({"ccPair": [a[2], b[2]]} if a[2] != b[2] and {a[2], b[2]} <= RAIL_EU else {}),
             "prefer": prefer if (prefer := str(event.get("prefer") or "cheapest").lower()) in
             ("cheapest", "fastest", "ground", "flight") else "cheapest",
             "avoidOvernight": event.get("avoidOvernight") is not False}, None
@@ -240,6 +244,11 @@ def _to_sgd(amount, currency):
 def _rail(q):
     """(in-train minutes, fare per adult in local currency, currency, basis) from the country profile, or None."""
     p = RAIL.get(q.get("cc"))
+    if not p and q.get("ccPair"):
+        r1, r2 = (RAIL[c] for c in q["ccPair"])
+        p = (min(r1[0], r2[0]), max(r1[1] * FX_TO_SGD[r1[3]], r2[1] * FX_TO_SGD[r2[3]]),
+             max(r1[2] * FX_TO_SGD[r1[3]], r2[2] * FX_TO_SGD[r2[3]]), "SGD",
+             "-".join(q["ccPair"]) + " cross-border, slower speed and higher fare of the two country rows")
     if not p:
         return None
     v, base, rate, cur, basis = p

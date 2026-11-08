@@ -54,7 +54,8 @@ print("NO PROFILE OK")
 
 # ---- live mode with a fake geocoder: Paris -> Lyon (FR profile, no flight search) and London -> Rome (two countries)
 GEO = {"Paris": ([2.3744, 48.8443], "FR"), "Lyon": ([4.8597, 45.7606], "FR"),
-       "London": ([-0.1238, 51.5308], "GB"), "Rome": ([12.4964, 41.9028], "IT")}
+       "London": ([-0.1238, 51.5308], "GB"), "Rome": ([12.4964, 41.9028], "IT"),
+       "Amsterdam": ([4.9003, 52.3789], "NL"), "Brussels": ([4.3571, 50.8355], "BE")}
 
 
 class FakeGeo:
@@ -101,6 +102,21 @@ try:
     assert "estimateBasis" not in by["ground"] and by["ground"]["summary"].startswith("Train / bus / ferry")
     assert by["flight"]["recommended"] and by["flight"]["doorToDoorMinutes"] == 150 + 185
     print("LONDON-ROME OK", {m: o["doorToDoorMinutes"] for m, o in by.items()})
+
+    # two mainland-EU countries: the slower train (NL 75 km/h, not FR 295) and the higher fare (NL EUR 0.27/km)
+    q, _ = t._validate(hop({"city": "Paris"}, {"city": "Amsterdam"}))
+    g, rail_km = t._ground(q), q["km"] * 1.25
+    assert q["cc"] is None and q["ccPair"] == ["FR", "NL"], q
+    assert g["durationMinutes"] == round(15 + rail_km / 75 * 60) and g["doorToDoorMinutes"] == g["durationMinutes"] + 50, g
+    assert abs(g["priceTotalSGD"] - 0.27 * 1.45 * rail_km) < 0.01 and g["estimateBasis"].startswith("FR-NL cross-border"), g
+    print("PARIS-AMSTERDAM OK", g["durationMinutes"], "min", round(per_adult(g, "EUR"), 2), "EUR pp")
+
+    # BE has no row: Paris -> Brussels keeps the generic estimate
+    q, _ = t._validate(hop({"city": "Paris"}, {"city": "Brussels"}))
+    g = t._ground(q)
+    assert q["cc"] is None and "ccPair" not in q and t._rail(q) is None and "estimateBasis" not in g, (q, g)
+    assert g["durationMinutes"] == int(q["km"] * 1.3 / 70 * 60 + 30) and g["summary"].startswith("Train / bus / ferry"), g
+    print("PARIS-BRUSSELS OK", g["durationMinutes"], "min")
 finally:
     os.environ["MOCK_MODE"] = "true"
     t.boto3.client = saved_client
