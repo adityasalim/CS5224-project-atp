@@ -1787,6 +1787,14 @@ def _zone_view(zones, stays, places, ride_max=RIDE_MAX_MIN):
     return out
 
 
+def _shown_zones(zones, places):
+    """The zones with at least one of the compact places shown, their sights cut to the shown ones: after the pool
+    is trimmed, the zone map lists no zone, sight or food count the planner cannot see."""
+    shown = {p["id"] for p in places}
+    return [{**z, "sights": [s for s in z["sights"] if s in shown]} for z in zones
+            if any(p.get("zone") == z["id"] for p in places)]
+
+
 def _cafes_per_day(spec):
     """Cafe stops per full day the traveler asked for (preferences.food.perDay, as in the stop cap), else 0."""
     return int(((spec.get("preferences") or {}).get("food") or {}).get("perDay") or 0)
@@ -2784,9 +2792,9 @@ def compact_pool(pool, spec=None):
         places = [{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec)]
     else:
         places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
-    zones = _zone_view(pool["zones"], raw_stays, pool["places"], _ride_max(spec)) if zoned else None
 
     def dump():
+        zones = _zone_view(_shown_zones(pool["zones"], places), raw_stays, places, _ride_max(spec)) if zoned else None
         return json.dumps({"flights": flights, "stays": stays, "places": places, **({"zones": zones} if zones else {})},
                           separators=(",", ":"))
     out = dump()
@@ -2922,6 +2930,7 @@ def compact_pool_multi(spec, pool):
     flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     cities = []
     floors = []
+    views = []
     min_by_leg = {}
     for i in range(len(spec["legs"])):
         leg_prices = [p for p in (known_price(s_) for s_ in pool["stays"] if s_.get("leg") == i) if p is not None]
@@ -2942,8 +2951,8 @@ def compact_pool_multi(spec, pool):
                   if leg_zones else [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)])
         floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
-                       "checkOut": leg["checkOut"], "stays": stays, "places": places,
-                       **({"zones": _zone_view(leg_zones, raw, leg_places, _ride_max(spec))} if leg_zones else {})})
+                       "checkOut": leg["checkOut"], "stays": stays, "places": places, **({"zones": []} if leg_zones else {})})
+        views.append((leg_zones, raw))
     hops = []
     for i, (a, b) in enumerate(zip(spec["legs"], spec["legs"][1:])):
         hops.append({"from": a["city"], "to": b["city"], "date": a["checkOut"], "options": [
@@ -2954,6 +2963,9 @@ def compact_pool_multi(spec, pool):
             for t in pool["transfers"] if t.get("hop") == i]})
 
     def dump():
+        for c, (leg_zones, raw) in zip(cities, views):
+            if leg_zones:
+                c["zones"] = _zone_view(_shown_zones(leg_zones, c["places"]), raw, c["places"], _ride_max(spec))
         return json.dumps({"internationalFlights": flights, "cities": cities, "transfers": hops}, separators=(",", ":"))
     out = dump()
     if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions

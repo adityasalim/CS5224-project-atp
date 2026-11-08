@@ -6,6 +6,7 @@ cd "$(dirname "$0")"
 python3 test_lambdas.py
 python3 test_google_food.py | tail -1
 python3 test_zones.py | tail -1
+python3 test_zone_pool.py | tail -1
 python3 test_tool_preferences.py
 python3 test_ui_preferences.py | tail -1
 python3 test_robust_tools.py | tail -1
