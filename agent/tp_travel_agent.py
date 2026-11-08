@@ -1053,7 +1053,7 @@ def leg_index(spec, dt):
 
 def trip_spec_for_tools(spec):
     p = spec.get("preferences") or {}
-    # Daily cafe stops the traveller asks for come on top of the pace (planner rule), so the cap makes room for them
+    # Daily cafe stops the traveler asks for come on top of the pace (planner rule), so the cap makes room for them
     max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5) + int((p.get("food") or {}).get("perDay") or 0)
     min_free = {"relaxed": 180, "moderate": 90, "packed": 0}.get(spec.get("pace"), 60)
     money_fields = ({'budget': trip_budget(spec), 'dailySpend': spec['dailySpend'], 'fxQuote': spec['_fx']}
@@ -2631,7 +2631,7 @@ def _order_flights(flights, spec=None):
 
 
 def _loyal_flight(f, spec):
-    """The offer is on an airline or alliance the traveller prefers."""
+    """The offer is on an airline or alliance the traveler prefers."""
     f_pref = (spec.get("preferences") or {}).get("flight") or {}
     airline_l = str(f.get("airline") or "").lower().strip()
     pref = {str(a).lower().strip() for a in f_pref.get("preferredAirlines") or [] if str(a).strip()}
@@ -2665,7 +2665,7 @@ HOTEL_PROGRAM_BRANDS = {
 
 
 def _program_brands(programs):
-    """Brand words for the traveller's programs; a program not listed matches its own name without generic words."""
+    """Brand words for the traveler's programs; a program not listed matches its own name without generic words."""
     out = []
     for prog in programs or []:
         key = str(prog).strip().lower()
@@ -5364,7 +5364,7 @@ PREFS_QUESTION = ("Before I search, any preferences? For example \"business clas
 
 
 def _key_prefs_set(spec):
-    """The traveller already chose cabin, stops, hotel stars or program, or pace (asked once when none is set)."""
+    """The traveler already chose cabin, stops, hotel stars or program, or pace (asked once when none is set)."""
     p = spec.get("preferences") or {}
     f, h = p.get("flight") or {}, p.get("hotel") or {}
     return bool(f.get("cabin") not in (None, "economy") or f.get("maxStops") is not None or h.get("minStars")

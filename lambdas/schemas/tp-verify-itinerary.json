@@ -41,7 +41,7 @@
               },
               "maxRideMinutes": {
                 "type": "integer",
-                "description": "Longest taxi ride between stops of a day (the traveller's longest ride between areas); default 30."
+                "description": "Longest taxi ride between stops of a day (the traveler's longest ride between areas); default 30."
               }
             }
           },
