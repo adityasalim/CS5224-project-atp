@@ -19,6 +19,7 @@ ENVS=(
   --env "ITINERARIES_TABLE=tp-dev-itineraries"
   --env "MEMORY_ID=<memory-id>"                      # AgentCore -> Memory -> your memory's ID (memory is OFF without it)
   --env "MEMORY_PREFERENCES_NAMESPACE=/users/{actorId}/preferences"   # must match the user-preference strategy
+  # Leave every PROMPT_ARN_* unset (remove any from the runtime too); prompts.py is the source of truth
 )
 agentcore deploy \
   --agent tp_travel_agent \
