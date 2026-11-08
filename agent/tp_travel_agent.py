@@ -4222,7 +4222,7 @@ def _stop_display(p, spec, zones):
     if zone and zone.get("label"):
         out.update(zone=zone["id"], zoneLabel=zone["label"])
     if not _is_food_place(p):
-        return out
+        return {k: v for k, v in out.items() if v is not None}
     food, text = (spec.get("preferences") or {}).get("food") or {}, " ".join(
         str(p.get(k) or "") for k in ("name", "cuisine", "activity")).lower()
     why = [c for c in spec.get("cuisines") or [] if c.lower() in text][:1]
@@ -4800,7 +4800,7 @@ def deliver(state, best, usage, metrics, user_id, t0):
     trip_id, version = state["tripId"], state["version"]
     yield ev("status", "Creating your PDF…")
     names, zones, stays = {p["placeId"]: p for p in pool["places"]}, {z["id"]: z for z in pool.get("zones") or []}, _stays_of(seq, pool)
-    pdf_days = [{**d, "routeUrl": _day_route_url(d, names, stays),
+    pdf_days = [{**d, **({"routeUrl": route} if (route := _day_route_url(d, names, stays)) else {}),
                  "stops": [{**s, **_stop_display(names.get(s["placeId"], {}), spec, zones)} for s in d["stops"]]}
                 for d in seq["days"]]
     pdf = gw.call("render_pdf", {"tripId": trip_id, "version": version, "title": story["title"],

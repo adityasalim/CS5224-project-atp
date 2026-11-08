@@ -108,6 +108,25 @@ assert "attribution" not in A.to_web(spec_w, {**seq, "days": [{"date": "2026-12-
                                      pool, {}, {}, [], {"title": "t", "summary": "", "dayNotes": {}}, None, "trip_1", 0)
 # without the zones track's labelled zones there are no headers
 assert "zoneLabel" not in A._stop_display(places[0], spec_w, {})
+# a sight without coordinates has no Maps link field at all (the render_pdf schema declares it a string)
+assert A._stop_display({"placeId": "osm:9", "name": "No Coords", "category": "temple"}, spec_w, {}) == {}
+
+# the PDF payload carries routeUrl only on days with a route, as on the web card
+class PdfGw:
+    def call(self, tool, args):
+        self.args = args
+        raise StopIteration
+pdf_gw, saved_clients, saved_story = PdfGw(), A._clients, A.narrative
+A._clients, A.narrative = (lambda: (None, None, pdf_gw)), (lambda *a: {"title": "t", "summary": "", "dayNotes": {}})
+two = {**seq, "days": seq["days"] + [{"date": "2026-12-12", "stops": []}]}
+try:
+    list(A.deliver({"spec": spec_w, "pool": pool}, {"seq": two, "verify": {"totals": {}}, "judge": {},
+                                                     "acceptanceState": "accepted"}, None, {}, "u1", 0))
+except (StopIteration, RuntimeError):
+    pass
+A._clients, A.narrative = saved_clients, saved_story
+pdf_days = pdf_gw.args["itinerary"]["days"]
+assert pdf_days[0]["routeUrl"] == web["days"][0]["routeUrl"] and "routeUrl" not in pdf_days[1], pdf_days
 
 # ---- PDF: the same fields from the itinerary stops
 pdf_mod = load("tp-render-pdf")
