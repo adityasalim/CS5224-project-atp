@@ -107,6 +107,14 @@ class Ctx:
     session_id = "tp-" + "a" * 40
     request_headers = {"Authorization": "Bearer " + _tok}
 
+CAPTURED = []                      # spec, pool, plan and request of the first plan, reused by the reviewer test below
+_improve = A.improve
+def _spy_improve(spec, pool, plan, full_request, usage, change=None):
+    if not CAPTURED:
+        CAPTURED.append(json.loads(json.dumps([spec, pool, plan, full_request])))
+    return (yield from _improve(spec, pool, plan, full_request, usage, change=change))
+A.improve = _spy_improve
+
 its = []
 for prompt in ["Anniversary in Tokyo 10-15 Dec 2026 for two, SGD 6000. We're vegetarian, hate tourist traps, love a lie-in, want a nice ryokan in Asakusa and only direct flights after 10am.",
                "my wife now uses a wheelchair, please adjust"]:
@@ -129,4 +137,66 @@ assert first_stop >= "10:00", "dayStart not applied"
 assert SEEN.get("repair_wheelchair", 0) > 0, "wheelchair places not found after the change"
 assert "hidden gem" in SEEN["judge"] or "local pick" in SEEN["judge"]
 print("versions:", [i["version"] for i in its])
+A.improve = _improve
+
+# ---- form wishes that reach the tools: cuisines without the cafe chip (6 kept), cafe and dessert categories
+owner = {"cuisines": ["Japanese", "Italian", "French", "Turkish", "Middle Eastern", "Cafés & desserts", "Fine dining",
+                      "American"], "activities": ["pour-over coffee"], "preferences": {}}
+assert A.pref_args("find_places", owner)["cuisine"] == "japanese|italian|french|turkish|middle_eastern|fine_dining"
+assert {"cafe", "dessert", "restaurant"} <= set(A.preference_search_categories(owner))
+assert "cafe" in A.preference_search_categories({"preferences": {"notes": "two specialty coffee stops a day"}})
+assert "dessert" not in A.preference_search_categories({"cuisines": ["Italian"]})
+# daily cafes come on top of a moderate day's lunch, dinner and 2-3 sights, so the verifier allows two more stops
+day_t = {"startDate": "2026-12-10", "endDate": "2026-12-12", "pax": 2, "budgetSGD": 3000, "pace": "moderate"}
+assert A.trip_spec_for_tools(day_t)["hardConstraints"]["maxStopsPerDay"] == 5
+assert A.trip_spec_for_tools({**day_t, "preferences": {"notes": "two pour-over coffees daily"}})["hardConstraints"]["maxStopsPerDay"] == 7
+
+# ---- hotel chain ranks up; a per-city hotel area stays with its city
+spec_c = {"preferences": {"hotel": {"chain": "Hilton"}}}
+A.normalize_prefs(spec_c)
+assert spec_c["preferences"]["hotel"]["chain"] == "Hilton"
+stays = [{"stayId": "s1", "name": "Grand Kyoto Hotel", "starRating": 4, "reviewScore": 8.6, "priceTotalSGD": 1500},
+         {"stayId": "s2", "name": "Hilton Kyoto", "starRating": 4, "reviewScore": 8.2, "priceTotalSGD": 1500}]
+assert [x["stayId"] for x in A._order_stays(stays, spec_c)] == ["s2", "s1"]
+assert [x["stayId"] for x in A._order_stays(stays, {"preferences": {"hotel": {}}})] == ["s1", "s2"]
+multi = {"originAirport": "SIN", "startDate": "2026-12-10", "endDate": "2026-12-21", "pax": 3, "flightType": "round",
+         "legs": [{"city": "Tokyo", "airport": "HND", "nights": 7, "hotel": {"name": "", "area": "Shinjuku"}},
+                  {"city": "Kyoto", "airport": "KIX", "nights": 4, "hotel": {"area": "Gion"}}],
+         "preferences": {"hotel": {"area": "Shinjuku"}}}
+assert A.normalize_legs(multi) == [] and multi["legs"][1]["hotel"] == {"area": "Gion"}
+A.normalize_prefs(multi)
+class RecGw:
+    calls = []
+    def call(self, tool, args):
+        self.calls.append((tool, args))
+        return {"ok": True, "places": [], "stays": [], "offers": [], "options": []}
+gw_rec, saved_clients = RecGw(), A._clients
+A._clients = lambda: (None, None, gw_rec)
+list(A.gather_multi(multi, A.Usage(), {}))
+A._clients = saved_clients
+assert [a["city"] for t, a in gw_rec.calls if t == "search_stays"][:2] == ["Shinjuku, Tokyo", "Gion, Kyoto"], gw_rec.calls
+
+# ---- a reviewer timeout in strict mode: the plan is delivered with the review unavailable, and the judge is
+# not called again for the corrected plan
+spec_r, pool_r, plan_r, request_r = CAPTURED[0]
+JUDGE_CALLS, REPAIRS = [], []
+def slow_judge(*a, **k):
+    JUDGE_CALLS.append(1)
+    raise TimeoutError("Read timed out")
+saved = A.judge, A.repair
+A.judge = slow_judge
+A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
+from types import SimpleNamespace
+strict = A.Usage(adapter=SimpleNamespace(strict_no_retry=True), trip_id="t-review")
+gen = A.improve(spec_r, pool_r, plan_r, request_r, strict)
+try:
+    while True:
+        next(gen)
+except StopIteration as stop:
+    best = stop.value
+A.judge, A.repair = saved
+print("reviewer down:", len(JUDGE_CALLS), "judge call,", len(REPAIRS), "correction,", best["acceptanceState"], best["judge"]["status"])
+assert JUDGE_CALLS == [1] and REPAIRS == [1], (JUDGE_CALLS, REPAIRS)
+assert best["judge"]["unavailable"] and best["judge"]["status"] == "unavailable" and best["seq"]["days"]
+assert any("unavailable" in r_ for r_ in best["acceptanceReasons"]), best["acceptanceReasons"]
 print("PERSONALISATION OK")

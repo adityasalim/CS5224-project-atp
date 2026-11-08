@@ -96,7 +96,7 @@ Rules:
 - mustInclude: SPECIFIC named places, restaurants, shows or sights they want ("teamLab Planets", "dinner at Ichiran
   Shibuya", "Fushimi Inari at sunrise"), as [{{"name": "teamLab Planets", "city": ""}}] (city only for multi-city
   trips). Generic wishes ("a sushi dinner") go in interests/activities instead.
-- pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (5-6). "some free time" means relaxed.
+- pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (6-7). "some free time" means relaxed.
 - packageMode: compare by default; custom_only when the traveller asks to skip agency packages; packages_only when they prefer agency packages. Never force an unsuitable package.
 - flightType: "round" when the traveller returns to their origin, including an open-jaw
   return from the last destination; "oneway" when the trip ends at the last destination.
@@ -125,11 +125,13 @@ Rules:
   hotel: style from hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin; minStars (honeymoon
         or "luxury" -> 4, "nice" -> 3); minReviewScore; area (neighbourhood or landmark to stay near, e.g. "Gion");
         sortBy "rating" for special occasions or "best hotel", "value" for "good value", else "price";
+        chain: a hotel brand they ask for (e.g. "Hilton"), else "";
         name: a SPECIFIC hotel they want or already have ("Park Hyatt Tokyo"), else ""; booked: true only if they say
         they have ALREADY booked it; bookedPriceSGD: what the booking cost in SGD, only if they give an SGD amount and want
         it counted, else 0.
-        Multi-city: put a named hotel on its leg instead: {{"city": "...", "hotel": {{"name": "...", "booked": true}}}}.
-  flight: maxStops (0 for "direct"/"non-stop", else null); departAfter/departBefore/returnDepartAfter/
+        Multi-city: put a named hotel or a city's hotel area on its leg instead:
+        {{"city": "...", "hotel": {{"name": "...", "booked": true, "area": "..."}}}}.
+  flight: maxStops (0 for "direct"/"non-stop", 1 for "at most 1 stop", else null); departAfter/departBefore/returnDepartAfter/
         returnDepartBefore as "HH:MM" ("no red-eye" -> departAfter "07:00" and departBefore "21:00"; "make the most of
         the last day" -> returnDepartAfter "17:00"); preferredAirlines/avoidAirlines; sortBy "duration" with kids or
         elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
@@ -152,7 +154,7 @@ to replace with the traveller's real value; it is NOT a default. Use "" or null 
   "hotelPreference": "", "pace": "moderate", "mustInclude": [], "avoid": [],
   "preferences": {{"vibe": "balanced", "dietary": [], "accessibility": [], "audience": "any",
     "indoorPreferred": false, "freeOnly": false, "avoid": [], "dayStart": "", "dayEnd": "",
-    "hotel": {{"style": [], "minStars": 0, "minReviewScore": 0, "area": "", "sortBy": "price", "name": "",
+    "hotel": {{"style": [], "minStars": 0, "minReviewScore": 0, "area": "", "sortBy": "price", "name": "", "chain": "",
       "booked": false, "bookedPriceSGD": 0}},
     "flight": {{"maxStops": null, "departAfter": "", "departBefore": "", "returnDepartAfter": "",
       "returnDepartBefore": "", "preferredAirlines": [], "avoidAirlines": [], "sortBy": "price", "cabin": "economy"}},
@@ -226,10 +228,13 @@ Rules:
 <<SCORES>>
 - Choose one flightOfferId and one stayId whose combined price fits the money left, balancing cost, comfort and preferences.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order. Never repeat a placeId.
-- Full-day stops by pace (dining/cafes count): relaxed 2-3, moderate 3-4, packed 5-6. Give days with a major hike or
-  outdoor excursion at most 1-2 other stops.
-- Include an authentic restaurant, street_food, market or requested cafe/dessert on full days, varying across
-  trip.cuisines; never use supermarkets or convenience stores as food or sightseeing stops.
+- Full-day sights by pace: relaxed 1-2, moderate 2-3, packed 4-5; lunch, dinner and requested cafes come on top. Give
+  days with a theme park, Mount Fuji or another major hike or outdoor excursion at most 1-2 other stops, all near it.
+  Put a theme park on a full day, never an arrival, departure or moving day.
+- Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
+  needs; never use supermarkets or convenience stores as food or sightseeing stops. When activities or
+  preferences.notes ask for a number of cafe or coffee stops per day, add that many "cafe" stops on every full day
+  (not theme-park or day-trip days).
 - Diversify categories across the trip and within each day; respect rememberedPreferences unless overridden. Give each
   day a coherent 3-6 word theme.
 <<POOL>>
@@ -247,13 +252,19 @@ PLANNER_MULTI = """ROLE: itinerary planner for a MULTI-CITY trip. Use ONLY IDs f
 
 Rules:
 <<SCORES>>
-- Choose one international flightOfferId, one stayId per city, and one transferId per hop (prefer ground for short hops,
-  flight for long hops, avoid overnight) whose total combined cost fits the money left.
+- Choose one international flightOfferId, one stayId per city, and one transferId per hop (take the ground/train option
+  when it is under about 4 hours door to door, a flight only for longer hops, avoid overnight) whose total combined
+  cost fits the money left.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order, with that day's "city" (on moving days,
   the arrival city). Use ONLY placeIds belonging to that day's city. Never repeat a placeId.
-- Full-day stops by pace (dining/cafes count): relaxed 2-3, moderate 3-4, packed 5-6.
-- Include authentic dining/cafes on full days matching trip.cuisines and dietary needs (never supermarkets), diversify
-  categories across days, and respect rememberedPreferences. Give each day a coherent 3-6 word theme.
+- Full-day sights by pace: relaxed 1-2, moderate 2-3, packed 4-5; lunch, dinner and requested cafes come on top. Give
+  days with a theme park, Mount Fuji or another major outdoor excursion at most 1-2 other stops, all near it. Put a
+  theme park on a full day, never an arrival, departure or moving day.
+- Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
+  needs (never supermarkets). When activities or preferences.notes ask for a number of cafe or coffee stops per day,
+  add that many "cafe" stops on every full city day (not theme-park or day-trip days). Keep at least half of each
+  city's full days in that city, diversify categories across days and respect rememberedPreferences. Give each day a
+  coherent 3-6 word theme.
 <<POOL>>
 <<TIMING>>
 <<PERSONALISE_MULTI>>

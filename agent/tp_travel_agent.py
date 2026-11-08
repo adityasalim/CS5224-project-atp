@@ -1000,8 +1000,8 @@ def normalize_legs(spec):
         airport = str(l.get("airport") or "").upper()
         legs.append({"city": str(l["city"]).strip(), "airport": airport if re.fullmatch(r"[A-Z]{3}", airport) else "",
                      "nights": n, "checkIn": d.isoformat(), "checkOut": (d + timedelta(days=n)).isoformat()})
-        if isinstance(l.get("hotel"), dict) and str(l["hotel"].get("name") or "").strip():
-            legs[-1]["hotel"] = {k: l["hotel"][k] for k in ("name", "booked", "bookedPriceSGD") if k in l["hotel"]}
+        if isinstance(l.get("hotel"), dict) and str(l["hotel"].get("name") or l["hotel"].get("area") or "").strip():
+            legs[-1]["hotel"] = {k: l["hotel"][k] for k in ("name", "booked", "bookedPriceSGD", "area") if k in l["hotel"]}
         d += timedelta(days=n)
     problems = []
     for which, leg in (("first", legs[0]), ("last", legs[-1])):
@@ -1027,9 +1027,12 @@ def leg_index(spec, dt):
 
 
 def trip_spec_for_tools(spec):
-    max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5)
-    min_free = {"relaxed": 180, "moderate": 90, "packed": 0}.get(spec.get("pace"), 60)
     p = spec.get("preferences") or {}
+    max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5)
+    # Daily cafe stops the traveller asks for come on top of the pace (planner rule), so the cap makes room for two
+    if re.search(r"caf|coffee", json.dumps([spec.get("activities"), p.get("notes")], ensure_ascii=False).lower()):
+        max_stops += 2
+    min_free = {"relaxed": 180, "moderate": 90, "packed": 0}.get(spec.get("pace"), 60)
     money_fields = ({'budget': trip_budget(spec), 'dailySpend': spec['dailySpend'], 'fxQuote': spec['_fx']}
                     if 'budget' in spec else {'budgetSGD': float(spec['budgetSGD'])})
     return {"startDate": spec["startDate"], "endDate": spec["endDate"], "pax": spec["pax"],
@@ -1073,6 +1076,10 @@ def preference_search_categories(spec):
             categories.update(options)
 
     categories.add("restaurant")
+    # Cafes, coffee or desserts named anywhere in the wishes (cuisine chips, activities, notes) search those categories.
+    wishes = json.dumps([spec.get("cuisines"), spec.get("activities"), (spec.get("preferences") or {}).get("notes")],
+                        ensure_ascii=False).lower()
+    categories.update(c for c, w in (("cafe", r"caf|coffee"), ("dessert", r"dessert")) if re.search(w, wishes))
 
     return sorted(categories)
 
@@ -1178,6 +1185,7 @@ def normalize_prefs(spec):
                   "minReviewScore": num(hotel.get("minReviewScore"), 0, 10), "area": str(hotel.get("area") or "")[:60],
                   "sortBy": hotel.get("sortBy") if hotel.get("sortBy") in ("price", "rating", "value") else "price",
                   "name": str(hotel.get("name") or "").strip()[:80], "booked": bool(hotel.get("booked")),
+                  "chain": str(hotel.get("chain") or "").strip()[:40],
                   "bookedPriceSGD": num(hotel.get("bookedPriceSGD"), 0, 1e6)},
         "flight": {"maxStops": int(stops) if isinstance(stops, (int, float)) and not isinstance(stops, bool) else None,
                    "departAfter": hhmm(flight.get("departAfter")), "departBefore": hhmm(flight.get("departBefore")),
@@ -1204,11 +1212,11 @@ def pref_args(tool, spec):
     if tool == "find_places":
         a = {"vibe": p["vibe"], "dietary": p["dietary"], "accessibility": p["accessibility"], "audience": p["audience"],
              "indoorOnly": p["indoorPreferred"], "freeOnly": p["freeOnly"], "avoid": p["avoid"]}
-        cuisines = spec.get("cuisines") or []
+        cuisines = [c for c in spec.get("cuisines") or [] if not re.search(r"caf|dessert", str(c).lower())]
         if cuisines:
             a["cuisine"] = "|".join(
                 str(c).lower().replace(" ", "_")
-                for c in cuisines[:5]
+                for c in cuisines[:6]
             )
         elif spec.get("cuisine"):
             a["cuisine"] = spec["cuisine"]
@@ -1253,7 +1261,7 @@ def with_prefs(tool, spec, args, relax=False):
         if name:
             out.update(name=name, alreadyBooked=booked, **({"bookedPriceSGD": price} if price else {}))
     area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
-    if tool == "search_stays" and area and not relax and out.get("lat") is None and "," not in str(out.get("city", "")):
+    if tool == "search_stays" and area and not relax and not is_multi(spec) and out.get("lat") is None and "," not in str(out.get("city", "")):
         out["city"] = f'{area}, {out.get("city") or spec.get("destination")}'
     return out
 
@@ -1619,7 +1627,7 @@ def _c_place(p, with_hours=True):
     item = {"id": p["placeId"], "name": p.get("name"), "category": p.get("category"), "distanceKm": p.get("distanceKm"), "rating": p.get("rating"), "lat": p.get("lat"), "lng": p.get("lng")}
     if p.get("zone"):
         item["zone"] = p["zone"]
-    for k in ("requested", "dayTrip"):
+    for k in ("requested", "dayTrip", "reviews"):
         if p.get(k):
             item[k] = p[k]
     if with_hours:
@@ -2237,6 +2245,7 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     h_pref = ((spec.get("preferences") or {}).get("hotel") or {})
     want_styles = {str(s).lower() for s in (h_pref.get("style") or []) if str(s).strip()}
     want_name = str(h_pref.get("name") or "").strip().lower()
+    want_chain = str(h_pref.get("chain") or "").strip().lower()
     loc_weight = LOC_WEIGHT * (1.3 if spec.get("pace") == "packed" else 1.0)   # NEW
 
     known_reviews = [float(x.get("reviewScore") or x.get("review")) for x in stays
@@ -2285,6 +2294,8 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
         qual = c_weight * ((review - 7.0) * 6.0 + (stars - 2.5) * 4.0) + len(matches) * 4.5
         if want_styles and (styles & want_styles):
             qual += 6.0
+        if want_chain and want_chain in name_l:
+            qual += 8.0
         dist = s_.get("distanceKm")                                            # NEW: location credit
         if isinstance(dist, (int, float)) and not isinstance(dist, bool):
             qual += loc_weight * max(0.0, 1.0 - float(dist) / LOC_SCALE_KM)
@@ -2392,7 +2403,6 @@ def gather_multi(spec, usage, metrics):
     })
     kws = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
            + list(spec.get("activities") or []))[:8]
-    area = ((spec.get("preferences") or {}).get("hotel") or {}).get("area")
     leg_counts = []
     for i, leg in enumerate(legs):
         yield ev("status", f"Searching places and hotels in {leg['city']} ({leg['nights']} nights)…")
@@ -2405,10 +2415,11 @@ def gather_multi(spec, usage, metrics):
         for pl in res.get("places", []) if res.get("ok") else []:
             pool["places"].append({**pl, "city": leg["city"], "leg": i})
 
-        stay_args = {"city": leg["city"], "checkIn": leg["checkIn"], "checkOut": leg["checkOut"],
-                     "guests": pax, **extra}
+        leg_area = str((leg.get("hotel") or {}).get("area") or "").strip()
+        stay_args = {"city": f'{leg_area}, {leg["city"]}' if leg_area else leg["city"], "checkIn": leg["checkIn"],
+                     "checkOut": leg["checkOut"], "guests": pax, **extra}
         focus = _sights_focus(spec, [p for p in pool["places"] if p.get("leg") == i])
-        if focus and not area and not name:        # hotels around this city's main sights
+        if focus and not leg_area and not name:    # hotels around this city's main sights
             stay_args = {**stay_args, "lat": focus["lat"], "lng": focus["lng"]}
         res = call("search_stays", stay_args)
         for st in res.get("stays", []) if res.get("ok") else []:
@@ -2576,7 +2587,7 @@ def plan_tokens(spec):
         days = (date.fromisoformat(spec["endDate"]) - date.fromisoformat(spec["startDate"])).days + 1
     except (KeyError, TypeError, ValueError):
         days = 7
-    return min(MAX_OUTPUT_TOKENS, 2000 + 220 * days + 400 * len(spec.get("legs") or []))
+    return min(MAX_OUTPUT_TOKENS, 2000 + 320 * days + 400 * len(spec.get("legs") or []))
 
 
 def propose(spec, pool, usage):
@@ -4002,6 +4013,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     prior_reviewer_suggestions = []
     no_progress_streak = 0
     stop_reason = STOP_ROUND_LIMIT
+    judge_down = False
     while True:
         _balance_meals(spec, pool, plan)
         cur_sig = _plan_signature(plan)
@@ -4032,10 +4044,12 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             elif _verified(vres) or _can_judge_on_failed_verify(vres, seq, usage, judge_cache):
                 yield ev("status", "Reviewing how well it fits your preferences…")
                 try:
+                    if judge_down:   # the reviewer failed earlier in this turn: do not wait for it again
+                        raise RuntimeError("reviewer unavailable earlier in this turn")
                     judge_res = judge(full_request, spec, seq, pool, usage)
                 except Exception as e:
                     print("judge failed:", e)
-                    if strict_mode: raise
+                    judge_down = True
                     judge_res = {"scores": {}, "minScore": None, "passed": False, "unavailable": True,
                                  "evaluated": False, "status": "unavailable", "rationale": "judge unavailable",
                                  "suggestions": list(det_suggestions)}
