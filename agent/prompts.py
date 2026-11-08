@@ -241,12 +241,12 @@ Zones (built by the system from walking and taxi times; they take precedence ove
   A "daytrip" zone is a day-trip town or a far theme park: on that full day use only its places and set "dayTrip"
   to the zone's "dayTrip" value.
 - Every full city day has a lunch and a dinner: on a two-zone day one meal from each zone, on a one-zone day both
-  from it. When activities or preferences.notes ask for a number of cafe or coffee stops per day, add that many
-  "cafe" stops on every full city day, from that day's zones. Dessert, tea and bakery stops also come from that
-  day's zones. A zone with "food": 0 takes its meals from the day's other zone.
+  from it. When preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every
+  full city day, from that day's zones. Dessert, tea and bakery stops also come from that day's zones. A zone with
+  "food": 0 takes its meals from the day's other zone.
 - The sights of a full city day follow the pace (relaxed 1-2, moderate 2-3, packed 4-5) and come from its zones.
   Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 4 (relaxed), 5 (moderate)
-  or 7 (packed) stops, or 2 more when cafe or coffee stops are requested.
+  or 7 (packed) stops, plus preferences.food.perDay.
 """
 
 # POSITIONAL: tp_travel_agent._special_rules() splits this text on "\n- " and keeps the rule at index i only when

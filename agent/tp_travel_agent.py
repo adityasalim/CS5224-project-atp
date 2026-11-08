@@ -1101,12 +1101,6 @@ def preference_search_categories(spec):
         categories.add("cafe")
     if food.get("dessert") or food.get("bakery"):
         categories.add("dessert")
-    # Cafes, coffee or desserts named anywhere in the wishes (cuisine chips, activities, notes) search those categories.
-    wishes = json.dumps([spec.get("cuisines"), spec.get("activities"), (spec.get("preferences") or {}).get("notes")],
-                        ensure_ascii=False).lower()
-    # Matcha and tea search tea houses with the cafes; bakeries and sweets search the dessert group.
-    categories.update(c for c, w in (("cafe", r"caf|coffee|matcha|\btea\b"),
-                                     ("dessert", r"dessert|bak(?:ery|eries)|pastr|sweets")) if re.search(w, wishes))
 
     return sorted(categories)
 
@@ -1788,12 +1782,8 @@ def _zone_view(zones, stays, places):
 
 
 def _cafes_per_day(spec):
-    """Cafe stops per full day the traveler asked for ("two specialty pour-over coffees daily" -> 2), else 0."""
-    text = " ".join([str(x) for x in spec.get("activities") or []]
-                    + [str((spec.get("preferences") or {}).get("notes") or "")]).lower()
-    m = re.search(r"\b(one|two|three|[123])\b[\w\s-]{0,30}?\b(?:coffees?|caf[eé]s?)\b[\w\s-]{0,20}?"
-                  r"\b(?:a day|daily|per day|each day|every day)\b", text)
-    return ({"one": 1, "two": 2, "three": 3}.get(m.group(1)) or int(m.group(1))) if m else 0
+    """Cafe stops per full day the traveler asked for (preferences.food.perDay, as in the stop cap), else 0."""
+    return int(((spec.get("preferences") or {}).get("food") or {}).get("perDay") or 0)
           
 def gather_specials(spec, pool, calls, sources, only=None):
     """Code-driven lookups for things the traveller named: specific places (pinned, must be in the plan) and

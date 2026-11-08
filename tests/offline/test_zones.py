@@ -189,8 +189,8 @@ def owner_trip():
                      {"city": "Kyoto", "nights": 4, "checkIn": "2026-12-08", "checkOut": "2026-12-12"}],
             "dayTrips": [{"place": "Kawaguchiko", "date": "", "fromCity": "Tokyo", "lat": 35.4975, "lng": 138.7631}],
             "pinned": [{"name": n, "placeId": f"pin:{i}"} for i, (n, *_r) in enumerate(PINS)],
-            "activities": ["two specialty pour-over coffees daily"], "cuisines": ["italian"], "cuisine": "italian",
-            "preferences": {"notes": "we love desserts"}}
+            "cuisines": ["italian"], "cuisine": "italian",
+            "preferences": {"food": {"coffee": True, "dessert": True, "perDay": 2, "coffeeStyle": "pour_over"}}}
     A["normalize_prefs"](spec)
     stays = [{"stayId": "kyoto-st", "name": "Kyoto Station Hotel", "lat": 34.9858, "lng": 135.7588, "city": "Kyoto", "leg": 1},
              {"stayId": "tokyo-st", "name": "Ginza Hotel", "lat": 35.6717, "lng": 139.7640, "city": "Tokyo", "leg": 0}]
@@ -270,10 +270,10 @@ m_pool["places"].append(both)
 plan = {"days": [{"date": "2026-12-04", "placeIds": ["senso", "lunch", "ueno", "both"]}]}
 A["_balance_meals"]({}, m_pool, plan)
 assert plan["days"][0]["placeIds"] == ["senso", "lunch", "ueno", "cand"], "the second meal moves to the other zone"
-assert A["_cafes_per_day"]({"activities": ["two specialty pour-over coffees daily"]}) == 2
-assert A["_cafes_per_day"]({"preferences": {"notes": "coffee lover"}}) == 0
+assert A["_cafes_per_day"]({"preferences": {"food": {"perDay": 2}}}) == 2
+assert A["_cafes_per_day"]({"activities": ["two coffees daily"], "preferences": {"notes": "coffee lover"}}) == 0
 diag = A["_deterministic_quality_eval"](
-    {"startDate": "2026-12-01", "endDate": "2026-12-09", "activities": ["one coffee a day"]},
+    {"startDate": "2026-12-01", "endDate": "2026-12-09", "preferences": {"food": {"perDay": 1}}},
     {"zones": [{"id": "Z1"}], "places": [mk("a", "museum", SENSO, "Z1"), mk("b", "museum", UENO, "Z2"),
                                           mk("c", "museum", UENO, "Z3"), mk("l", "restaurant", UENO, "Z2")]},
     {"days": [{"date": "2026-12-03", "stops": [{"placeId": x} for x in "abcl"]}]})
