@@ -8,6 +8,7 @@ python3 test_google_food.py | tail -1
 python3 test_tool_preferences.py
 python3 test_robust_tools.py | tail -1
 python3 test_serpapi_flights.py | grep " OK"
+python3 test_rail_hops.py | tail -1
 python3 test_model_selection.py | tail -1
 python3 fake_gateway.py & GW=$!
 trap 'kill $GW 2>/dev/null' EXIT

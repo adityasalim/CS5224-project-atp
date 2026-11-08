@@ -137,15 +137,15 @@ hop = {"from": {"city": "Copenhagen", "airport": "CPH"}, "to": {"city": "Lofoten
        "date": "2026-12-13", "pax": 2}
 assert tr.lambda_handler({**hop, "prefer": "ground", "avoidOvernight": False}, None)["options"][0]["mode"] == "ground"
 
-# Tokyo -> Kyoto is a Shinkansen corridor: one rail option from the fare table and no flight search
+# Tokyo -> Kyoto uses the JP rail profile: one rail option and no flight search (more in test_rail_hops.py)
 r = tr.lambda_handler({"from": {"city": "Tokyo", "airport": "HND"}, "to": {"city": "Kyoto", "airport": "KIX"},
                        "date": "2026-12-17", "pax": 3}, None)
 assert [o["mode"] for o in r["options"]] == ["ground"], r["options"]
 o = r["options"][0]
-assert (o["durationMinutes"], o["priceTotalSGD"], o["departAt"][11:], o["arriveAt"][11:]) == (165, 382.59, "09:00", "11:45"), o
-assert o["summary"] == "Shinkansen Nozomi Tokyo → Kyoto (fare estimate)" and o["estimate"] and "rome2rio" in o["bookingUrl"]
+assert (o["durationMinutes"], o["priceTotalSGD"], o["departAt"][11:], o["arriveAt"][11:]) == (128, 376.02, "09:00", "11:08"), o
+assert o["summary"] == "Train Tokyo → Kyoto (fare estimate)" and o["estimate"] and "rome2rio" in o["bookingUrl"]
 assert tr.lambda_handler({"from": {"city": "Osaka, Japan", "lat": 34.69, "lng": 135.50}, "to": {"city": "Tokyo"}, "date": "2026-12-17", "pax": 1},
-                         None)["options"][0]["summary"] == "Shinkansen Nozomi Osaka, Japan → Tokyo (fare estimate)"
+                         None)["options"][0]["summary"] == "Train Osaka, Japan → Tokyo (fare estimate)"
 
 # a named theme park takes the day; other named places keep 90 minutes
 sd = load("tp-sequence-day")

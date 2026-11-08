@@ -2571,7 +2571,8 @@ def compact_pool_multi(spec, pool):
     for i, (a, b) in enumerate(zip(spec["legs"], spec["legs"][1:])):
         hops.append({"from": a["city"], "to": b["city"], "date": a["checkOut"], "options": [
             {"id": t["transferId"], "mode": t.get("mode"), "summary": t.get("summary"), "depart": t.get("departAt"),
-             "arrive": t.get("arriveAt"), "minutes": t.get("durationMinutes"), **({"price": t["price"]} if "price" in t else ({"priceSGD": t["priceTotalSGD"]} if t.get("priceTotalSGD") is not None else {"price": "unknown"})),
+             "arrive": t.get("arriveAt"), "minutes": t.get("durationMinutes"), "doorMin": t.get("doorToDoorMinutes"),
+             "recommended": bool(t.get("recommended")), **({"price": t["price"]} if "price" in t else ({"priceSGD": t["priceTotalSGD"]} if t.get("priceTotalSGD") is not None else {"price": "unknown"})),
              "estimate": t.get("estimate"), "overnight": t.get("overnight", False), "matches": t.get("matches") or []}
             for t in pool["transfers"] if t.get("hop") == i]})
 
@@ -3179,7 +3180,8 @@ def _plan_stays(spec, pool, plan):
                 tid = cand      # unknown id for this segment: keep it so verification rejects it
                 break
         if not tid:
-            opts = sorted((t_ for t_ in pool.get("transfers", []) if t_.get("hop") == k and not t_.get("overnight")), key=_price_key)
+            opts = sorted((t_ for t_ in pool.get("transfers", []) if t_.get("hop") == k and not t_.get("overnight")),
+                          key=lambda t_: (not t_.get("recommended"), _price_key(t_)))
             tid = opts[0]["transferId"] if opts else None
         transfers.append({"transferId": tid, "date": legs[k]["checkOut"],
                           "from": legs[k]["city"], "to": legs[k + 1]["city"]})
