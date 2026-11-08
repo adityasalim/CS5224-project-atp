@@ -97,6 +97,18 @@ w = fp.lambda_handler(ev2, None)
 assert w["source"].endswith("-cache") and [p["placeId"] for p in w["places"] if p["name"] == "Good Roaster"] == ["gplace:rst"], w["places"]
 fp._amazon_location = _amazon_location
 
+# Google as the keyword provider or as the last-resort sights provider: nothing is cached (Places terms), so the
+# next call asks again instead of serving a cache with those results missing
+STORE.clear()
+fp.requests.post = fake_post
+k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywords": ["pour-over coffee"]}, None)
+assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v5:") for s in STORE), (k["source"], list(STORE))
+fp._overpass = lambda q, deadline: ([], None)
+g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
+assert g["source"] == "google+google" and any(p["category"] == "temple" and p["placeId"].startswith("gplace:") for p in g["places"])
+assert not any(s.startswith("places-v5:") for s in STORE), list(STORE)
+fp._overpass = _overpass
+
 # a web pick (namesCategory) is verified on Google only, one Text Search per name, with the 4.0-star, 50-review and
 # open floor; a pinned name still tries Amazon Location first
 POSTS.clear()

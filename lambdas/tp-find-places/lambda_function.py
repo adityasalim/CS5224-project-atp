@@ -997,9 +997,12 @@ def lambda_handler(event, context):
         missing = [k for k in q["keywords"] if not any(p.get("activity") == k for p in places)]
         if missing:
             result["note"] = f"No places found for: {', '.join(missing)}."
-        if "google" in sources or not google_wanted:   # a Google failure is not cached, so the next call tries again
-            _cache_put(key, {**result, "places": [p for p in places if not (p["placeId"].startswith("gplace:")
-                                                                            and p["category"] in GOOGLE_FIRST)]})
+        # Places terms allow no caching of Google content, and the warm path re-asks Google for food only, so a
+        # query with Google sights or keyword results is not cached; a Google failure is not cached either
+        google_other = "google-keywords" in sources or any(
+            p["placeId"].startswith("gplace:") and p["category"] not in GOOGLE_FIRST for p in places)
+        if ("google" in sources or not google_wanted) and not google_other:
+            _cache_put(key, {**result, "places": [p for p in places if not p["placeId"].startswith("gplace:")]})
         _pool_put(named + places)
         return {**result, "places": named + places, **extra}
 
