@@ -122,10 +122,11 @@ Rules:
   avoid: short words for dislikes or exclusions ("seafood", "casino", "zoo", "nightclub").
   dayStart/dayEnd: "HH:MM" when they say "late riser" (10:00), "not morning people" (10:30), "early birds" (07:30),
         "early nights" (dayEnd 19:30), "night owls" (dayEnd 23:00); else "".
-  hotel: style from hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin; minStars (honeymoon
-        or "luxury" -> 4, "nice" -> 3); minReviewScore; area (neighbourhood or landmark to stay near, e.g. "Gion");
-        sortBy "rating" for special occasions or "best hotel", "value" for "good value", else "price";
-        chain: a hotel brand they ask for (e.g. "Hilton"), else "";
+  hotel: style from hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin ("business hotel" ->
+        hotel); minStars (honeymoon or "luxury" -> 4, "nice" -> 3); minReviewScore; area (neighbourhood or landmark to
+        stay near, e.g. "Gion"); sortBy "rating" for special occasions or "best hotel", "value" for "good value", else
+        "price"; programs: hotel loyalty programs or hotel brands they name, as written ("Marriott Bonvoy",
+        "Hilton Honors", "Hyatt"), else [];
         name: a SPECIFIC hotel they want or already have ("Park Hyatt Tokyo"), else ""; booked: true only if they say
         they have ALREADY booked it; bookedPriceSGD: what the booking cost in SGD, only if they give an SGD amount and want
         it counted, else 0.
@@ -133,9 +134,17 @@ Rules:
         {{"city": "...", "hotel": {{"name": "...", "booked": true, "area": "..."}}}}.
   flight: maxStops (0 for "direct"/"non-stop", 1 for "at most 1 stop", else null); departAfter/departBefore/returnDepartAfter/
         returnDepartBefore as "HH:MM" ("no red-eye" -> departAfter "07:00" and departBefore "21:00"; "make the most of
-        the last day" -> returnDepartAfter "17:00"); preferredAirlines/avoidAirlines; sortBy "duration" with kids or
-        elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
+        the last day" -> returnDepartAfter "17:00"); preferredAirlines/avoidAirlines; alliances from "Star Alliance",
+        "oneworld", "SkyTeam" when they name one, else []; bags "checked" for a checked bag, else "carry_on"; sortBy
+        "duration" with kids or elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
   transfer: prefer "ground" for "scenic train"/"no flying", "fastest" for "quickest", else "cheapest".
+  food: coffee, tea, bakery, dessert: true when they are into specialty coffee, matcha or tea, bakeries, desserts;
+        perDay: coffee or tea stops they want each day, 0-2 ("two coffees a day" -> 2); coffeeStyle "pour_over",
+        "espresso" or "either"; priceLevel 1-4 for a meal price level "$" to "$$$$", else 0.
+  days: transport "transit" (walk and public transport), "taxi" (taxis are fine) or "car" (rental car);
+        rideMaxMin: the longest ride between areas they accept, 15, 30 or 45 minutes (default 30); dayTripLimit "none",
+        "1", "2" or "listed" (only the day trips they list; the default). Their pace goes in pace and their day start
+        and end times in dayStart/dayEnd.
   notes: anything else personal in one sentence (an occasion, photography, a surprise, a pace detail).
 - missing: list the REQUIRED fields you could not determine: destination, startDate, endDate, pax, budget.
   Do not guess dates or budget. If pax is unclear but the trip is a honeymoon or couple trip, pax is 2.
@@ -154,11 +163,15 @@ to replace with the traveller's real value; it is NOT a default. Use "" or null 
   "hotelPreference": "", "pace": "moderate", "mustInclude": [], "avoid": [],
   "preferences": {{"vibe": "balanced", "dietary": [], "accessibility": [], "audience": "any",
     "indoorPreferred": false, "freeOnly": false, "avoid": [], "dayStart": "", "dayEnd": "",
-    "hotel": {{"style": [], "minStars": 0, "minReviewScore": 0, "area": "", "sortBy": "price", "name": "", "chain": "",
-      "booked": false, "bookedPriceSGD": 0}},
+    "hotel": {{"style": [], "minStars": 0, "minReviewScore": 0, "area": "", "sortBy": "price", "name": "",
+      "programs": [], "booked": false, "bookedPriceSGD": 0}},
     "flight": {{"maxStops": null, "departAfter": "", "departBefore": "", "returnDepartAfter": "",
-      "returnDepartBefore": "", "preferredAirlines": [], "avoidAirlines": [], "sortBy": "price", "cabin": "economy"}},
-    "transfer": {{"prefer": "cheapest"}}, "notes": ""}},
+      "returnDepartBefore": "", "preferredAirlines": [], "avoidAirlines": [], "alliances": [], "bags": "carry_on",
+      "sortBy": "price", "cabin": "economy"}},
+    "transfer": {{"prefer": "cheapest"}},
+    "food": {{"coffee": false, "tea": false, "bakery": false, "dessert": false, "perDay": 0, "coffeeStyle": "either",
+      "priceLevel": 0}},
+    "days": {{"transport": "transit", "rideMaxMin": 30, "dayTripLimit": "listed"}}, "notes": ""}},
   "missing": [], "question": ""}}"""
 
 # Used only by the legacy GATHER_MODE=model path; the role adapter does not support tool calling.
@@ -257,8 +270,8 @@ Rules:
   days with a theme park, Mount Fuji or another major hike or outdoor excursion at most 1-2 other stops, all near it.
   Put a theme park on a full day, never an arrival, departure or moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
-  needs; never use supermarkets or convenience stores as food or sightseeing stops. When activities or
-  preferences.notes ask for a number of cafe or coffee stops per day, add that many "cafe" stops on every full day
+  needs; never use supermarkets or convenience stores as food or sightseeing stops. When
+  preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every full day
   (not theme-park or day-trip days).
 - Diversify categories across the trip and within each day; respect rememberedPreferences unless overridden. Give each
   day a coherent 3-6 word theme.
@@ -287,7 +300,7 @@ Rules:
   days with a theme park, Mount Fuji or another major outdoor excursion at most 1-2 other stops, all near it. Put a
   theme park on a full day, never an arrival, departure or moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
-  needs (never supermarkets). When activities or preferences.notes ask for a number of cafe or coffee stops per day,
+  needs (never supermarkets). When preferences.food.perDay asks for cafe or coffee stops per day,
   add that many "cafe" stops on every full city day (not theme-park or day-trip days). Keep at least half of each
   city's full days in that city, diversify categories across days and respect rememberedPreferences. Give each day a
   coherent 3-6 word theme.

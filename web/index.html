@@ -71,6 +71,12 @@
   .stop { display: grid; grid-template-columns: 54px 1fr; gap: 8px; font-size: 14px; padding: 2px 0; }
   .stop time { color: var(--muted); font-variant-numeric: tabular-nums; }
   .stop small { color: var(--muted); }
+  .day .zone { font-size: 13px; font-weight: 600; margin: 6px 0 2px; }
+  .day .zone small { font-weight: 400; color: var(--muted); }
+  .stop-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0 0; }
+  .stop-chips span { font-size: 12px; padding: 0 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+  .day .day-route { display: inline-block; font-size: 13px; margin: 4px 0 0; }
+  .card .attribution { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
   .notes { font-size: 13px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 8px; margin: 6px 0 0; }
   .notes li { margin: 2px 0; }
   .fb { border-top: 1px solid var(--line); margin-top: 10px; padding-top: 10px; font-size: 14px; }
@@ -135,6 +141,20 @@
     font-size: 17px;
     margin: 0 0 16px;
   }
+  .trip-section > summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    cursor: pointer;
+    list-style: none;
+  }
+  .trip-section > summary::-webkit-details-marker { display: none; }
+  .trip-section > summary h3 { margin: 0; }
+  .trip-section > summary::after { content: "▾"; margin-left: auto; color: var(--muted); }
+  .trip-section[open] > summary { margin-bottom: 16px; }
+  .trip-section[open] > summary::after { content: "▴"; }
+  .trip-section-summary { font-size: 13px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
   .trip-field {
     display: flex;
     flex-direction: column;
@@ -509,19 +529,32 @@ function renderItinerary(it) {
     const day = el("div", "day"); day.append(el("h3", null, d.title));
     if (d.note) day.append(el("p", "note", d.note));
     if (!(d.stops || []).length) day.append(el("div", "note", "Free time / travel"));
+    let zone = null;
     (d.stops || []).forEach((s) => {
+      if (s.zoneLabel && s.zone !== zone) {          // a zone header, with the ride from the previous zone
+        const head = el("div", "zone", s.zoneLabel);
+        if (zone && s.note) head.append(el("small", null, " · " + s.note + " from the previous area"));
+        day.append(head); zone = s.zone;
+      }
       const r = el("div", "stop"); r.append(el("time", null, s.time || ""));
-      const name = el("span"); const url = safeUrl(s.url);
+      const name = el("span"); const url = safeUrl(s.url), maps = safeUrl(s.googleMapsUri);
       if (url) { const a = el("a", null, s.name); a.href = url; a.target = "_blank"; a.rel = "noopener"; name.append(a); }
       else name.append(s.name);
+      if (maps && maps !== url) { const m = el("a", "maps", "Map"); m.href = maps; m.target = "_blank"; m.rel = "noopener"; name.append(" · ", m); }
       if (s.note) { name.append(" "); name.append(el("small", null, "· " + s.note)); }
+      const chips = [s.rating != null ? "★ " + s.rating + (s.reviews ? " (" + Number(s.reviews).toLocaleString() + ")" : "") : "",
+                     s.priceLevel, s.why, s.webSource ? "Featured by " + s.webSource : ""].filter(Boolean);
+      if (chips.length) { const c = el("div", "stop-chips"); chips.forEach((t) => c.append(el("span", null, t))); name.append(c); }
       r.append(name); day.append(r);
     });
+    const route = safeUrl(d.routeUrl);
+    if (route) { const a = el("a", "day-route", "Day route in Google Maps"); a.href = route; a.target = "_blank"; a.rel = "noopener"; day.append(a); }
     card.append(day);
   });
   if ((it.caveats || []).length) {
     const ul = el("ul", "notes"); it.caveats.forEach((c) => ul.append(el("li", null, c))); card.append(ul);
   }
+  if (it.attribution) card.append(el("p", "attribution", it.attribution));
   if (it.packageRecommendations) card.append(renderPackageOptions(it.packageRecommendations, it));
   if (CONFIG.API_URL && it.tripId) card.append(feedbackBox(it));
   row.append(card); $("chat").append(row); scrollDown();
@@ -680,7 +713,7 @@ async function send() {
   let gotPlan = false, ok = true;
   const handle = (ev) => {
     if (ev.type === "status") work.step(ev.message);
-    else if (ev.type === "question" || ev.type === "message") add("bot", ev.message);
+    else if (ev.type === "question" || ev.type === "message") { add("bot", ev.message); if (ev.choices) showChips(ev.choices); }
     else if (ev.type === "itinerary") { add("itinerary", { ...ev.itinerary, receivedAt: Date.now() }); gotPlan = true; }
     else if (ev.type === "error") { add("error", ev.message); ok = false; }
   };

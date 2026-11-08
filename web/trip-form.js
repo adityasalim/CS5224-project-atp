@@ -3,7 +3,13 @@ const TRIP_CUISINES = [
   "Indian", "Italian", "French", "Spanish", "Greek",
   "Turkish", "Middle Eastern", "Mediterranean", "Mexican",
   "American", "Indonesian", "Malaysian", "Seafood",
-  "Local street food", "Fine dining", "Cafés & desserts"
+  "Local street food", "Fine dining"
+];
+
+const TRIP_ALSO = ["Specialty coffee", "Matcha & tea", "Bakeries", "Desserts"];
+
+const TRIP_PROGRAMS = [
+  "Marriott Bonvoy", "Hilton Honors", "IHG One Rewards", "World of Hyatt", "Accor ALL", "Wyndham"
 ];
 
 const TRIP_DIETS = [
@@ -27,14 +33,15 @@ function initialTripForm() {
     ratings: {
       culture: 5,
       food: 5,
-      nature: 5,
-      comfort: 5,
-      intensity: 5
+      nature: 5
     },
     cuisines: [],
     dietary: [],
-    flight: { cabin: "economy", stops: "any", departAfter: "", returnDepartAfter: "" },
-    hotel: { minStars: 0, chain: "" },
+    flight: { cabin: "economy", stops: "any", departAfter: "", returnDepartAfter: "",
+              alliances: [], airlines: "", bags: "carry_on" },
+    hotel: { minStars: 0, styles: [], programs: [], otherProgram: "" },
+    food: { also: [], perDay: 0, coffeeStyle: "either", priceLevel: 0 },
+    days: { pace: "moderate", start: "09:00", end: "21:00", transport: "transit", rideMaxMin: 30, dayTrips: "listed" },
     notes: ""
   };
 }
@@ -76,6 +83,103 @@ function tripCard(title) {
   h.textContent = title;
   card.append(h);
   return card;
+}
+
+const TRIP_CABINS = [["economy", "Economy"], ["premium_economy", "Premium economy"], ["business", "Business"], ["first", "First"]];
+const TRIP_STOPS = [["any", "Any"], ["direct", "Direct only"], ["one", "Max 1 stop"]];
+const TRIP_BAGS = [["carry_on", "Carry-on only"], ["checked", "1 checked bag"]];
+const TRIP_STARS = [[0, "Any"], [3, "3★+"], [4, "4★+"], [5, "5★"]];
+const TRIP_STYLES = {"Business": "business hotel", "Boutique": "boutique", "Resort": "resort",
+  "Local/Ryokan": "ryokan or guesthouse", "Apartment": "apartment", "Hostel": "hostel"};
+const TRIP_COFFEE = [["pour_over", "Pour-over"], ["espresso", "Espresso"], ["either", "Either"]];
+const TRIP_PRICE = [[0, "Any"], [1, "$"], [2, "$$"], [3, "$$$"], [4, "$$$$"]];
+const TRIP_PACE = [["relaxed", "Relaxed (2-3 stops)"], ["moderate", "Moderate (3-4)"], ["packed", "Packed (5-6)"]];
+const TRIP_TRANSPORT = [["transit", "Walk + transit"], ["taxi", "Taxi OK"], ["car", "Rental car"]];
+const TRIP_DAY_TRIPS = [["none", "None"], ["1", "Max 1"], ["2", "Max 2"], ["listed", "As many as I list"]];
+
+const tripLabel = (options, value) => (options.find(([v]) => v === value) || [, ""])[1];
+
+const tripOpenSections = new Set();   // collapsible sections stay open when the form re-renders
+
+function tripSection(title, summarize, isSet) {
+  const card = document.createElement("details");
+  card.className = "trip-form-card trip-section";
+  card.open = tripOpenSections.has(title);
+  const head = document.createElement("summary");
+  const h = document.createElement("h3");
+  h.textContent = title;
+  const line = document.createElement("span");
+  line.className = "trip-section-summary";
+  const badge = document.createElement("span");
+  badge.className = "badge ok";
+  badge.textContent = "set";
+  head.append(h, line, badge);
+  card.append(head);
+  const refresh = () => { line.textContent = summarize(); badge.hidden = !isSet(); };
+  card.addEventListener("input", refresh);
+  card.addEventListener("click", refresh);
+  card.addEventListener("toggle", () => card.open ? tripOpenSections.add(title) : tripOpenSections.delete(title));
+  refresh();
+  return card;
+}
+
+function tripChanged(state, keys) {
+  const defaults = initialTripForm();
+  return keys.some(k => JSON.stringify(state[k]) !== JSON.stringify(defaults[k]));
+}
+
+function tripRatings(card, items) {
+  items.forEach(([key, label]) => {
+    const wrap = document.createElement("div");
+    wrap.className = "trip-rating";
+
+    const header = document.createElement("div");
+    header.className = "trip-rating-header";
+
+    const name = document.createElement("span");
+    name.textContent = label;
+
+    const value = document.createElement("strong");
+    value.textContent = tripFormState.ratings[key] + "/10";
+
+    header.append(name, value);
+
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = 1;
+    slider.max = 10;
+    slider.value = tripFormState.ratings[key];
+
+    slider.addEventListener("input", () => {
+      tripFormState.ratings[key] = Number(slider.value);
+      value.textContent = slider.value + "/10";
+    });
+
+    wrap.append(header, slider);
+    card.append(wrap);
+  });
+}
+
+/* One-line summaries shown on the collapsed section headers. */
+function tripSummary(s) {
+  const f = s.flight, h = s.hotel, fd = s.food, dy = s.days;
+  const areas = s.cities.map(leg => leg.hotelArea.trim()).filter(Boolean);
+  const programs = [...h.programs, h.otherProgram.trim()].filter(Boolean);
+  return {
+    flight: [tripLabel(TRIP_CABINS, f.cabin), f.stops === "any" ? "any stops" : tripLabel(TRIP_STOPS, f.stops).toLowerCase(),
+      f.departAfter && `out after ${f.departAfter}`, f.returnDepartAfter && `back after ${f.returnDepartAfter}`,
+      ...f.alliances, f.airlines.trim(), tripLabel(TRIP_BAGS, f.bags).toLowerCase()].filter(Boolean).join(", "),
+    hotel: [h.minStars ? tripLabel(TRIP_STARS, h.minStars) : "Any stars", h.styles.length ? h.styles.join(", ") : "any style",
+      ...programs, ...areas].join(", "),
+    food: [s.cuisines.length ? s.cuisines.slice(0, 3).join(", ") + (s.cuisines.length > 3 ? "…" : "") : "Any cuisine",
+      ...fd.also, fd.perDay ? `${fd.perDay} coffee/tea stop${fd.perDay > 1 ? "s" : ""} a day` : "",
+      fd.coffeeStyle !== "either" ? tripLabel(TRIP_COFFEE, fd.coffeeStyle).toLowerCase() : "",
+      fd.priceLevel ? tripLabel(TRIP_PRICE, fd.priceLevel) : "", ...s.dietary].filter(Boolean).join(", "),
+    days: [tripLabel(TRIP_PACE, dy.pace).split(" (")[0] + " pace", `${dy.start}–${dy.end}`,
+      tripLabel(TRIP_TRANSPORT, dy.transport).toLowerCase(), `rides up to ${dy.rideMaxMin} min`,
+      dy.dayTrips !== "listed" ? `day trips: ${tripLabel(TRIP_DAY_TRIPS, dy.dayTrips).toLowerCase()}` : ""]
+      .filter(Boolean).join(", ")
+  };
 }
 
 function tripChoiceGroup(options, current, onChange) {
@@ -164,8 +268,6 @@ function renderTripForm() {
     nights.max = 60;
 
     cityBox.append(tripField("Nights", nights));
-    cityBox.append(tripField("Hotel area (optional)",
-      tripInput("text", leg.hotelArea, v => leg.hotelArea = v)));
 
     if (tripFormState.cities.length > 1) {
       cityBox.append(tripButton("Remove city", () => {
@@ -190,17 +292,6 @@ function renderTripForm() {
       ["oneway", "One-way / open-jaw"]
     ], tripFormState.flightType,
     v => tripFormState.flightType = v)));
-
-  route.append(tripField("Cabin class", tripChoiceGroup([
-    ["economy", "Economy"], ["premium_economy", "Premium economy"], ["business", "Business"], ["first", "First"]
-  ], tripFormState.flight.cabin, v => tripFormState.flight.cabin = v)));
-  route.append(tripField("Stops", tripChoiceGroup([
-    ["any", "Any"], ["direct", "Direct only"], ["one", "At most 1 stop"]
-  ], tripFormState.flight.stops, v => tripFormState.flight.stops = v)));
-  route.append(tripField("Outbound departs after (optional)",
-    tripInput("time", tripFormState.flight.departAfter, v => tripFormState.flight.departAfter = v)));
-  route.append(tripField("Return departs after (optional)",
-    tripInput("time", tripFormState.flight.returnDepartAfter, v => tripFormState.flight.returnDepartAfter = v)));
 
   root.append(route);
 
@@ -262,87 +353,78 @@ function renderTripForm() {
     ], tripFormState.tripType,
     v => tripFormState.tripType = v)));
 
-  details.append(tripField("Attraction style",
-    tripChoiceGroup([
-      ["classic", "Famous attractions"],
-      ["balanced", "Balanced mix"],
-      ["hidden_gems", "Hidden gems"]
-    ], tripFormState.attractionStyle,
-    v => tripFormState.attractionStyle = v)));
-
   details.append(tripField("Planning options", tripChoiceGroup([
     ["compare", "Custom trip + agency options"], ["custom_only", "Custom trip only"],
     ["packages_only", "Prefer agency packages"]
   ], tripFormState.packageMode, v => tripFormState.packageMode = v)));
-  details.append(tripField("Hotel stars", tripChoiceGroup([
-    [0, "Any"], [3, "3+"], [4, "4+"], [5, "5"]
-  ], tripFormState.hotel.minStars, v => tripFormState.hotel.minStars = v)));
-  details.append(tripField("Hotel chain (optional)",
-    tripInput("text", tripFormState.hotel.chain, v => tripFormState.hotel.chain = v)));
   root.append(details);
 
-  const ratings = tripCard("Rate your preferences (1–10)");
+  const s = tripFormState, f = s.flight, h = s.hotel, fd = s.food, dy = s.days;
 
-  [
-    ["culture", "Culture & history"],
-    ["food", "Food experiences"],
-    ["nature", "Nature & outdoors"],
-    ["comfort", "Hotel comfort"],
-    ["intensity", "Activity intensity"]
-  ].forEach(([key, label]) => {
-    const wrap = document.createElement("div");
-    wrap.className = "trip-rating";
+  const flights = tripSection("Flights", () => tripSummary(s).flight, () => tripChanged(s, ["flight"]));
+  flights.append(tripField("Cabin class", tripChoiceGroup(TRIP_CABINS, f.cabin, v => f.cabin = v)));
+  flights.append(tripField("Stops", tripChoiceGroup(TRIP_STOPS, f.stops, v => f.stops = v)));
+  flights.append(tripField("Outbound departs after (optional)",
+    tripInput("time", f.departAfter, v => f.departAfter = v)));
+  flights.append(tripField("Return departs after (optional)",
+    tripInput("time", f.returnDepartAfter, v => f.returnDepartAfter = v)));
+  flights.append(tripField("Airline alliances (optional)",
+    tripMultiSelect(["Star Alliance", "oneworld", "SkyTeam"], f.alliances, v => f.alliances = v)));
+  const airlines = tripInput("text", f.airlines, v => f.airlines = v);
+  airlines.placeholder = "e.g. Singapore Airlines, ANA";
+  flights.append(tripField("Preferred airlines (optional)", airlines));
+  flights.append(tripField("Bags", tripChoiceGroup(TRIP_BAGS, f.bags, v => f.bags = v)));
+  root.append(flights);
 
-    const header = document.createElement("div");
-    header.className = "trip-rating-header";
-
-    const name = document.createElement("span");
-    name.textContent = label;
-
-    const value = document.createElement("strong");
-    value.textContent = tripFormState.ratings[key] + "/10";
-
-    header.append(name, value);
-
-    const slider = document.createElement("input");
-    slider.type = "range";
-    slider.min = 1;
-    slider.max = 10;
-    slider.value = tripFormState.ratings[key];
-
-    slider.addEventListener("input", () => {
-      tripFormState.ratings[key] = Number(slider.value);
-      value.textContent = slider.value + "/10";
-    });
-
-    wrap.append(header, slider);
-    ratings.append(wrap);
+  const hotels = tripSection("Hotels", () => tripSummary(s).hotel,
+    () => tripChanged(s, ["hotel"]) || s.cities.some(leg => leg.hotelArea.trim()));
+  hotels.append(tripField("Hotel stars", tripChoiceGroup(TRIP_STARS, h.minStars, v => h.minStars = v)));
+  hotels.append(tripField("Hotel style", tripMultiSelect(Object.keys(TRIP_STYLES), h.styles, v => h.styles = v)));
+  hotels.append(tripField("Loyalty programs (optional)",
+    tripMultiSelect(TRIP_PROGRAMS, h.programs, v => h.programs = v)));
+  hotels.append(tripField("Other program (optional)", tripInput("text", h.otherProgram, v => h.otherProgram = v)));
+  s.cities.forEach((leg, index) => {
+    hotels.append(tripField(s.cities.length > 1 ? `Hotel area for destination ${index + 1} (optional)` : "Hotel area (optional)",
+      tripInput("text", leg.hotelArea, v => leg.hotelArea = v)));
   });
+  root.append(hotels);
 
-  root.append(ratings);
-
-  const food = tripCard("Food & cuisine preferences");
-
-  food.append(tripMultiSelect(
-    TRIP_CUISINES,
-    tripFormState.cuisines,
-    v => tripFormState.cuisines = v
-  ));
-
-  const dietTitle = document.createElement("h3");
-  dietTitle.textContent = "Dietary requirements";
-  dietTitle.style.marginTop = "22px";
-  food.append(dietTitle);
-
-  food.append(tripMultiSelect(
-    TRIP_DIETS,
-    tripFormState.dietary,
-    v => tripFormState.dietary = v
-  ));
-
+  const food = tripSection("Food & drinks", () => tripSummary(s).food,
+    () => tripChanged(s, ["food", "cuisines", "dietary"]) || s.ratings.food !== 5);
+  tripRatings(food, [["food", "Food experiences"]]);
+  food.append(tripField("Cuisines", tripMultiSelect(TRIP_CUISINES, s.cuisines, v => s.cuisines = v)));
+  food.append(tripField("Also into", tripMultiSelect(TRIP_ALSO, fd.also, v => fd.also = v)));
+  food.append(tripField("Coffee/tea stops per day",
+    tripChoiceGroup([[0, "0"], [1, "1"], [2, "2"]], fd.perDay, v => fd.perDay = v)));
+  food.append(tripField("Coffee style", tripChoiceGroup(TRIP_COFFEE, fd.coffeeStyle, v => fd.coffeeStyle = v)));
+  food.append(tripField("Meal price", tripChoiceGroup(TRIP_PRICE, fd.priceLevel, v => fd.priceLevel = v)));
+  food.append(tripField("Dietary requirements", tripMultiSelect(TRIP_DIETS, s.dietary, v => s.dietary = v)));
   root.append(food);
 
-  const extra = tripCard("Additional requests");
+  const days = tripSection("Your days", () => tripSummary(s).days,
+    () => tripChanged(s, ["days", "attractionStyle"]) || s.ratings.culture !== 5 || s.ratings.nature !== 5);
+  days.append(tripField("Pace", tripChoiceGroup(TRIP_PACE, dy.pace, v => dy.pace = v)));
+  const hours = document.createElement("div");
+  hours.className = "trip-grid";
+  hours.append(tripField("Start of day", tripInput("time", dy.start, v => dy.start = v)),
+    tripField("End of day", tripInput("time", dy.end, v => dy.end = v)));
+  days.append(hours);
+  days.append(tripField("Getting around", tripChoiceGroup(TRIP_TRANSPORT, dy.transport, v => dy.transport = v)));
+  days.append(tripField("Longest ride between areas",
+    tripChoiceGroup([[15, "15 min"], [30, "30 min"], [45, "45 min"]], dy.rideMaxMin, v => dy.rideMaxMin = v)));
+  days.append(tripField("Day trips", tripChoiceGroup(TRIP_DAY_TRIPS, dy.dayTrips, v => dy.dayTrips = v)));
+  days.append(tripField("Attraction style",
+    tripChoiceGroup([
+      ["classic", "Famous attractions"],
+      ["balanced", "Balanced mix"],
+      ["hidden_gems", "Hidden gems"]
+    ], s.attractionStyle,
+    v => s.attractionStyle = v)));
+  tripRatings(days, [["culture", "Culture & history"], ["nature", "Nature & outdoors"]]);
+  root.append(days);
+
+  const extra = tripSection("Additional requests", () => s.notes.trim().slice(0, 60) || "None",
+    () => !!s.notes.trim());
 
   const notes = document.createElement("textarea");
   notes.rows = 3;
@@ -747,12 +829,32 @@ function buildTripPrompt(state = tripFormState) {
     f.cabin !== "economy" ? `${f.cabin.replace("_", " ")} cabin` : "",
     {direct: "direct flights only", one: "at most 1 stop"}[f.stops] || "",
     f.departAfter ? `outbound departs after ${f.departAfter}` : "",
-    f.returnDepartAfter ? `return departs after ${f.returnDepartAfter}` : ""
+    f.returnDepartAfter ? `return departs after ${f.returnDepartAfter}` : "",
+    f.alliances.length ? `alliances ${f.alliances.join(", ")}` : "",
+    f.airlines.trim() ? `preferred airlines ${f.airlines.trim()}` : "",
+    f.bags === "checked" ? "1 checked bag" : ""
   ].filter(Boolean);
+  const programs = [...h.programs, h.otherProgram.trim()].filter(Boolean);
   const hotel = [
     h.minStars ? `${h.minStars}${h.minStars < 5 ? "+" : ""} stars` : "",
-    h.chain.trim() ? `chain ${h.chain.trim()}` : "",
+    h.styles.length ? `style ${h.styles.map(x => TRIP_STYLES[x]).join(", ")}` : "",
+    programs.length ? `loyalty programs ${programs.join(", ")}` : "",
     ...state.cities.map(leg => leg.hotelArea.trim() ? `area in ${leg.city}: ${leg.hotelArea.trim()}` : "")
+  ].filter(Boolean);
+  const fd = state.food, dy = state.days;
+  const food = [
+    fd.also.length ? `also into ${fd.also.join(", ").toLowerCase().replace("&", "and")}` : "",
+    fd.perDay ? `${fd.perDay} coffee or tea stop${fd.perDay > 1 ? "s" : ""} per day` : "",
+    fd.coffeeStyle !== "either" ? `coffee style ${tripLabel(TRIP_COFFEE, fd.coffeeStyle).toLowerCase()}` : "",
+    fd.priceLevel ? `meal price level ${"$".repeat(fd.priceLevel)}` : ""
+  ].filter(Boolean);
+  const days = [
+    dy.pace !== "moderate" ? `${dy.pace} pace` : "",
+    dy.start && dy.start !== "09:00" ? `day starts ${dy.start}` : "",
+    dy.end && dy.end !== "21:00" ? `day ends ${dy.end}` : "",
+    {taxi: "getting around by taxi is fine", car: "getting around by rental car"}[dy.transport] || "",
+    dy.rideMaxMin !== 30 ? `longest ride between areas ${dy.rideMaxMin} min` : "",
+    {none: "no day trips", 1: "at most 1 day trip", 2: "at most 2 day trips"}[dy.dayTrips] || ""
   ].filter(Boolean);
 
   const r = state.ratings;
@@ -777,12 +879,12 @@ function buildTripPrompt(state = tripFormState) {
     `Culture and history: ${r.culture}/10`,
     `Food experiences: ${r.food}/10`,
     `Nature and outdoors: ${r.nature}/10`,
-    `Hotel comfort: ${r.comfort}/10`,
-    `Activity intensity: ${r.intensity}/10`,
     ...(hotel.length ? [`Hotel preferences: ${hotel.join("; ")}`] : []),
+    ...(days.length ? [`Your days: ${days.join("; ")}`] : []),
     "",
     `Preferred cuisines: ${state.cuisines.length ? state.cuisines.join(", ") : "No preference"}`,
     `Dietary requirements: ${state.dietary.length ? state.dietary.join(", ") : "None"}`,
+    ...(food.length ? [`Food and drinks: ${food.join("; ")}`] : []),
     `Additional requests: ${state.notes || "None"}`,
     "",
     "Respect mandatory dietary and accessibility requirements.",

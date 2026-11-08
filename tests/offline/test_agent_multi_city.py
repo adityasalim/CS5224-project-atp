@@ -107,7 +107,7 @@ _tok = "x." + _b.urlsafe_b64encode(
 class Ctx:
     session_id = "tp-" + "a" * 40
     request_headers = {"Authorization": "Bearer " + _tok}
-TURNS = ["Copenhagen 3 nights, then Lofoten 4, then Abisko 4, 10-21 Dec 2026, two people, SGD 14,000",
+TURNS = ["Copenhagen 3 nights, then Lofoten 4, then Abisko 4, 10-21 Dec 2026, two people, SGD 14,000", "Use defaults",
          "how do we get to Abisko?", "skip abisko, just copenhagen and lofoten"]
 for prompt in TURNS:
     print(">>>", prompt)
