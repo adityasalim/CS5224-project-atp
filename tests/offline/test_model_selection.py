@@ -67,12 +67,13 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-# the website roles: Opus 5.5 plans and Haiku 5.5 does the small jobs, all on the Anthropic API at effort medium
+# the website roles: Opus 5.5 plans, Haiku 5.5 does the small jobs, Sonnet 5.5 reviews and evaluates, all on the
+# Anthropic API at effort medium
 assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
     "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium"}),
     "executor": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
-    "reviewer": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
-    "independent_evaluator": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "low"})}
+    "reviewer": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"}),
+    "independent_evaluator": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"})}
 print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
 
 # strict validation and the provider request shapes below use the earlier Alibaba/Kimi combination (still supported)
@@ -369,8 +370,20 @@ assert ad_c.records[-1]["transport"] == "anthropic.beta.messages.stream" and ad_
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", uc, temperature=0.0, model_role="executor")
 assert claude.calls[-1]["model"] == "claude-haiku-5-5" and "cache_control" not in claude.calls[-1]["system"][0]
 assert "fallbacks" not in claude.calls[-1] and "temperature" not in claude.calls[-1] and claude.calls[-1]["output_config"] == {"effort": "medium"}
+A.ask_json(A.REVIEWER_MODEL, "sys", "judge", uc, temperature=0.0, model_role="reviewer")
+assert claude.calls[-1]["model"] == "claude-sonnet-5-5" and claude.calls[-1]["output_config"] == {"effort": "medium"}
+assert claude.calls[-1]["thinking"] == {"type": "adaptive"} and "temperature" not in claude.calls[-1] and "fallbacks" not in claude.calls[-1]
+assert ad_c.records[-1]["transport"] == "anthropic.messages.stream" and SETTLED[-1]["modelId"] == "claude-sonnet-5-5"
 A.ask_json(A.REVIEWER_MODEL, "sys", "evaluate", uc, model_role="independent_evaluator")
-assert claude.calls[-1]["model"] == "claude-haiku-5-5" and claude.calls[-1]["output_config"] == {"effort": "low"}
+assert claude.calls[-1]["model"] == "claude-sonnet-5-5" and claude.calls[-1]["output_config"] == {"effort": "medium"}
+# every website model has a verified price quote (Sonnet 5.5 cited from platform.claude.com)
+from decimal import Decimal
+from model_budget import PriceQuote
+QUOTES = {(q.provider, q.model_id): q for q in (PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"])}
+assert all((s.provider, s.model_id) in QUOTES for s in S.values()), "a website model lacks a price quote"
+sq = QUOTES[("anthropic", "claude-sonnet-5-5")]
+assert (sq.input_per_million, sq.output_per_million, sq.cache_read_per_million, sq.cache_write_per_million) == (2, 10, Decimal(".1"), Decimal("2.5"))
+assert sq.source.startswith("https://platform.claude.com/")
 truncated = ModelAdapter(ad_c.configuration, clients={"anthropic": FakeAnthropic("", "max_tokens")},
                          budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t3", system="s", messages=MSG)
 assert truncated["stopReason"] == "max_tokens" and truncated["_adapter"]["emptyBecauseTruncated"]
@@ -422,6 +435,24 @@ by = {p["placeId"]: p for p in pool["places"]}
 assert by["gplace:arabica"]["category"] == "cafe" and by["gplace:arabica"]["webSource"] == "https://sprudge.com/a"
 assert by["gplace:karyo"]["category"] == "restaurant" and not by["gplace:karyo"]["requested"]
 assert by["gplace:kurasu"] is pinned and pinned["requested"] == "Kurasu Kyoto" and pinned["tags"] == ["requested by user"]
+
+# a pick is kept only with an https source on one of the 8 allowed publishers; any other source drops the pick
+gw.calls.clear()
+claude.messages.stream.reply.content = [SimpleNamespace(type="text", text=json.dumps({"picks": [
+    {"name": "Plain Http", "kind": "cafe", "source": "http://www.timeout.com/kyoto"},
+    {"name": "Lookalike", "kind": "cafe", "source": "https://evil-timeout.com/kyoto"},
+    {"name": "Suffix Trick", "kind": "cafe", "source": "https://timeout.com.evil.io/kyoto"},
+    {"name": "Other Site", "kind": "restaurant", "source": "https://www.tripadvisor.com/x"},
+    {"name": "No Source", "kind": "cafe"},
+    {"name": "Not Text", "kind": "cafe", "source": 5},
+    {"name": "Bad Host", "kind": "cafe", "source": "https://[timeout.com"},
+    {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://Tokyo.Eater.com/kurasu"}]}))]
+pool = {"places": [{"placeId": "gplace:p", "name": "Plain Http", "category": "cafe"}]}
+list(A.web_food_picks({"destination": "Kyoto"}, pool, uc, [], set()))
+assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesCategory": "cafe"}], gw.calls
+by = {p["placeId"]: p.get("webSource") for p in pool["places"]}
+assert by == {"gplace:p": None, "gplace:kurasu": "https://Tokyo.Eater.com/kurasu"}, by
+assert A._web_source(None) is None and A._web_source("https://guide.michelin.com/jp/en/kyoto") == "https://guide.michelin.com/jp/en/kyoto"
 
 # a rate limit in the optional web step does not mark the adapter exhausted, so the planner call still runs
 class RateLimited(Exception):

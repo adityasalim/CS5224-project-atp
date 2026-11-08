@@ -4,8 +4,8 @@ tp_travel_agent — the travel-planning agent hosted on Amazon Bedrock AgentCore
 Model roles (chosen in public-model-config.json when PUBLIC_MODEL_CONFIGURATION=combo_19), all on the Anthropic API:
   planner   claude-opus-5-5 (effort medium)           drafts and repairs the day-by-day plan
   executor  claude-haiku-5-5 (effort medium)          intake, airport lookup, router, chat, narrative, web food picks
-  reviewer  claude-haiku-5-5 (effort medium)          judge, package selection, narrative review
-  independent_evaluator  claude-haiku-5-5 (low)       final evaluation
+  reviewer  claude-sonnet-5-5 (effort medium)         judge, package selection, narrative review
+  independent_evaluator  claude-sonnet-5-5 (medium)   final evaluation (only when FINAL_EVALUATOR_ENABLED=true)
 Without the adapter the legacy Claude/Nova defaults below run (local and dev only).
 
 LLM-Modulo loop (report Figure 2):
@@ -34,6 +34,7 @@ import time
 import traceback
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
@@ -63,7 +64,7 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 #   executor (intake/router/chat/narrative): Claude Haiku 5.5, thinking off (fallback: Haiku 4.5)
 #   reviewer (judge): Amazon Nova 2 Lite, a different model family so the reviewer doesn't grade its own family's work
 # With the adapter (PUBLIC_MODEL_CONFIGURATION=combo_19) roles come from public-model-config.json:
-# planner claude-opus-5-5, executor and reviewer claude-haiku-5-5 (Anthropic API). There is no model substitution or
+# planner claude-opus-5-5, executor claude-haiku-5-5, reviewer claude-sonnet-5-5 (Anthropic API). There is no model substitution or
 # fallback, and thinking is set by reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 EXECUTOR_MODEL = os.environ.get("INTAKE_MODEL_ID", "global.anthropic.claude-haiku-5-5")
@@ -1596,6 +1597,16 @@ WEB_PICK_PROMPT = ("Search the web for the best-reviewed specialty coffee shops 
                    " \"source\": \"<url of the page that names it>\"}}]}} with at most 8 picks, each named on a page you found.")
 
 
+def _web_source(url):
+    """The pick's source if it is an https page on one of WEB_PICK_DOMAINS (its publisher), else None."""
+    try:
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+    except (AttributeError, TypeError, ValueError):   # not a string, or a malformed host such as "https://[x"
+        return None
+    return url if u.scheme == "https" and any(host == d or host.endswith("." + d) for d in WEB_PICK_DOMAINS) else None
+
+
 def web_food_picks(spec, pool, usage, calls, sources):
     """Claude roles only: Haiku with web search names venues per city from editorial domains.
     A pick that matches a pool place by name gets webSource; others are looked up by name and added as ordinary,
@@ -1614,7 +1625,9 @@ def web_food_picks(spec, pool, usage, calls, sources):
                             [{"role": "user", "content": [{"text": WEB_PICK_PROMPT.format(city=city, wish=wish or "any")}]}], usage,
                             max_tokens=3000, model_role="executor",
                             tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "allowed_domains": WEB_PICK_DOMAINS}])
-            picks = [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8] if isinstance(p_, dict) and p_.get("name")]
+            # a pick whose source is not on an allowed publisher is dropped before it reaches the pool, prompts or UI
+            picks = [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8]
+                     if isinstance(p_, dict) and p_.get("name") and _web_source(p_.get("source"))]
         except Exception as e:  # noqa: BLE001  (web picks are optional; the plan goes on without them)
             print("web picks failed:", type(e).__name__, e)
             adapter.quota_exhausted = was_exhausted   # a rate limit in this optional step must not stop the planner

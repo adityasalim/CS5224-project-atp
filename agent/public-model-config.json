@@ -17,16 +17,16 @@
   },
   "reviewer": {
     "provider": "anthropic",
-    "model": "claude-haiku-5-5",
+    "model": "claude-sonnet-5-5",
     "options": {
       "reasoningEffort": "medium"
     }
   },
   "independent_evaluator": {
     "provider": "anthropic",
-    "model": "claude-haiku-5-5",
+    "model": "claude-sonnet-5-5",
     "options": {
-      "reasoningEffort": "low"
+      "reasoningEffort": "medium"
     }
   }
 }

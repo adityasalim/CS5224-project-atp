@@ -88,7 +88,7 @@ class PriceQuote:
     def parse(cls,data):
         source=data['source']
         host=urlparse(source).hostname or ''
-        if urlparse(source).scheme!='https' or not any(host==h or host.endswith('.'+h) for h in ('amazonaws.com','aws.amazon.com','ai.google.dev','alibabacloud.com','anthropic.com')):
+        if urlparse(source).scheme!='https' or not any(host==h or host.endswith('.'+h) for h in ('amazonaws.com','aws.amazon.com','ai.google.dev','alibabacloud.com','anthropic.com','claude.com')):
             raise ValueError('A primary-provider pricing source is required')
         if data.get('verified') is not True:raise ValueError('Pricing must be verified before use')
         first=date.fromisoformat(data['verifiedOn']);last=date.fromisoformat(data['validUntil'])

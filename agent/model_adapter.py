@@ -146,7 +146,7 @@ class ModelAdapter:
                            cacheReadTokens=usage.get('cacheReadInputTokens'),cacheWriteTokens=usage.get('cacheWriteInputTokens'),
                            totalTokens=usage.get('totalTokens'),finishReason=result.get('stopReason'))
             elif selected.provider=='anthropic':
-                # No temperature: Opus 5.5 and Haiku 5.5 reject sampling settings. The first section (trip and pool) is cached.
+                # No temperature: Opus, Sonnet and Haiku 5.5 reject sampling settings. The first section (trip and pool) is cached.
                 blocks=[{'type':'text','text':s} for s in sections if s]
                 if len(blocks)>1:blocks[0]['cache_control']={'type':'ephemeral'}
                 request=dict(model=selected.model_id,max_tokens=max_tokens,system=blocks,thinking={'type':'adaptive'},
