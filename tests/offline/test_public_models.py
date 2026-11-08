@@ -15,7 +15,7 @@ class Public(unittest.TestCase):
   from types import SimpleNamespace
   with patch.dict(os.environ,{'PUBLIC_MODEL_CONFIGURATION':'combo_19'}):
    adapter=public_adapter(ledger_factory=lambda quotes:SimpleNamespace(authorize=lambda *a:None,record=lambda row:row))
-   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer']],['claude-opus-5-5','claude-haiku-5-5','claude-haiku-5-5'])
+   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer','independent_evaluator']],['claude-opus-5-5','claude-haiku-5-5','claude-sonnet-5-5','claude-sonnet-5-5'])
    self.assertEqual(adapter.records,[])
  def test_configuration_19_stays_usable_by_switching_the_config_back(self):
   from types import SimpleNamespace
@@ -31,5 +31,13 @@ class Public(unittest.TestCase):
   c19['independent_evaluator']['model']='claude-haiku-5-5';c19['independent_evaluator']['provider']='anthropic'
   with patch.dict(os.environ,{'PUBLIC_MODEL_CONFIGURATION':'combo_19'}),patch.object(ModelConfiguration,'load',return_value=ModelConfiguration.parse(c19)):
    with self.assertRaises(ValueError):public_adapter(ledger_factory=lambda quotes:None)
+ def test_claude_roles_need_the_sonnet_reviewer_and_evaluator(self):
+  import json
+  from model_configuration import ModelConfiguration
+  root=Path(__file__).resolve().parents[2]/'agent'
+  for role in ('reviewer','independent_evaluator'):
+   c=json.loads((root/'public-model-config.json').read_text());c[role]['model']='claude-haiku-5-5'
+   with patch.dict(os.environ,{'PUBLIC_MODEL_CONFIGURATION':'combo_19'}),patch.object(ModelConfiguration,'load',return_value=ModelConfiguration.parse(c)):
+    with self.assertRaises(ValueError):public_adapter(ledger_factory=lambda quotes:None)
 if __name__=='__main__':unittest.main()
 

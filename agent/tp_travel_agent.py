@@ -4,8 +4,8 @@ tp_travel_agent — the travel-planning agent hosted on Amazon Bedrock AgentCore
 Model roles (chosen in public-model-config.json when PUBLIC_MODEL_CONFIGURATION=combo_19), all on the Anthropic API:
   planner   claude-opus-5-5 (effort medium)           drafts and repairs the day-by-day plan
   executor  claude-haiku-5-5 (effort medium)          intake, airport lookup, router, chat, narrative, web food picks
-  reviewer  claude-haiku-5-5 (effort medium)          judge, package selection, narrative review
-  independent_evaluator  claude-haiku-5-5 (low)       final evaluation
+  reviewer  claude-sonnet-5-5 (effort medium)         judge, package selection, narrative review
+  independent_evaluator  claude-sonnet-5-5 (medium)   final evaluation (only when FINAL_EVALUATOR_ENABLED=true)
 Without the adapter the legacy Claude/Nova defaults below run (local and dev only).
 
 LLM-Modulo loop (report Figure 2):
@@ -63,7 +63,7 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 #   executor (intake/router/chat/narrative): Claude Haiku 5.5, thinking off (fallback: Haiku 4.5)
 #   reviewer (judge): Amazon Nova 2 Lite, a different model family so the reviewer doesn't grade its own family's work
 # With the adapter (PUBLIC_MODEL_CONFIGURATION=combo_19) roles come from public-model-config.json:
-# planner claude-opus-5-5, executor and reviewer claude-haiku-5-5 (Anthropic API). There is no model substitution or
+# planner claude-opus-5-5, executor claude-haiku-5-5, reviewer claude-sonnet-5-5 (Anthropic API). There is no model substitution or
 # fallback, and thinking is set by reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 EXECUTOR_MODEL = os.environ.get("INTAKE_MODEL_ID", "global.anthropic.claude-haiku-5-5")

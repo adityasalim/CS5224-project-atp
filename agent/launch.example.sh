@@ -10,8 +10,9 @@ ENVS=(
   --env "GATEWAY_TOKEN_URL=https://<cognito-domain>.auth.ap-southeast-1.amazoncognito.com/oauth2/token"
   --env "GATEWAY_SECRET_ID=tp/dev/gateway-client"
   # Models: leave these out to use the defaults (Sonnet 5.5 / Haiku 5.5 / Nova 2 Lite, with fallbacks)
-  # Website roles from public-model-config.json (Claude Opus 5.5 / Haiku 5.5 on the Anthropic API):
+  # Website roles from public-model-config.json (Claude Opus 5.5 / Haiku 5.5 / Sonnet 5.5 on the Anthropic API):
   --env "PUBLIC_MODEL_CONFIGURATION=combo_19"         # stays combo_19 for the Claude roles too
+  # ANTHROPIC_SECRET_ID defaults to tp/dev/anthropic, the secret holding the Anthropic key; add --env only for another name
   --env "MODEL_BUDGET_BUCKET=<budget-bucket>"
   --env "MODEL_BUDGET_LEDGER=public_claude_5_5"       # a fresh ledger: the Claude caps differ from configuration 19's
   --env "TRIPS_TABLE=tp-dev-trips"
