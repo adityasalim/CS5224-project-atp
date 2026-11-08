@@ -1,11 +1,11 @@
 """
 tp_travel_agent — the travel-planning agent hosted on Amazon Bedrock AgentCore Runtime.
 
-Model roles (chosen in public-model-config.json, experiment combo_19, when PUBLIC_MODEL_CONFIGURATION is set):
-  planner   Qwen 3.8 Max (Alibaba)                    drafts and repairs the day-by-day plan
-  executor  DeepSeek V4.1 Flash (Alibaba)             intake, airport lookup, router, chat, narrative
-  reviewer  Kimi K3 (Bedrock, reasoning effort low)   judge, package selection, narrative review
-  independent_evaluator  Kimi K3                      final evaluation (same model as the reviewer)
+Model roles (chosen in public-model-config.json when PUBLIC_MODEL_CONFIGURATION=combo_19), all on the Anthropic API:
+  planner   claude-opus-5-5 (effort medium)           drafts and repairs the day-by-day plan
+  executor  claude-haiku-5-5 (effort medium)          intake, airport lookup, router, chat, narrative, web food picks
+  reviewer  claude-haiku-5-5 (effort medium)          judge, package selection, narrative review
+  independent_evaluator  claude-haiku-5-5 (low)       final evaluation
 Without the adapter the legacy Claude/Nova defaults below run (local and dev only).
 
 LLM-Modulo loop (report Figure 2):
@@ -63,8 +63,8 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 #   executor (intake/router/chat/narrative): Claude Haiku 5.5, thinking off (fallback: Haiku 4.5)
 #   reviewer (judge): Amazon Nova 2 Lite, a different model family so the reviewer doesn't grade its own family's work
 # With the adapter (PUBLIC_MODEL_CONFIGURATION=combo_19) roles come from public-model-config.json:
-# planner Qwen 3.8 Max, executor DeepSeek V4.1 Flash, reviewer Kimi K3. There is no model substitution or fallback,
-# and thinking is set by enableThinking / reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
+# planner claude-opus-5-5, executor and reviewer claude-haiku-5-5 (Anthropic API). There is no model substitution or
+# fallback, and thinking is set by reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 EXECUTOR_MODEL = os.environ.get("INTAKE_MODEL_ID", "global.anthropic.claude-haiku-5-5")
 REVIEWER_MODEL = os.environ.get("JUDGE_MODEL_ID") or "global.amazon.nova-2-lite-v1:0"
@@ -1380,6 +1380,7 @@ def gather(spec, usage, metrics):
             sources.add(f"{tool}:{result.get('source')}")
             relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
+    yield from web_food_picks(spec, pool, usage, calls, sources)
     counts = {k: len(v) for k, v in pool.items()}
     print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
                       "hotelFocus": focus if (focus and not area and not name) else None}))
@@ -1588,6 +1589,61 @@ def gather_specials(spec, pool, calls, sources, only=None):
             _merge_places(pool, [{**p_, **tag} for p_ in r["places"]])
 
 
+WEB_PICK_DOMAINS = ["guide.michelin.com", "theworlds50best.com", "theworlds100bestcoffeeshops.com", "award.tabelog.com",
+                    "europeancoffeetrip.com", "timeout.com", "eater.com", "sprudge.com"]
+WEB_PICK_PROMPT = ("Search the web for the best-reviewed specialty coffee shops (pour-over, roasters) and restaurants in {city}"
+                   " that match: {wish}. Return JSON only: {{\"picks\": [{{\"name\": \"...\", \"kind\": \"cafe\" or \"restaurant\","
+                   " \"source\": \"<url of the page that names it>\"}}]}} with at most 8 picks, each named on a page you found.")
+
+
+def web_food_picks(spec, pool, usage, calls, sources):
+    """Claude roles only: Haiku with web search names venues per city from editorial domains.
+    A pick that matches a pool place by name gets webSource; others are looked up by name and added as ordinary,
+    unpinned candidates. A pick that cannot be found is dropped, so no venue comes from model text alone."""
+    adapter = getattr(usage, "adapter", None)
+    if adapter is None or adapter.configuration.selections["executor"].provider != "anthropic":
+        return
+    _, _, gw = _clients()
+    notes = (spec.get("preferences") or {}).get("notes")
+    wish = "; ".join(x for x in [", ".join(spec.get("cuisines") or []), ", ".join(spec.get("activities") or []), notes] if x)
+    for i, city in enumerate([l["city"] for l in spec["legs"]] if is_multi(spec) else [spec["destination"]]):
+        yield ev("status", f"Checking food guides for {city}…")
+        was_exhausted = adapter.quota_exhausted
+        try:
+            resp = converse(EXECUTOR_MODEL, "You find real venues with web search and answer in JSON.",
+                            [{"role": "user", "content": [{"text": WEB_PICK_PROMPT.format(city=city, wish=wish or "any")}]}], usage,
+                            max_tokens=3000, model_role="executor",
+                            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "allowed_domains": WEB_PICK_DOMAINS}])
+            picks = [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8] if isinstance(p_, dict) and p_.get("name")]
+        except Exception as e:  # noqa: BLE001  (web picks are optional; the plan goes on without them)
+            print("web picks failed:", type(e).__name__, e)
+            adapter.quota_exhausted = was_exhausted   # a rate limit in this optional step must not stop the planner
+            continue
+        by_name = {str(p_.get("name", "")).lower(): p_ for p_ in pool["places"]}
+        missing = [p_ for p_ in picks if str(p_["name"]).lower() not in by_name]
+        for p_ in picks:
+            if str(p_["name"]).lower() in by_name:
+                by_name[str(p_["name"]).lower()]["webSource"] = p_.get("source")
+        have = {p_["placeId"] for p_ in pool["places"]}   # a lookup that lands on a pool place leaves that place as it is
+        for kind in ("cafe", "restaurant"):
+            # keyed by find_places' own name cleanup, which it returns as "requested"
+            sought = {re.sub(r"[^\w\s&'.,()-]", "", str(p_["name"]))[:60].strip(): p_.get("source") for p_ in missing
+                      if ("cafe" if p_.get("kind") == "cafe" else "restaurant") == kind}
+            sought.pop("", None)
+            if not sought:
+                continue
+            calls.append("find_places")
+            try:
+                r = gw.call("find_places", {"city": city, "names": list(sought)[:6], "namesCategory": kind})
+            except GatewayError:
+                r = {"ok": False}
+            found = [{**p_, "category": kind, "webSource": sought[p_["requested"]], "requested": None, "matches": [],
+                      "tags": [t for t in p_.get("tags") or [] if t != "requested by user"], **({"city": city, "leg": i} if is_multi(spec) else {})}
+                     for p_ in (r.get("places") or []) if r.get("ok") and p_.get("requested") in sought and p_["placeId"] not in have]
+            _merge_places(pool, found)
+            sources.add("web_search+find_places:names")
+
+
 def _c_flight(f):
     if "price" in f:
         price_fields = {"price": f["price"]}
@@ -1627,7 +1683,7 @@ def _c_place(p, with_hours=True):
     item = {"id": p["placeId"], "name": p.get("name"), "category": p.get("category"), "distanceKm": p.get("distanceKm"), "rating": p.get("rating"), "lat": p.get("lat"), "lng": p.get("lng")}
     if p.get("zone"):
         item["zone"] = p["zone"]
-    for k in ("requested", "dayTrip", "reviews"):
+    for k in ("requested", "dayTrip", "reviews", "webSource"):
         if p.get(k):
             item[k] = p[k]
     if with_hours:
@@ -2454,6 +2510,7 @@ def gather_multi(spec, usage, metrics):
         for o in res.get("options", []) if res.get("ok") else []:
             pool["transfers"].append({**o, "hop": i})
     yield from gather_specials(spec, pool, calls, sources)
+    yield from web_food_picks(spec, pool, usage, calls, sources)
     print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
                    poolCounts=leg_counts, relaxedSearches=relaxed)

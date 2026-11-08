@@ -2,10 +2,11 @@
 import json,os,uuid
 from pathlib import Path
 
-# The approved website roles. public-model-config.json must name exactly these models, and every Alibaba model
-# here must also be in model_configuration.ALIBABA_MODELS (the configuration is rejected at load otherwise).
-expected=('qwen3.8-max-0902','deepseek-v4.1-flash','global.moonshotai.kimi-k3')
-APPROVED_EVALUATOR='global.moonshotai.kimi-k3'
+# The approved website roles (planner, executor, reviewer) and their independent evaluator: Claude, or configuration 19
+# restored by switching public-model-config.json back. PUBLIC_MODEL_CONFIGURATION stays combo_19 for both. Every
+# Alibaba model here must also be in model_configuration.ALIBABA_MODELS (the configuration is rejected at load otherwise).
+APPROVED={('claude-opus-5-5','claude-haiku-5-5','claude-haiku-5-5'):'claude-haiku-5-5',
+          ('qwen3.8-max-0902','deepseek-v4.1-flash','global.moonshotai.kimi-k3'):'global.moonshotai.kimi-k3'}
 
 def public_adapter(ledger_factory=None,adapter_type=None):
     selected=os.environ.get('PUBLIC_MODEL_CONFIGURATION','')
@@ -17,9 +18,9 @@ def public_adapter(ledger_factory=None,adapter_type=None):
     root=Path(__file__).resolve().parent
     config=ModelConfiguration.load(root/'public-model-config.json')
     actual=tuple(config.selections[r].model_id for r in ('planner','executor','reviewer'))
-    if actual!=expected:
-        raise ValueError(f'Website configuration does not match approved quality/cost roles: found {actual}, approved {expected}')
-    if config.selections['independent_evaluator'].model_id!=APPROVED_EVALUATOR:
+    if actual not in APPROVED:
+        raise ValueError(f'Website configuration does not match approved quality/cost roles: found {actual}, approved {list(APPROVED)}')
+    if config.selections['independent_evaluator'].model_id!=APPROVED[actual]:
         raise ValueError('Website configuration does not match the approved independent evaluator')
     quotes=[PriceQuote.parse(q) for q in json.loads((root/'public-model-prices.json').read_text())['quotes']]
     if ledger_factory is None:
@@ -27,7 +28,8 @@ def public_adapter(ledger_factory=None,adapter_type=None):
         if not store:raise ValueError('MODEL_BUDGET_LEDGER must name the S3 location of the spending ledger')
         # Caps are recorded either way; set MODEL_ENFORCE_SPENDING_CAPS=true to make the ledger refuse calls over a cap.
         enforce=os.environ.get('MODEL_ENFORCE_SPENDING_CAPS','false').strip().lower()=='true'
-        ledger=BudgetLedger(S3BudgetStore(store),cap_usd='20',provider_caps={'bedrock':'20','alibaba':'4'},quotes=quotes,enforce_spending_caps=enforce)
+        # About 50 Claude plans at up to USD 1 each (Opus planner with one correction, Haiku for the small jobs).
+        ledger=BudgetLedger(S3BudgetStore(store),cap_usd='50',provider_caps={'bedrock':'20','alibaba':'4','anthropic':'50'},quotes=quotes,enforce_spending_caps=enforce)
     else:ledger=ledger_factory(quotes)
     return (adapter_type or PublicProtocolAdapter)(config,budget_authorizer=ledger.authorize,record_sink=ledger.record)
 

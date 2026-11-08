@@ -118,13 +118,14 @@ class PriceQuote:
         if row.get('inputTokens') is None or row.get('outputTokens') is None:return None,'unknown usage'
         inp=money(row['inputTokens']);out=money(row['outputTokens'])
         read=money(row.get('cacheReadTokens') or 0);write=money(row.get('cacheWriteTokens') or 0)
+        search=money(row.get('webSearchRequests') or 0)*Decimal('0.01')   # Anthropic web search: USD 10 per 1,000 searches
         if write and self.cache_write_per_million is None:return None,'cache-write rate not verified'
         if self.input_includes_cache and read>inp:raise BudgetError('Invalid cache token accounting')
         if read and self.cache_read_per_million is None:
             if not self.input_includes_cache:inp+=read
-            return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000),'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
+            return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000)+search,'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
         uncached=inp-read if self.input_includes_cache else inp
-        amount=(uncached*self.input_per_million+read*(self.cache_read_per_million or 0)+write*(self.cache_write_per_million or 0)+out*self.output_per_million)/Decimal(1000000)
+        amount=(uncached*self.input_per_million+read*(self.cache_read_per_million or 0)+write*(self.cache_write_per_million or 0)+out*self.output_per_million)/Decimal(1000000)+search
         return amount,self.rate_basis
 
 class BudgetLedger:

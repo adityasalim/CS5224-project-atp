@@ -89,6 +89,10 @@
           "type": "string"
         },
         "description": "Specific places the traveller mentioned by name (max 6), e.g. ['teamLab Planets', 'Ichiran Shibuya', 'Fushimi Inari']. Each found one comes back first with 'requested' set and is never filtered by the preferences; names not found are listed in 'notFound'. Pass only names (no categories) for a quick lookup, or together with categories."
+      },
+      "namesCategory": {
+        "type": "string",
+        "description": "Leave out for places the traveller named. 'cafe' or 'restaurant' looks the names up as ordinary candidates of that category instead: not marked requested and not required in the plan."
       }
     },
     "required": []

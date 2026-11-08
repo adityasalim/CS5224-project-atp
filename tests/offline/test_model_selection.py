@@ -67,18 +67,21 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-# the approved public combination: Qwen thinks with a separate budget; DeepSeek thinks; Kimi reviews at medium effort, evaluates at low
-assert (S["planner"].provider, S["planner"].model_id, S["planner"].options) == (
-    "alibaba",
-    "qwen3.8-max-0902",
-    {"enableThinking": True, "thinkingBudget": 4000})
-assert (S["executor"].provider, S["executor"].model_id, S["executor"].options) == ("alibaba", "deepseek-v4.1-flash", {"enableThinking": True, "reasoningEffort": "low"})
-assert (S["reviewer"].provider, S["reviewer"].model_id, S["reviewer"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "medium"})
-assert (S["independent_evaluator"].provider, S["independent_evaluator"].model_id, S["independent_evaluator"].options) == ("bedrock", "global.moonshotai.kimi-k3", {"reasoningEffort": "low"})
+# the website roles: Opus 5.5 plans and Haiku 5.5 does the small jobs, all on the Anthropic API at effort medium
+assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
+    "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium"}),
+    "executor": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
+    "reviewer": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
+    "independent_evaluator": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "low"})}
 print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
 
-# strict validation: no defaults, no unsupported options
-base = json.loads((AGENT / "public-model-config.json").read_text())
+# strict validation and the provider request shapes below use the earlier Alibaba/Kimi combination (still supported)
+base = {"experimentId": "public_combo_19", "googleBillingDisabled": True,
+        "planner": {"provider": "alibaba", "model": "qwen3.8-max-0902", "options": {"enableThinking": True, "thinkingBudget": 4000}},
+        "executor": {"provider": "alibaba", "model": "deepseek-v4.1-flash", "options": {"enableThinking": True, "reasoningEffort": "low"}},
+        "reviewer": {"provider": "bedrock", "model": "global.moonshotai.kimi-k3", "options": {"reasoningEffort": "medium"}},
+        "independent_evaluator": {"provider": "bedrock", "model": "global.moonshotai.kimi-k3", "options": {"reasoningEffort": "low"}}}
+cfg = ModelConfiguration.parse(base)
 def with_(role, **row):
     d = json.loads(json.dumps(base)); d[role] = {**d[role], **row}; return d
 raises(ValueError, lambda: ModelConfiguration.parse({k: v for k, v in base.items() if k != "reviewer"}), "reviewer")
@@ -126,10 +129,10 @@ raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="qwen
 raises(ValueError, lambda: ModelConfiguration.parse({**base, "fallbackModel": "x"}), "Unexpected")
 
 # website configuration must agree with the adapter's eligible models and with public_models.py's approved roles
-pm = (AGENT / "public_models.py").read_text(encoding="utf-8")
-expected = ast.literal_eval("(" + re.search(r"expected=\((.*?)\)", pm, re.S).group(1) + ")")
+from public_models import APPROVED
 got = tuple(S[r].model_id for r in ("planner", "executor", "reviewer"))
-assert got == expected, f"public-model-config.json {got} does not match the approved roles in public_models.py {expected}"
+assert got in APPROVED, f"public-model-config.json {got} does not match the approved roles in public_models.py {list(APPROVED)}"
+assert S["independent_evaluator"].model_id == APPROVED[got]
 for role, sel in S.items():
     if sel.provider == "alibaba":
         assert sel.model_id in model_adapter.ALIBABA_MODELS, f"{role}: {sel.model_id} is not in ALIBABA_MODELS"
@@ -330,6 +333,127 @@ assert public_adapter() is None and public_usage(A.Usage).adapter is None
 os.environ["PUBLIC_MODEL_CONFIGURATION"] = "combo_18"
 raises(ValueError, public_adapter, "approved")
 os.environ.pop("PUBLIC_MODEL_CONFIGURATION")
+
+# Anthropic provider (the website roles): streamed, adaptive thinking at the role's effort, no temperature,
+# thinking headroom on top of the answer cap, pool section cached, usage and cost recorded
+class FakeStream:
+    def __init__(self, calls, reply): self.calls, self.reply = calls, reply
+    def __call__(self, **kw): self.calls.append(kw); return self
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def get_final_message(self): return self.reply
+class FakeAnthropic:
+    def __init__(self, text, stop="end_turn"):
+        self.calls = []
+        reply = SimpleNamespace(content=[SimpleNamespace(type="thinking", thinking=""), SimpleNamespace(type="text", text=text)],
+                                stop_reason=stop, model="claude-opus-5-5",
+                                usage=SimpleNamespace(input_tokens=1000, output_tokens=200, cache_read_input_tokens=3000,
+                                                      cache_creation_input_tokens=0, server_tool_use=None))
+        self.messages = SimpleNamespace(stream=FakeStream(self.calls, reply))
+        self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.messages.stream))
+claude = FakeAnthropic('{"ok": true}')
+priced = []
+ad_c = ModelAdapter(ModelConfiguration.load(AGENT / "public-model-config.json"), clients={"anthropic": claude},
+                    budget_authorizer=lambda sel, system, messages, max_tokens: priced.append(max_tokens) or Reservation())
+uc = A.Usage(adapter=ad_c, trip_id="t2")
+assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, temperature=0.3, model_role="planner") == {"ok": True}
+c = claude.calls[-1]
+assert c["model"] == "claude-opus-5-5" and c["thinking"] == {"type": "adaptive"} and c["output_config"] == {"effort": "medium"}
+assert c["max_tokens"] == 5440 + model_adapter.THINKING_HEADROOM_TOKENS == priced[-1] and "temperature" not in c
+assert c["system"][0] == {"type": "text", "text": "POOL", "cache_control": {"type": "ephemeral"}} and "cache_control" not in c["system"][1]
+assert c["messages"] == [{"role": "user", "content": [{"type": "text", "text": "plan"}]}]
+assert ad_c.records[-1]["cacheReadTokens"] == 3000 and ad_c.records[-1]["success"] and SETTLED[-1]["provider"] == "anthropic"
+# the Opus planner opts into the server-side refusal fallback (beta); Haiku has none, so its calls never send it
+assert c["betas"] == ["server-side-fallback-2026-07-01"] and c["fallbacks"] == "default"
+assert ad_c.records[-1]["transport"] == "anthropic.beta.messages.stream" and ad_c.records[-1]["responseModelId"] == "claude-opus-5-5"
+A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", uc, temperature=0.0, model_role="executor")
+assert claude.calls[-1]["model"] == "claude-haiku-5-5" and "cache_control" not in claude.calls[-1]["system"][0]
+assert "fallbacks" not in claude.calls[-1] and "temperature" not in claude.calls[-1] and claude.calls[-1]["output_config"] == {"effort": "medium"}
+A.ask_json(A.REVIEWER_MODEL, "sys", "evaluate", uc, model_role="independent_evaluator")
+assert claude.calls[-1]["model"] == "claude-haiku-5-5" and claude.calls[-1]["output_config"] == {"effort": "low"}
+truncated = ModelAdapter(ad_c.configuration, clients={"anthropic": FakeAnthropic("", "max_tokens")},
+                         budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t3", system="s", messages=MSG)
+assert truncated["stopReason"] == "max_tokens" and truncated["_adapter"]["emptyBecauseTruncated"]
+
+# optional web picks: Haiku with web search names venues; a pool match gets webSource, the rest are looked up by name, unpinned
+class FakeGw:
+    def __init__(s): s.calls = []
+    def call(s, tool, args):
+        s.calls.append(args)
+        return {"ok": True, "places": [{"placeId": "aloc:k", "name": "Kurasu", "category": "requested", "requested": "Kurasu",
+                                        "tags": ["requested by user"], "matches": ["requested"]}]}
+gw = FakeGw(); A._clients = lambda: (Bedrock(), None, gw)
+assert list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, u, [], set())) == [] and gw.calls == [],     "no web step on the configuration-19 roles"
+claude.messages.stream.reply.content = [SimpleNamespace(type="text", text='{"picks": [{"name": "Weekenders Coffee", "kind": "cafe", '
+    '"source": "https://www.timeout.com/kyoto"}, {"name": "Kurasu", "kind": "cafe", "source": "https://sprudge.com/kurasu"}]}')]
+pool = {"places": [{"placeId": "gplace:w", "name": "Weekenders Coffee", "category": "cafe"}]}
+list(A.web_food_picks({"destination": "Kyoto", "cuisines": ["Italian"], "activities": ["pour-over coffee"],
+                       "preferences": {"notes": "two cafes a day"}}, pool, uc, [], set()))
+tool = claude.calls[-1]["tools"][0]
+assert claude.calls[-1]["model"] == "claude-haiku-5-5" and tool["type"] == "web_search_20250305" and tool["max_uses"] == 3
+assert "Italian; pour-over coffee; two cafes a day" in claude.calls[-1]["messages"][0]["content"][0]["text"]
+assert "sprudge.com" in tool["allowed_domains"] and "temperature" not in claude.calls[-1]
+by = {p["name"]: p for p in pool["places"]}
+assert by["Weekenders Coffee"]["webSource"] == "https://www.timeout.com/kyoto" and gw.calls == [{"city": "Kyoto", "names": ["Kurasu"], "namesCategory": "cafe"}]
+assert by["Kurasu"]["category"] == "cafe" and not by["Kurasu"]["requested"] and by["Kurasu"]["tags"] == []
+assert A._c_place(by["Kurasu"])["webSource"] == "https://sprudge.com/kurasu" and "requested" not in A._c_place(by["Kurasu"])
+
+# names go out cleaned the way find_places cleans them, one lookup per kind; a lookup that lands on a pool place
+# (a pinned one here) leaves it pinned
+class NamesGw:
+    IDS = {"Arabica Kyoto Higashiyama": "gplace:arabica", "Kurasu Kyoto Station": "gplace:kurasu", "Gion Karyo": "gplace:karyo"}
+    def __init__(s): s.calls = []
+    def call(s, tool, args):
+        s.calls.append(args)
+        return {"ok": True, "places": [{"placeId": s.IDS[n], "name": n, "category": args["namesCategory"], "requested": n,
+                                        "tags": [], "matches": []} for n in args["names"] if n in s.IDS]}
+gw = NamesGw(); A._clients = lambda: (Bedrock(), None, gw)
+claude.messages.stream.reply.content = [SimpleNamespace(type="text", text=json.dumps({"picks": [
+    {"name": "% Arabica Kyoto Higashiyama", "kind": "cafe", "source": "https://sprudge.com/a"},
+    {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://sprudge.com/k"},
+    {"name": "Gion Karyo", "kind": "restaurant", "source": "https://guide.michelin.com/g"}]}))]
+pinned = {"placeId": "gplace:kurasu", "name": "Kurasu Kyoto", "category": "requested", "requested": "Kurasu Kyoto",
+          "tags": ["requested by user"]}
+pool = {"places": [pinned]}
+list(A.web_food_picks({"destination": "Kyoto"}, pool, uc, [], set()))
+assert [(c_["namesCategory"], c_["names"]) for c_ in gw.calls] == [
+    ("cafe", ["Arabica Kyoto Higashiyama", "Kurasu Kyoto Station"]), ("restaurant", ["Gion Karyo"])], gw.calls
+by = {p["placeId"]: p for p in pool["places"]}
+assert by["gplace:arabica"]["category"] == "cafe" and by["gplace:arabica"]["webSource"] == "https://sprudge.com/a"
+assert by["gplace:karyo"]["category"] == "restaurant" and not by["gplace:karyo"]["requested"]
+assert by["gplace:kurasu"] is pinned and pinned["requested"] == "Kurasu Kyoto" and pinned["tags"] == ["requested by user"]
+
+# a rate limit in the optional web step does not mark the adapter exhausted, so the planner call still runs
+class RateLimited(Exception):
+    status_code = 429
+saved_stream = claude.messages.stream
+claude.messages.stream = lambda **kw: (_ for _ in ()).throw(RateLimited("rate_limit_error"))
+gw.calls.clear()
+list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set()))
+assert not ad_c.quota_exhausted and gw.calls == []
+claude.messages.stream = saved_stream
+A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner")
+
+# the ledger reserves room for search results: a web-search call billed at 120,000 input tokens does not halt it
+from model_budget import BudgetLedger, PriceQuote
+class MemStore:
+    def __init__(s): s.state, s.records = None, {}
+    def initialize(s, v):
+        s.state = s.state or json.loads(json.dumps(v)); return json.loads(json.dumps(s.state))
+    def update(s, fn):
+        v = json.loads(json.dumps(s.state)); r = fn(v); s.state = v; return r
+    def put_record(s, row): s.records[row["invocationId"]] = row
+store = MemStore()
+ledger = BudgetLedger(store, cap_usd="50", provider_caps={"anthropic": "50"}, enforce_spending_caps=True,
+                      quotes=[PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"]])
+web = FakeAnthropic('{"picks": []}')
+web.messages.stream.reply.usage = SimpleNamespace(input_tokens=120000, output_tokens=2500, cache_read_input_tokens=0,
+                                                  cache_creation_input_tokens=0, server_tool_use=SimpleNamespace(web_search_requests=3))
+ModelAdapter(ad_c.configuration, clients={"anthropic": web}, budget_authorizer=ledger.authorize, record_sink=ledger.record).generate(
+    role="executor", trip_id="t4", system="s", messages=MSG, tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}])
+print("web-search call:", store.state["spentEstimateUSD"], "USD recorded, halted:", store.state["halted"])
+assert not store.state["halted"] and float(store.state["spentEstimateUSD"]) > 0.04, store.state
+A._clients = lambda: (Bedrock(), None, None)
 print("ROLE ADAPTER OK")
 
 # ====================================================================== part 2: legacy Bedrock path

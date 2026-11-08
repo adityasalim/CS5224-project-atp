@@ -1,32 +1,30 @@
 {
-  "experimentId": "public_combo_19",
+  "experimentId": "public_claude_5_5",
   "googleBillingDisabled": true,
   "planner": {
-    "provider": "alibaba",
-    "model": "qwen3.8-max-0902",
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
     "options": {
-      "enableThinking": true,
-      "thinkingBudget": 4000
+      "reasoningEffort": "medium"
     }
   },
   "executor": {
-    "provider": "alibaba",
-    "model": "deepseek-v4.1-flash",
+    "provider": "anthropic",
+    "model": "claude-haiku-5-5",
     "options": {
-      "enableThinking": true,
-      "reasoningEffort": "low"
+      "reasoningEffort": "medium"
     }
   },
   "reviewer": {
-    "provider": "bedrock",
-    "model": "global.moonshotai.kimi-k3",
+    "provider": "anthropic",
+    "model": "claude-haiku-5-5",
     "options": {
       "reasoningEffort": "medium"
     }
   },
   "independent_evaluator": {
-    "provider": "bedrock",
-    "model": "global.moonshotai.kimi-k3",
+    "provider": "anthropic",
+    "model": "claude-haiku-5-5",
     "options": {
       "reasoningEffort": "low"
     }

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 
 ROLES = ('planner', 'executor', 'reviewer', 'independent_evaluator')
-PROVIDERS = {'bedrock', 'google', 'alibaba'}
+PROVIDERS = {'bedrock', 'google', 'alibaba', 'anthropic'}
 
 # Single source of truth for Alibaba (DashScope) models.
 ALIBABA_MODELS = {
@@ -217,6 +217,9 @@ class ModelConfiguration:
 
                     elif model == 'glm-5.3':
                         supported = REASONING_EFFORTS['glm53']
+
+                elif provider == 'anthropic':
+                    supported = {'low', 'medium', 'high', 'xhigh', 'max'}
 
                 if options['reasoningEffort'] not in supported:
                     raise ValueError(

@@ -32,6 +32,9 @@
 | `PROMPT_CACHE` | `true` (default): prompt-cache checkpoints for Claude/Nova calls; `false` turns them off | no |
 | `MEMORY_ID` | `tp_dev_memory-AbCdEf1234` (Phase 6.4) | no; memory is off without it |
 | `MEMORY_PREFERENCES_NAMESPACE` | `/users/{actorId}/preferences` (must match the console) | default shown |
+| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (now Claude Opus 5.5 / Haiku 5.5) | no; legacy defaults without it |
+| `ANTHROPIC_SECRET_ID` | `tp/dev/anthropic`, a secret holding `{"api_key": ...}` (runtime role needs `GetSecretValue` on it) | default shown |
+| `MODEL_BUDGET_LEDGER` | `public_claude_5_5`; a new id whenever the caps in `public_models.py` change | yes, with `PUBLIC_MODEL_CONFIGURATION` |
 
 ## Personal preferences
 

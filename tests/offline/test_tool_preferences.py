@@ -171,6 +171,12 @@ qr, _ = fp._validate({"city": "Kyoto", "categories": ["restaurant"], "cuisine": 
 assert [t[1] for t in fp._text_targets(qr)][-1] == "fine dining restaurant" and len(fp._text_targets(qr)) == 6
 assert fp._validate({"city": "Kyoto", "keywords": ["specialty coffee"]})[0]["categories"] == ["cafe"]
 
+# web-searched names are looked up as ordinary cafes or restaurants; names the traveller gave stay requested
+w = fp.lambda_handler({"city": "Kyoto", "names": ["Weekenders Coffee"], "namesCategory": "cafe"}, None)["places"][0]
+assert w["category"] == "cafe" and "requested by user" not in w["tags"] and w.get("matches") != ["requested"], w
+n = fp.lambda_handler({"city": "Kyoto", "names": ["teamLab Planets"], "namesCategory": "bar"}, None)["places"][0]
+assert n["category"] == "requested" and "requested by user" in n["tags"], n
+
 # the PDF footer credits Google Maps for ratings
 import fakes
 pdf_text = []

@@ -299,7 +299,7 @@ def _validate(event):
             "radiusKm": min(max(float(event.get("radiusKm", 4)), 0.5), OUTDOOR_MAX_KM), "cuisine": cuisine or None,
             "foodRadiusKm": food_radius,
             "maxPerCategory": per_cat, "prefs": prefs,
-            "names": names}, None
+            "names": names, "namesCategory": event.get("namesCategory") if event.get("namesCategory") in ("cafe", "restaurant") else None}, None
 
 
 def _radius_km(cat, q):
@@ -657,12 +657,13 @@ def _named(q, deadline):
     """Look up places the user named. Returns (places, notFound). Amazon Location first, then Google."""
     found, missing = [], []
     gkey = None
+    cat = q.get("namesCategory") or "requested"   # web-searched venues are ordinary cafes or restaurants, not pinned
     for name in q.get("names", []):
         hit = None
         if _mock_mode():
             i = len(found)
             hit = _place(f"mock:{q['lat']:.2f},{q['lng']:.2f}:named_{re.sub(r'[^a-z0-9]', '', name.lower())[:24]}",
-                         f"{name} (sample)", "requested", q["lat"] + 0.006 * (i + 1), q["lng"] - 0.004 * (i + 1), q,
+                         f"{name} (sample)", cat, q["lat"] + 0.006 * (i + 1), q["lng"] - 0.004 * (i + 1), q,
                          hours_raw="10:00-20:00", simple={"open": "10:00", "close": "20:00"}, fame_known=False,
                          description=f"Sample entry for the requested place {name}.")
         if hit is None and deadline - time.time() > 3:
@@ -672,7 +673,7 @@ def _named(q, deadline):
                 for it in r.get("ResultItems", []):
                     pos = it.get("Position")
                     if pos and it.get("Title") and _km(q["lat"], q["lng"], pos[1], pos[0]) <= NAMED_MAX_KM:
-                        hit = _place("aloc:" + it["PlaceId"][:200], it["Title"], "requested", pos[1], pos[0], q,
+                        hit = _place("aloc:" + it["PlaceId"][:200], it["Title"], cat, pos[1], pos[0], q,
                                      fame_known=False, url="https://www.google.com/maps/search/?api=1&query="
                                      f"{quote(it['Title'])}%20{pos[1]},{pos[0]}")
                         break
@@ -693,15 +694,16 @@ def _named(q, deadline):
                         loc = gp.get("location", {})
                         if loc and _km(q["lat"], q["lng"], loc["latitude"], loc["longitude"]) <= NAMED_MAX_KM:
                             raw = "; ".join((gp.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
-                            hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), "requested",
+                            hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), cat,
                                          loc["latitude"], loc["longitude"], q, hours_raw=raw,
                                          url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False)
                 except Exception as e:  # noqa: BLE001
                     print("named lookup (google) failed:", e)
         if hit:
             hit["requested"] = name
-            hit["tags"] = ["requested by user"] + hit["tags"]
-            hit["matches"] = ["requested"]
+            if cat == "requested":
+                hit["tags"] = ["requested by user"] + hit["tags"]
+                hit["matches"] = ["requested"]
             found.append(hit)
         else:
             missing.append(name)
