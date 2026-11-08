@@ -3350,10 +3350,13 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
     sp = spec or {}
     edge = {sp.get("startDate"), sp.get("endDate")} | {l.get("checkIn") for l in (sp.get("legs") or [])[1:]}
     want_cafes = _cafes_per_day(sp)
+    parkz = {z["id"] for z in pool.get("zones") or [] if z.get("kind") == "park"}
     for d in days if pool.get("zones") else []:
         st = [by_id[i] for i in ([s.get("placeId") for s in d.get("stops") or [] if isinstance(s, dict)]
                                  or d.get("placeIds") or []) if i in by_id]
-        if not st or d.get("dayTrip") or d.get("date") in edge or any(PARK_RE.search(p.get("name") or "") for p in st):
+        if not st or d.get("dayTrip") or d.get("date") in edge or any(
+                p.get("zone") in parkz or p.get("category") == "theme_park" or PARK_RE.search(p.get("name") or "")
+                for p in st):
             continue
         zs = sorted({p["zone"] for p in st if p.get("zone") and not _is_food_place(p)})
         meals = sum(p.get("category") in ("restaurant", "street_food") for p in st)

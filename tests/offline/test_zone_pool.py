@@ -104,3 +104,16 @@ for limit, kept in (("none", []), ("1", ["Nara"])):
 assert [t["place"] for t in A.normalize_special({"dayTrips": [{"place": "Nara", "park": "yes"}, "Kobe"],
         "preferences": {"days": {"dayTripLimit": "1"}}})["dayTrips"]] == ["Nara"]
 print("PARK DAY TRIP LIMIT OK")
+
+# ---- the zone day check skips park days by park zone or theme_park category, not only by name
+mk = lambda pid, cat, zone: {"placeId": pid, "name": pid.title(), "category": cat, "lat": 35.0, "lng": 139.0, "zone": zone,
+                             "rating": 4.5}
+z_pool = {"zones": [{"id": "Z1", "kind": "walk"}, {"id": "Z9", "kind": "park"}],
+          "places": [mk("legoland", "requested", "Z9"), mk("everland", "theme_park", "Z1"), mk("museum", "museum", "Z1")]}
+z_spec = {"startDate": "2026-12-01", "endDate": "2026-12-09", "preferences": {"food": {"perDay": 1}}}
+for pid in ("legoland", "everland"):
+    diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [{"placeId": pid}]}]})
+    assert not [i for i in diag["issues"] if i["status"] == "zones"], (pid, diag["issues"])
+diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [{"placeId": "museum"}]}]})
+assert len([i for i in diag["issues"] if i["status"] == "zones"]) == 2, diag["issues"]   # a city day still needs meals and cafes
+print("PARK DAY CHECK OK")
