@@ -1997,7 +1997,7 @@ def _c_place(p, with_hours=True):
     item = {"id": p["placeId"], "name": p.get("name"), "category": p.get("category"), "distanceKm": p.get("distanceKm"), "rating": p.get("rating"), "lat": p.get("lat"), "lng": p.get("lng")}
     if p.get("zone"):
         item["zone"] = p["zone"]
-    for k in ("requested", "dayTrip", "reviews", "priceLevel", "webSource"):
+    for k in ("requested", "dayTrip", "reviews", "priceLevel"):   # never webSource: its URL path is model-written web text
         if p.get(k):
             item[k] = p[k]
     if with_hours:
