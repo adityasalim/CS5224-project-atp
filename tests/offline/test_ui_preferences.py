@@ -101,7 +101,14 @@ assert s1["googleMapsUri"].startswith("https://www.google.com/maps/search/?api=1
 assert {k: s2[k] for k in ("rating", "reviews", "priceLevel", "why", "webSource", "googleMapsUri")} == {
     "rating": 4.7, "reviews": 2807, "priceLevel": "$$", "why": "specialty coffee",
     "webSource": "The World's 100 Best Coffee Shops", "googleMapsUri": "https://maps.google.com/?cid=1"}, s2
-assert s3["why"] == "Italian, vegetarian" and "webSource" not in s3 and s3["note"] == "18 min taxi"
+assert s3["why"] == "Italian, vegetarian" and "webSource" not in s3 and s3["note"] == "18 min taxi or transit"
+assert s2["note"] == "6 min walk"
+# the ride says "taxi or transit" with the default transit choice and stays "taxi" for taxi or a rental car
+for how, label in (("transit", "18 min taxi or transit"), ("taxi", "18 min taxi"), ("car", "18 min taxi")):
+    spec_t = {**spec_w, "preferences": {**spec_w["preferences"], "days": {"transport": how}}}
+    web_t = A.to_web(spec_t, seq, pool, {"totals": {"total": 2000}}, {}, [], {"title": "t", "summary": "", "dayNotes": {}},
+                     None, "trip_1", 0)
+    assert web_t["days"][0]["stops"][2]["note"] == label, (how, web_t["days"][0]["stops"][2])
 assert web["days"][0]["routeUrl"] == ("https://www.google.com/maps/dir/35.69,139.7/35.7148,139.7967/35.71,139.79/35.7,139.7")
 assert web["attribution"] == "Ratings and hours from Google Maps"
 assert "attribution" not in A.to_web(spec_w, {**seq, "days": [{"date": "2026-12-11", "stops": seq["days"][0]["stops"][:1]}]},
@@ -127,6 +134,8 @@ except (StopIteration, RuntimeError):
 A._clients, A.narrative = saved_clients, saved_story
 pdf_days = pdf_gw.args["itinerary"]["days"]
 assert pdf_days[0]["routeUrl"] == web["days"][0]["routeUrl"] and "routeUrl" not in pdf_days[1], pdf_days
+assert [x.get("travelBy") for x in pdf_days[0]["stops"]] == [None, "walk", "taxi or transit"], pdf_days[0]["stops"]
+assert seq["days"][0]["stops"][2]["travelBy"] == "taxi", "the itinerary the verifier counts keeps taxi"
 
 # ---- PDF: the same fields from the itinerary stops
 pdf_mod = load("tp-render-pdf")
@@ -140,7 +149,7 @@ event = {"tripSpec": {"startDate": "2026-12-11", "endDate": "2026-12-11", "pax":
 pdf_mod.build_pdf(event, {p_["placeId"]: p_ for p_ in places}, 100)
 del fakes.FPDF.cell, fakes.FPDF.multi_cell
 lines = [t for t, _ in texts]
-assert "near Senso-ji" in lines and "Shibuya  (18 min taxi from the previous area)" in lines, lines
+assert "near Senso-ji" in lines and "Shibuya  (18 min taxi or transit from the previous area)" in lines, lines
 assert "rated 4.7 (2,807 reviews)  |  $$  |  specialty coffee  |  Featured by The World's 100 Best Coffee Shops" in lines
 assert ("Day route in Google Maps", web["days"][0]["routeUrl"]) in texts
 assert ("Kurasu Kyoto", "https://maps.google.com/?cid=1") in texts

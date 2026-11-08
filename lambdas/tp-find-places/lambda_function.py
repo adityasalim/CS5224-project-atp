@@ -119,6 +119,8 @@ G_MEAL_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining", "
                 "ramen", "seafood", "spanish", "sushi", "thai", "turkish", "vegan", "vegetarian", "vietnamese"}
 G_CAFE_TYPES = ["cafe", "coffee_shop", "coffee_roastery", "tea_house"]
 G_TREAT_TYPES = ["bakery", "dessert_shop"]
+G_PRICE_LEVELS = {"PRICE_LEVEL_FREE": 0, "PRICE_LEVEL_INEXPENSIVE": 1, "PRICE_LEVEL_MODERATE": 2,
+                  "PRICE_LEVEL_EXPENSIVE": 3, "PRICE_LEVEL_VERY_EXPENSIVE": 4}
 
 
 def _is_food_keyword(kw):
@@ -308,6 +310,7 @@ def _validate(event):
             "radiusKm": min(max(float(event.get("radiusKm", 4)), 0.5), OUTDOOR_MAX_KM), "cuisine": cuisine or None,
             "foodRadiusKm": food_radius,
             "maxPerCategory": per_cat, "prefs": prefs,
+            **({"priceLevel": event["priceLevel"]} if event.get("priceLevel") in (1, 2, 3, 4) else {}),
             "names": names, "namesCategory": event.get("namesCategory") if event.get("namesCategory") in ("cafe", "restaurant") else None}, None
 
 
@@ -638,7 +641,8 @@ def _google(q, deadline=None):
 def _google_zone(q, deadline):
     """One walkable zone: ONE Nearby Search inside a hard circle of foodRadiusKm around lat/lng for the asked
     categories (restaurants with the wished cuisine types, cafes and tea houses, bakeries and dessert shops),
-    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order."""
+    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order. With a meal priceLevel (1-4),
+    restaurants at that level come first, then those with no price, then the other levels."""
     key = _secret("GOOGLE_MAPS_KEY")
     if not key:
         return None, "no GOOGLE_MAPS_KEY in secret"
@@ -676,7 +680,12 @@ def _google_zone(q, deadline):
                    cuisine=kind.replace("_restaurant", "").replace("_", " ") if kind not in ("", "restaurant") else None)
         g.update(reviews=n, priceLevel=p.get("priceLevel"), matches=_matches(g, q["prefs"]))
         scored.append(((n * rating + 150 * 4.2) / (n + 150), g))   # Bayesian: 4.6 with 900 reviews before 4.9 with 60
-    scored.sort(key=lambda x: (-x[0], x[1]["placeId"]))
+    want = q.get("priceLevel")
+
+    def price_tier(g):
+        lvl = G_PRICE_LEVELS.get(g.get("priceLevel"))
+        return 0 if not want or g["category"] != "restaurant" else 1 if lvl is None else 0 if lvl == want else 2
+    scored.sort(key=lambda x: (price_tier(x[1]), -x[0], x[1]["placeId"]))
     ranked = [g for _, g in scored if _allowed(g, q["prefs"])]
     return [g for c in q["categories"] for g in [x for x in ranked if x["category"] == c][:q["maxPerCategory"]]], None
 

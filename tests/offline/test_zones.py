@@ -246,6 +246,13 @@ big_spec, big_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 big_pool["zones"] = [dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(30)]
 assert drain(Z["zone_food"](big_spec, big_pool, [], set())) == 20 and drain(Z["zone_food"](spec, {"places": []}, [], set())) == 0
 assert len(SENT) == 20, f"hard cap of 20 Google requests per plan, sent {len(SENT)}"
+# a meal price level goes to the zone searches only, and adds no request
+assert not any("priceLevel" in a for a in nearby)
+SENT.clear()
+p_spec = copy.deepcopy(spec)
+p_spec["preferences"]["food"]["priceLevel"] = 2
+assert drain(Z["zone_food"](p_spec, copy.deepcopy(pool), [], set())) == 17 == len(SENT)
+assert all((a.get("priceLevel") == 2) == (a["foodRadiusKm"] <= 2) for _, a in SENT), SENT
 callers = {f.name for f in top.values() if isinstance(f, ast.FunctionDef)
            for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "zone_food"}
 assert callers == {"gather", "gather_multi"}, f"chat changes reuse the session pool (0 requests); zone_food in {callers}"
@@ -435,6 +442,20 @@ assert not any(k.startswith("places-v5:") for k in STORE), "zone answers are nev
 POSTS.clear()
 fp.lambda_handler({**ev, "categories": ["restaurant"], "cuisine": "", "dietary": []}, None)
 assert sorted(POSTS[0]["includedPrimaryTypes"]) == ["restaurant"], POSTS[0]["includedPrimaryTypes"]
+# a meal price level ranks restaurants at that Google level first, then unknown prices, then other levels; the
+# Bayesian order holds inside each group, cafes keep it, and it is still one request
+lvl = lambda pid, rating, n, kind, level: {**g(pid, rating, n, kind), "priceLevel": f"PRICE_LEVEL_{level}"}
+priced = [lvl("cheap", 4.8, 900, "restaurant", "INEXPENSIVE"), lvl("mid", 4.2, 300, "restaurant", "MODERATE"),
+          lvl("mid2", 4.5, 600, "restaurant", "MODERATE"), g("unknown", 4.9, 900, "restaurant"),
+          lvl("pricey", 4.7, 500, "coffee_shop", "EXPENSIVE"), g("plain", 4.4, 500, "cafe")]
+fp.requests.post = lambda url, headers=None, json=None, timeout=None: POSTS.append(url) or Resp({"places": priced})
+meals = lambda r: [p["name"] for p in r["places"] if p["category"] == "restaurant"]
+cafes = lambda r: [p["name"] for p in r["places"] if p["category"] == "cafe"]
+POSTS.clear()
+r = fp.lambda_handler({**ev, "cuisine": "", "dietary": [], "priceLevel": 2}, None)
+assert len(POSTS) == 1 and meals(r) == ["mid2", "mid", "unknown", "cheap"] and cafes(r) == ["pricey", "plain"], (POSTS, r)
+r = fp.lambda_handler({**ev, "cuisine": "", "dietary": []}, None)
+assert meals(r) == ["unknown", "cheap", "mid2", "mid"], meals(r)          # no level: the Bayesian order only
 fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestException("down"))
 fp._amazon_location = lambda q, d: ([fp._place("aloc:1", "Corner Diner", "restaurant", 35.001, 135.77, q)], None)
 r = fp.lambda_handler(ev, None)

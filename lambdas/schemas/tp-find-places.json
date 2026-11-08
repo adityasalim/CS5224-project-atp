@@ -79,6 +79,10 @@
         "type": "number",
         "description": "Search radius in km for restaurants, cafes, bars, desserts and street food, 1-15 (default 5)."
       },
+      "priceLevel": {
+        "type": "integer",
+        "description": "Meal price level 1-4 ($ to $$$$) for a walkable zone (foodRadiusKm 2 or less): restaurants at this Google price level are ranked first."
+      },
       "maxPerCategory": {
         "type": "integer",
         "description": "Results per category or keyword, 1-40 (default 8). The agent sets this from the trip length: use about 10-12 for short trips and up to 40 for long ones."
