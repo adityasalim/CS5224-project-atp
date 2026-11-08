@@ -160,7 +160,6 @@ function tripRatings(card, items) {
   });
 }
 
-/* One-line summaries shown on the collapsed section headers. */
 function tripSummary(s) {
   const f = s.flight, h = s.hotel, fd = s.food, dy = s.days;
   const areas = s.cities.map(leg => leg.hotelArea.trim()).filter(Boolean);

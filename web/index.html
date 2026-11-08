@@ -531,7 +531,7 @@ function renderItinerary(it) {
     if (!(d.stops || []).length) day.append(el("div", "note", "Free time / travel"));
     let zone = null;
     (d.stops || []).forEach((s) => {
-      if (s.zoneLabel && s.zone !== zone) {          // a zone header, with the ride from the previous zone
+      if (s.zoneLabel && s.zone !== zone) {
         const head = el("div", "zone", s.zoneLabel);
         if (zone && s.note) head.append(el("small", null, " · " + s.note + " from the previous area"));
         day.append(head); zone = s.zone;

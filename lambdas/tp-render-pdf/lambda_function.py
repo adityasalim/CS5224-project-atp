@@ -240,7 +240,7 @@ def build_pdf(event, pool, daily_spend):
             when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
             travel = s.get("travelMinutesFromPrev")
             extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
-            if s.get("zoneLabel") and s.get("zone") != zone:   # zone header, with the ride from the previous zone
+            if s.get("zoneLabel") and s.get("zone") != zone:
                 pdf.set_font(_FAMILY, "B", 10)
                 pdf.set_text_color(*accent)
                 pdf.cell(0, 6, _t(s["zoneLabel"] + (f"  ({extra} from the previous area)" if zone and extra else "")),
@@ -258,7 +258,7 @@ def build_pdf(event, pool, daily_spend):
             chips = [f"rated {rating}" + (f" ({reviews:,} reviews)" if isinstance(reviews, int) else "") if rating else "",
                      s.get("priceLevel") or "", s.get("why") or "",
                      f'Featured by {s["webSource"]}' if s.get("webSource") else ""]
-            if any(chips) and (p.get("category") in _FOOD or "rating" in s or "why" in s):   # food and coffee stops only
+            if any(chips) and (p.get("category") in _FOOD or "rating" in s or "why" in s):
                 pdf.set_font(_FAMILY, "", 8.5)
                 pdf.cell(26, 4.5, "")
                 pdf.cell(0, 4.5, _t("  |  ".join(c for c in chips if c)), new_x="LMARGIN", new_y="NEXT")
