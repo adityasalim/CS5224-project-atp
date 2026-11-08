@@ -3921,8 +3921,10 @@ def sequence(spec, pool, plan):
             anchor = trip
         if ids and end - start >= 60:
             ordered_ids, adj_start = _order_day_stops(ids, pool, dt, start, end, anchor=anchor)
+            zone_of = {p["placeId"]: p["zone"] for p in pool["places"] if p.get("zone")}
             res = gw.call("sequence_day", {**seq_args, "placeIds": ordered_ids, "dayStart": _fmt(adj_start),
-                                           "dayEnd": _fmt(end), "mode": "walk", "lunch": True})
+                                           "dayEnd": _fmt(end), "mode": "walk", "lunch": True,
+                                           "zones": {i: zone_of[i] for i in ordered_ids if i in zone_of}})
             if res.get("ok"):
                 day["stops"] = [{k: s_.get(k) for k in ("placeId", "name", "category", "arriveAt", "departAt",
                                                          "travelMinutesFromPrev", "travelBy")}

@@ -319,6 +319,40 @@ assert not unscheduled and order == ["S"] * 3 + ["A"] * 4, order          # Shib
 assert [o["travelBy"] for o in out[1:]].count("taxi") == 1, [o["travelBy"] for o in out]
 meals = [o for o in out if o["category"] == "restaurant"]
 assert [m["placeId"][0] for m in meals] == ["S", "A"], meals                # each group's meal is eaten in that group
+# two zones 2 km apart are one walkable group (about 35 min on foot), so a late opening interleaves them; with zone ids
+# the day finishes the farther zone, takes one ride, then does the other
+Z_A, Z_B = (35.000, 135.760), offset(35.000, 135.760, 0, 2.0)
+z_hotel = dict(zip(("lat", "lng"), offset(*Z_A, 0, -0.3)), id="hotel")
+z_stops = [{"placeId": pid, "name": pid, "category": "museum", "lat": ll[0], "lng": ll[1], "visitMinutes": 60, "zone": zid,
+            "hours": hours_for({"openSimple": {"open": op, "close": "18:00"}})}
+           for pid, ll, zid, op in [("a1", offset(*Z_A, 0.1, 0), "ZA", "09:00"), ("a2", offset(*Z_A, -0.1, 0), "ZA", "13:00"),
+                                    ("b1", offset(*Z_B, 0.1, 0), "ZB", "09:00"), ("b2", offset(*Z_B, -0.1, 0), "ZB", "09:00")]]
+z_pts = [z_hotel] + z_stops
+z_walk = [[sd._estimate(a, b, "walk") for b in z_pts] for a in z_pts]
+z_car = [[sd._estimate(a, b, "car") for b in z_pts] for a in z_pts]
+assert len(set(sd._walk_groups(z_walk, 4)[1:])) == 1, z_walk
+run = lambda st: [o["placeId"] for o in sd.schedule(z_hotel, st, z_walk, z_car, 9 * 60, 21 * 60, "walk", True)[0]]
+old = run([{k: v for k, v in s_.items() if k != "zone"} for s_ in z_stops])
+assert old == ["a1", "b1", "b2", "a2"], old                                  # without zone ids: back and forth
+by_zone = run(z_stops)
+assert [x[0] for x in by_zone] == ["b", "b", "a", "a"], by_zone              # each zone contiguous, farther zone first
+r = sd.lambda_handler({"date": "2027-03-10", "start": z_hotel, "lunch": False, "stops": [
+    {**{k: v for k, v in s_.items() if k != "hours"}, "openSimple": {"open": "13:00" if s_["placeId"] == "a2" else "09:00",
+                                                                     "close": "18:00"}} for s_ in z_stops]}, None)
+assert [o["placeId"][0] for o in r["stops"]] == ["b", "b", "a", "a"], r["stops"]
+assert [o["travelBy"] for o in r["stops"][1:]].count("taxi") <= 1, r["stops"]
+# when the farther zone would be left for a long wait and visited again later, the other zone goes first instead
+lock = [{**s_, "hours": hours_for({"openSimple": {"open": "13:00" if s_["placeId"] == "b2" else "09:00", "close": "18:00"}})}
+        for s_ in z_stops]
+far_first = [o["placeId"] for o in sd.schedule(z_hotel, lock, z_walk, z_car, 9 * 60, 21 * 60, "walk", False)[0]]
+assert far_first == ["b1", "a1", "a2", "b2"], far_first                       # the wait lock leaves B and comes back
+r = sd.lambda_handler({"date": "2027-03-10", "start": z_hotel, "lunch": False, "stops": [
+    {**{k: v for k, v in s_.items() if k != "hours"}, "openSimple": {"open": "13:00" if s_["placeId"] == "b2" else "09:00",
+                                                                     "close": "18:00"}} for s_ in z_stops]}, None)
+assert [o["placeId"] for o in r["stops"]] == ["a1", "a2", "b1", "b2"], r["stops"]
+seq_src = ast.get_source_segment(SOURCE, top["sequence"])
+assert '"zones": {i: zone_of[i] for i in ordered_ids if i in zone_of}' in seq_src, "the agent passes each stop's zone"
+print("sequence_day groups by zone: two zones 2 km apart stay contiguous", by_zone)
 
 # ---------------------------------------------------------------- verifier: more than one ride between stops
 vf = load("tp-verify-itinerary")

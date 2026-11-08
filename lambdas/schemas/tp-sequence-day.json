@@ -19,6 +19,13 @@
         },
         "description": "2-8 placeIds from find_places for this day"
       },
+      "zones": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        },
+        "description": "Optional zone id per placeId, e.g. {\"<placeId>\": \"Z1\"}: the day finishes one zone, takes one ride, then does the next"
+      },
       "dayStart": {
         "type": "string",
         "description": "Time as HH:MM (24h)"

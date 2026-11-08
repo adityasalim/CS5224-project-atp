@@ -24,12 +24,13 @@ Input event (places can be given by ID only; details are read from the pool):
   {"date": "2026-12-11", "stayId": "mock:stay_1",
    "placeIds": ["osm:way/123", "osm:node/456"],
    "visitMinutes": {"osm:way/123": 90},          # optional overrides
+   "zones": {"osm:way/123": "Z1"},               # optional zone id per place: the day finishes a zone, then rides on
    "dayStart": "09:00", "dayEnd": "21:00", "mode": "walk", "lunch": true,
    "maxStops": 6, "minFreeMinutes": 60}
   Instead of stayId/placeIds you can pass full objects:
   "start": {"id": "hotel", "lat": .., "lng": ..},
   "stops": [{"placeId": "..", "name": "..", "lat": .., "lng": .., "visitMinutes": 90,
-             "openSimple": {"open": "09:00", "close": "17:00"}}]
+             "openSimple": {"open": "09:00", "close": "17:00"}, "zone": "Z1"}]
 """
 import json
 import math
@@ -185,6 +186,7 @@ def _resolve(event):
         return None, None, _err("bad_input", "give stayId or start {lat, lng}")
 
     overrides = event.get("visitMinutes") or {}
+    zones = event.get("zones") or {}
     stops, missing = [], []
     for pid in event.get("placeIds") or []:
         p = pool.get(pid)
@@ -192,13 +194,13 @@ def _resolve(event):
             missing.append(pid)
             continue
         stops.append({"placeId": pid, "name": p["name"], "category": p.get("category"),
-                      "activity": p.get("activity"),
+                      "activity": p.get("activity"), "zone": zones.get(pid),
                       "lat": p["lat"], "lng": p["lng"],
                       "hours": hours_for(p, event.get("date")),
                       "visitMinutes": int(overrides.get(pid, _default_visit(p)))})
     for s in event.get("stops") or []:
         stops.append({"placeId": str(s["placeId"]), "name": s.get("name", s["placeId"]),
-                      "category": s.get("category"), "activity": s.get("activity"),
+                      "category": s.get("category"), "activity": s.get("activity"), "zone": s.get("zone"),
                       "lat": float(s["lat"]), "lng": float(s["lng"]),
                       "hours": hours_for({"openSimple": s.get("openSimple")}),
                       "visitMinutes": int(s.get("visitMinutes") or _default_visit(s))})
@@ -227,14 +229,22 @@ def _walk_groups(walk_m, n):
     return [root(i) for i in range(n + 1)]
 
 
+def _zone_groups(stops):
+    """Group id per matrix index (0 = start): stops that share a zone id; a stop without one is a group of its own."""
+    first = {}
+    return [0] + [first.setdefault(s["zone"], i) if s.get("zone") else i for i, s in enumerate(stops, 1)]
+
+
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
-             max_stops=0, min_free=0):
+             max_stops=0, min_free=0, first=None):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
     opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
     11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted.
     max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules.
     In walk mode the day starts in the walkable group farthest from the hotel and finishes a group before it takes a
-    ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN."""
+    ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN. A group is a zone
+    when the stops carry zone ids, else a chain of walks of MAX_WALK_MINUTES or less. first (a group id) starts the
+    day in that group instead."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
@@ -267,13 +277,14 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                 best = (score, i, travel, how, arrive, begin, end)
         return best
 
-    group = _walk_groups(walk_m, len(stops)) if mode == "walk" else None
+    group = None if mode != "walk" else (_zone_groups(stops) if any(s.get("zone") for s in stops)
+                                         else _walk_groups(walk_m, len(stops)))
     while remaining:
         if max_stops and len(out) >= max_stops:
             break
         if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
-            far = max({group[i] for i in remaining},
-                      key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
+            far = first if first is not None else max(
+                {group[i] for i in remaining}, key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
             here = [i for i in remaining if group[i] == far]
         else:
             here = [i for i in remaining if group and group[i] == group[cur]]
@@ -332,13 +343,22 @@ def lambda_handler(event, context):
     lunch = bool(event.get("lunch", True))
     max_stops = int(event.get("maxStops") or 0)
     min_free = int(event.get("minFreeMinutes") or 0)
-    # Try "earliest finish first" and "long activities first"; keep the one that fits the most stops,
-    # then the one with the least waiting.
-    options = [schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
-                        max_stops=max_stops, min_free=min_free)
-               for lf in (False, True)]
-    ordered, unscheduled, back, free = max(
-        options, key=lambda o: (len(o[0]), -sum(x["waitMinutes"] for x in o[0]), o[3]))
+    # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one; keep the
+    # one that fits the most stops, then never goes back to a zone it left, then starts in the farther zone, then
+    # has the least waiting.
+    firsts = [None] + (sorted(set(_zone_groups(stops)[1:])) if mode == "walk" and any(s.get("zone") for s in stops)
+                       else [])
+    zone_of = {s["placeId"]: s.get("zone") or s["placeId"] for s in stops}
+
+    def returns(o):
+        z = [zone_of[x["placeId"]] for x in o[0]]
+        runs = [a for k, a in enumerate(z) if k == 0 or a != z[k - 1]]
+        return len(runs) - len(set(runs))
+    options = [(f, schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
+                            max_stops=max_stops, min_free=min_free, first=f))
+               for lf in (False, True) for f in firsts]
+    ordered, unscheduled, back, free = max(options, key=lambda fo: (
+        len(fo[1][0]), -returns(fo[1]), fo[0] is None, -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
     return {"ok": True, "date": event.get("date"), "start": start, "stops": ordered,
             "returnToStartMinutes": back, "freeTimeMinutes": free, "unscheduled": unscheduled,
             "dayStart": _fmt(day_start), "dayEnd": _fmt(day_end), "travelTimeSource": src}
