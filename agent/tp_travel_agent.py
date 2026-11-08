@@ -234,6 +234,7 @@ def _balance_meals(spec, pool, plan):
                 (c for c in pool.get("places", [])
                  if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
                  and c.get("lat") is not None and not c.get("dayTrip")
+                 and (not pool.get("zones") or c.get("zone"))
                  and (not d.get("city") or c.get("city") == d.get("city"))),
                 key=gap)
             limit_km = gap(p) - 0.3                  # only swap if the replacement is clearly closer
@@ -3447,7 +3448,7 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
                 centre = {"lat": sum(p["lat"] for p in pts) / len(pts), "lng": sum(p["lng"] for p in pts) / len(pts)}
                 near = sorted((p for p in pool.get("places", [])
                                if p.get("placeId") not in used_ids and p.get("lat") is not None
-                               and not _is_supermarket(p)),
+                               and not _is_supermarket(p) and (not pool.get("zones") or p.get("zone"))),
                               key=lambda p: _km(centre, p))[:3]
                 item["repairHint"] = ("Replace the stop farthest from the others on " + str(item["day"]) +
                                       " with a nearby place: " + ", ".join(f"{p['placeId']} ({p['name']})" for p in near)).strip()

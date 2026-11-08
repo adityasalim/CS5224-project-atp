@@ -270,6 +270,20 @@ m_pool["places"].append(both)
 plan = {"days": [{"date": "2026-12-04", "placeIds": ["senso", "lunch", "ueno", "both"]}]}
 A["_balance_meals"]({}, m_pool, plan)
 assert plan["days"][0]["placeIds"] == ["senso", "lunch", "ueno", "cand"], "the second meal moves to the other zone"
+# a place outside every kept zone (zone "") is hidden from the planner, so no meal swap or commute hint names it
+hidden = mk("hidden", "restaurant", offset(*UENO, 0.3, 0), "")
+h_pool = {"zones": m_pool["zones"], "places": [mk("senso", "temple", SENSO, "Z1"), mk("ueno", "park", UENO, "Z2"),
+                                               lunch_near, far_dinner, hidden]}
+plan = {"days": [{"date": "2026-12-05", "placeIds": ["senso", "lunch", "ueno", "dinner"]}]}
+A["_balance_meals"]({}, h_pool, plan)
+assert plan["days"][0]["placeIds"] == ["senso", "lunch", "ueno", "dinner"], plan
+h_pool["places"].append(cand)
+E = agent(["_enrich_violations"], {n: lambda *a, **k: 0 for n in ("_acceptance_violation_priority", "currency_code",
+                                                                  "known_price", "budget_amount", "trip_daily")})
+hint = E["_enrich_violations"]({}, h_pool, {"days": [{"date": "2026-12-05", "placeIds": ["senso", "ueno"]}]},
+                               {"violations": [{"check": "commute", "day": "2026-12-05", "message": "long ride"}]},
+                               [])[0]["repairHint"]
+assert "cand" in hint and "hidden" not in hint, hint
 assert A["_cafes_per_day"]({"preferences": {"food": {"perDay": 2}}}) == 2
 assert A["_cafes_per_day"]({"activities": ["two coffees daily"], "preferences": {"notes": "coffee lover"}}) == 0
 diag = A["_deterministic_quality_eval"](
