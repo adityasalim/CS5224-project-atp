@@ -82,3 +82,25 @@ for c in cut["cities"]:
 assert sum(len(c["zones"]) for c in cut["cities"]) < 18
 A.MAX_POOL_CHARS = saved
 print("ZONE MAP TRIM OK")
+
+# ---- a far pinned theme park is a day trip that the day-trip limit never cuts (chat changes rerun normalize_special)
+for limit, kept in (("none", []), ("1", ["Nara"])):
+    sights = [{"placeId": f"k{i}", "name": f"Temple {i}", "category": "temple", "rating": 4.6,
+               "lat": 35.01 + 0.002 * i, "lng": 135.77} for i in range(6)]
+    lat, lng = offset(35.01, 135.77, -30, -35)   # about 46 km away
+    park = {"placeId": "usj", "name": "Universal Studios Japan", "category": "requested", "requested": "Universal Studios Japan",
+            "lat": lat, "lng": lng}
+    spec_p = A.normalize_special({"destination": "Kyoto", "startDate": "2026-12-01", "endDate": "2026-12-06",
+                                  "pace": "moderate", "dayTrips": ["Nara", "Kobe"],
+                                  "preferences": {"days": {"dayTripLimit": limit}}})
+    assert [t["place"] for t in spec_p["dayTrips"]] == kept, spec_p["dayTrips"]
+    pool_p = {"places": sights + [park], "stays": [], "flights": []}
+    A.build_zones(spec_p, pool_p)
+    assert park.get("dayTrip") == "Universal Studios Japan" and spec_p["dayTrips"][-1]["park"] is True, spec_p["dayTrips"]
+    A.normalize_special(spec_p)
+    assert [t["place"] for t in spec_p["dayTrips"]] == kept + ["Universal Studios Japan"], (limit, spec_p["dayTrips"])
+    assert spec_p["dayTrips"][-1]["park"] is True and spec_p["dayTrips"][-1]["lat"] == lat
+# a listed trip without the park flag still counts toward the limit
+assert [t["place"] for t in A.normalize_special({"dayTrips": [{"place": "Nara", "park": "yes"}, "Kobe"],
+        "preferences": {"days": {"dayTripLimit": "1"}}})["dayTrips"]] == ["Nara"]
+print("PARK DAY TRIP LIMIT OK")

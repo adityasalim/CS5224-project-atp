@@ -908,9 +908,11 @@ def normalize_special(spec):
             dt = str(t.get("date") or "")
             trips.append({"place": place, "date": dt if re.fullmatch(r"\d{4}-\d{2}-\d{2}", dt) else "",
                           "fromCity": str(t.get("fromCity") or "").strip()[:40],
-                          **{k: t[k] for k in ("lat", "lng") if isinstance(t.get(k), (int, float))}})
+                          **{k: t[k] for k in ("lat", "lng") if isinstance(t.get(k), (int, float))},
+                          **({"park": True} if t.get("park") is True else {})})
     limit = {"none": 0, "1": 1, "2": 2}.get(((spec.get("preferences") or {}).get("days") or {}).get("dayTripLimit"), 4)
-    spec["dayTrips"] = trips[:limit]
+    # a far theme park made a day trip by build_zones is the traveler's pinned park, not one of their listed trips
+    spec["dayTrips"] = [t for t in trips if not t.get("park")][:limit] + [t for t in trips if t.get("park")]
     return spec
 
 
@@ -1594,7 +1596,7 @@ def _park_day_trip(spec, p, city):
     trip = next((t for t in trips if t.get("lat") is not None and _km(t, p) <= 15), None)
     if trip is None and len(trips) < 4:
         trip = {"place": str(p.get("name") or "theme park")[:40], "date": "",
-                "fromCity": city if is_multi(spec) else "", "lat": p["lat"], "lng": p["lng"]}
+                "fromCity": city if is_multi(spec) else "", "lat": p["lat"], "lng": p["lng"], "park": True}
         trips.append(trip)
     if trip:
         p["dayTrip"] = trip["place"]
