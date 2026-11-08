@@ -148,7 +148,7 @@ _DIET_NEED_RE = re.compile(
     r"seafood|shellfish|fish|nuts?|peanuts?|eggs?|soy|sesame|allerg\w*|intoleran\w*|celiac|coeliac)\b", re.I)
 
 # ---- search sizing (new) ------------------------------------------------------------------
-STOPS_PER_DAY = {"relaxed": 4, "moderate": 5, "packed": 7}   # same table as trip_spec_for_tools
+STOPS_PER_DAY = {"relaxed": 5, "moderate": 6, "packed": 8}   # same table as trip_spec_for_tools
 POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner needs
 MIN_PLACES_TARGET = 30
 MIN_STAYS_WANTED = 8
@@ -280,7 +280,7 @@ def trip_days(spec):
 def places_target(spec, days=None):
     """How many candidate places the pool should hold: 2.5 x (days x stops per day), at least 30."""
     days = days or trip_days(spec)
-    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 6)
     return max(MIN_PLACES_TARGET, -(-days * stops * POOL_FACTOR_X10 // 10))
 
 
@@ -315,7 +315,7 @@ def _clear_dietary_from_message(spec, message):
 def leg_places_target(spec, leg):
     """Candidate places wanted for one city of a multi-city trip: 2.5 x (nights x stops per day), at least 25."""
     nights = max(1, int(leg.get("nights") or 1))
-    stops = STOPS_PER_DAY.get(spec.get("pace"), 5)
+    stops = STOPS_PER_DAY.get(spec.get("pace"), 6)
     return max(25, -(-nights * stops * POOL_FACTOR_X10 // 10))
 
 
@@ -1054,7 +1054,7 @@ def leg_index(spec, dt):
 def trip_spec_for_tools(spec):
     p = spec.get("preferences") or {}
     # Daily cafe stops the traveler asks for come on top of the pace (planner rule), so the cap makes room for them
-    max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5) + int((p.get("food") or {}).get("perDay") or 0)
+    max_stops = {"relaxed": 5, "moderate": 6, "packed": 8}.get(spec.get("pace"), 6) + int((p.get("food") or {}).get("perDay") or 0)
     min_free = {"relaxed": 180, "moderate": 90, "packed": 0}.get(spec.get("pace"), 60)
     money_fields = ({'budget': trip_budget(spec), 'dailySpend': spec['dailySpend'], 'fxQuote': spec['_fx']}
                     if 'budget' in spec else {'budgetSGD': float(spec['budgetSGD'])})
@@ -2817,7 +2817,7 @@ def compact_pool(pool, spec=None):
     stays = [_c_stay(s_) for s_ in raw_stays]
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
-    floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
+    floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 6) * 15 // 10))   # never trim below 1.5x
     if zoned:   # distanceKm is from a search center, not useful once places are grouped in zones
         places = [{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec)]
     else:
@@ -2980,7 +2980,7 @@ def compact_pool_multi(spec, pool):
         leg_zones = [z for z in pool.get("zones") or [] if z["leg"] == i]
         places = ([{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec, leg=i)]
                   if leg_zones else [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)])
-        floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
+        floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 6) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
                        "checkOut": leg["checkOut"], "stays": stays, "places": places, **({"zones": []} if leg_zones else {})})
         views.append((leg_zones, raw))

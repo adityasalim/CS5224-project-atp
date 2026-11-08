@@ -256,6 +256,10 @@ sys.path.insert(0, str(REPO / "agent"))
 import prompts
 for pace, cap in A["STOPS_PER_DAY"].items():
     assert re.search(rf"{cap} \({pace}\)", prompts.ZONE_RULES), (pace, cap)
+# the pace numbers are sights; the cap adds lunch and dinner to the most sights
+for text in (prompts.PLANNER, prompts.PLANNER_MULTI, prompts.ZONE_RULES):
+    assert "relaxed 2-3, moderate 3-4, packed 5-6" in text
+assert A["STOPS_PER_DAY"] == {"relaxed": 3 + 2, "moderate": 4 + 2, "packed": 6 + 2}, A["STOPS_PER_DAY"]
 assert "{" not in prompts.ZONE_RULES and "rideMin" in prompts.ZONE_RULES
 
 # ---------------------------------------------------------------- meals and cafes

@@ -244,9 +244,9 @@ Zones (built by the system from walking and taxi times; they take precedence ove
   from it. When preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every
   full city day, from that day's zones. Dessert, tea and bakery stops also come from that day's zones. A zone with
   "food": 0 takes its meals from the day's other zone.
-- The sights of a full city day follow the pace (relaxed 1-2, moderate 2-3, packed 4-5) and come from its zones.
-  Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 4 (relaxed), 5 (moderate)
-  or 7 (packed) stops, plus preferences.food.perDay.
+- The sights of a full city day follow the pace (relaxed 2-3, moderate 3-4, packed 5-6) and come from its zones.
+  Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 5 (relaxed), 6 (moderate)
+  or 8 (packed) stops, plus preferences.food.perDay.
 """
 
 # POSITIONAL: tp_travel_agent._special_rules() splits this text on "\n- " and keeps the rule at index i only when
@@ -266,7 +266,7 @@ Rules:
 <<SCORES>>
 - Choose one flightOfferId and one stayId whose combined price fits the money left, balancing cost, comfort and preferences.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order. Never repeat a placeId.
-- Full-day sights by pace: relaxed 1-2, moderate 2-3, packed 4-5; lunch, dinner and requested cafes come on top. Give
+- Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
   days with a theme park, Mount Fuji or another major hike or outdoor excursion at most 1-2 other stops, all near it.
   Put a theme park on a full day, never an arrival, departure or moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
@@ -296,7 +296,7 @@ Rules:
   money left.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order, with that day's "city" (on moving days,
   the arrival city). Use ONLY placeIds belonging to that day's city. Never repeat a placeId.
-- Full-day sights by pace: relaxed 1-2, moderate 2-3, packed 4-5; lunch, dinner and requested cafes come on top. Give
+- Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
   days with a theme park, Mount Fuji or another major outdoor excursion at most 1-2 other stops, all near it. Put a
   theme park on a full day, never an arrival, departure or moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary

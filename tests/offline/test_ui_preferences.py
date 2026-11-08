@@ -31,8 +31,8 @@ assert "food" not in slim.get("preferences", {}) and "days" not in slim.get("pre
 
 # coffee stops per day come on top of the pace cap and search cafes; desserts and bakeries search desserts
 base = {"startDate": "2026-12-10", "endDate": "2026-12-12", "pax": 2, "budgetSGD": 3000, "pace": "moderate"}
-assert A.trip_spec_for_tools(base)["hardConstraints"]["maxStopsPerDay"] == 5
-assert A.trip_spec_for_tools({**base, "preferences": {"food": {"perDay": 2}}})["hardConstraints"]["maxStopsPerDay"] == 7
+assert A.trip_spec_for_tools(base)["hardConstraints"]["maxStopsPerDay"] == 6
+assert A.trip_spec_for_tools({**base, "preferences": {"food": {"perDay": 2}}})["hardConstraints"]["maxStopsPerDay"] == 8
 assert A.trip_spec_for_tools(base)["hardConstraints"]["maxRideMinutes"] == 30
 assert A.trip_spec_for_tools({**base, "preferences": {"days": {"rideMaxMin": 45}}})["hardConstraints"]["maxRideMinutes"] == 45
 assert {"cafe", "dessert"} <= set(A.preference_search_categories({"preferences": {"food": {"tea": True, "bakery": True}}}))
