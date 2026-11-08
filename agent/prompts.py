@@ -96,7 +96,7 @@ Rules:
 - mustInclude: SPECIFIC named places, restaurants, shows or sights they want ("teamLab Planets", "dinner at Ichiran
   Shibuya", "Fushimi Inari at sunrise"), as [{{"name": "teamLab Planets", "city": ""}}] (city only for multi-city
   trips). Generic wishes ("a sushi dinner") go in interests/activities instead.
-- pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (6-7). "some free time" means relaxed.
+- pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (5-6). "some free time" means relaxed.
 - packageMode: compare by default; custom_only when the traveller asks to skip agency packages; packages_only when they prefer agency packages. Never force an unsuitable package.
 - flightType: "round" when the traveller returns to their origin, including an open-jaw
   return from the last destination; "oneway" when the trip ends at the last destination.
