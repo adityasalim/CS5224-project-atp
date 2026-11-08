@@ -291,7 +291,7 @@ PLANNER_MULTI = """ROLE: itinerary planner for a MULTI-CITY trip. Use ONLY IDs f
 Rules:
 <<SCORES>>
 - Choose one international flightOfferId, one stayId per city, and one transferId per hop (take the transfer marked
-  recommended, the fastest door to door, unless the traveller's transfer preference or the budget rules it out; never
+  recommended, the fastest door to door, unless the traveler's transfer preference or the budget rules it out; never
   a flight when a ground option is recommended and under 4 hours; avoid overnight) whose total combined cost fits the
   money left.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order, with that day's "city" (on moving days,
