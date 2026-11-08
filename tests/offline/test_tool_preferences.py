@@ -177,13 +177,13 @@ assert w["category"] == "cafe" and "requested by user" not in w["tags"] and w.ge
 n = fp.lambda_handler({"city": "Kyoto", "names": ["teamLab Planets"], "namesCategory": "bar"}, None)["places"][0]
 assert n["category"] == "requested" and "requested by user" in n["tags"], n
 
-# the PDF footer credits Google Maps for ratings
+# the PDF footer credits Google Maps only when a stop came from Google (mock places here; see test_ui_preferences)
 import fakes
 pdf_text = []
 fakes.FPDF.multi_cell = lambda self, w, h, text="", **k: pdf_text.append(text)
 pdf_event = json.load(open(fakes.REPO / "lambdas" / "test-events" / "tp-render-pdf.json"))
 assert load("tp-render-pdf").lambda_handler(pdf_event, None)["ok"]
-assert any("Ratings from Google Maps" in t for t in pdf_text)
+assert pdf_text and not any("Google Maps" in t for t in pdf_text)
 del fakes.FPDF.multi_cell
 print("TOOL PREFERENCES OK")
 

@@ -41,6 +41,7 @@ def _err(code, message, **extra):
     return {"ok": False, "error": code, "message": message, "source": "render-pdf", **extra}
 
 
+_FOOD = {"restaurant", "cafe", "dessert", "street_food", "market"}   # the agent's food categories
 _FAMILY = "Helvetica"   # switched to "TPSans" by _setup_fonts() when the Unicode fonts are present
 _SANS = {"": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf", "I": "DejaVuSans-Oblique.ttf",
          "BI": "DejaVuSans-BoldOblique.ttf"}
@@ -232,20 +233,40 @@ def build_pdf(event, pool, daily_spend):
         if not stops and not t:
             pdf.set_font(_FAMILY, "", 10)
             pdf.cell(0, 6, "Free day", new_x="LMARGIN", new_y="NEXT")
+        zone = None
         for s in stops:
             p = pool.get(s.get("placeId"), {})
             name = p.get("name") or s.get("name") or s.get("placeId")
             when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
             travel = s.get("travelMinutesFromPrev")
+            extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
+            if s.get("zoneLabel") and s.get("zone") != zone:   # zone header, with the ride from the previous zone
+                pdf.set_font(_FAMILY, "B", 10)
+                pdf.set_text_color(*accent)
+                pdf.cell(0, 6, _t(s["zoneLabel"] + (f"  ({extra} from the previous area)" if zone and extra else "")),
+                         new_x="LMARGIN", new_y="NEXT")
+                zone = s["zone"]
             pdf.set_font(_FAMILY, "", 10)
             pdf.set_text_color(110, 110, 110)
             pdf.cell(26, 6, _t(when))
             pdf.set_text_color(30, 90, 170)
-            link = p.get("url") or p.get("mapsUrl")
+            link = s.get("googleMapsUri") or p.get("url") or p.get("mapsUrl")
             pdf.cell(110, 6, _t(name), link=link or "")
             pdf.set_text_color(110, 110, 110)
-            extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
             pdf.cell(0, 6, _t(extra), align="R", new_x="LMARGIN", new_y="NEXT")
+            rating, reviews = s.get("rating", p.get("rating")), s.get("reviews", p.get("reviews"))
+            chips = [f"rated {rating}" + (f" ({reviews:,} reviews)" if isinstance(reviews, int) else "") if rating else "",
+                     s.get("priceLevel") or "", s.get("why") or "",
+                     f'Featured by {s["webSource"]}' if s.get("webSource") else ""]
+            if any(chips) and (p.get("category") in _FOOD or "rating" in s or "why" in s):   # food and coffee stops only
+                pdf.set_font(_FAMILY, "", 8.5)
+                pdf.cell(26, 4.5, "")
+                pdf.cell(0, 4.5, _t("  |  ".join(c for c in chips if c)), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(30, 30, 30)
+        if d.get("routeUrl"):
+            pdf.set_font(_FAMILY, "", 9)
+            pdf.set_text_color(30, 90, 170)
+            pdf.cell(0, 5.5, _t("Day route in Google Maps"), link=d["routeUrl"], new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
         pdf.ln(2)
 
@@ -259,8 +280,10 @@ def build_pdf(event, pool, daily_spend):
     pdf.ln(3)
     pdf.set_font(_FAMILY, "I", 8.5)
     pdf.set_text_color(120, 120, 120)
+    google = any(str(s.get("placeId", "")).startswith("gplace:") for d in it.get("days") or [] for s in d.get("stops") or [])
     pdf.multi_cell(0, 4.5, _t(f"Generated {datetime.utcnow():%d %b %Y %H:%M} UTC. Place data may include "
-                              f"OpenStreetMap contributors' data. Ratings from Google Maps. Check opening hours before you go."),
+                              f"OpenStreetMap contributors' data.{' Ratings and hours from Google Maps.' if google else ''} "
+                              f"Check opening hours before you go."),
                    new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output()), round(total, 2)
 

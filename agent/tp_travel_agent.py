@@ -34,6 +34,7 @@ import time
 import traceback
 import uuid
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import quote, urlparse
 
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
@@ -3871,8 +3872,55 @@ def _web_selected_flight(spec, seq, pool):
     }
 
 
+WEB_PUBLISHERS = {"guide.michelin.com": "the MICHELIN Guide", "theworlds50best.com": "The World's 50 Best",
+                  "theworlds100bestcoffeeshops.com": "The World's 100 Best Coffee Shops",
+                  "europeancoffeetrip.com": "European Coffee Trip", "award.tabelog.com": "the Tabelog Award",
+                  "timeout.com": "Time Out", "eater.com": "Eater", "sprudge.com": "Sprudge"}
+_PRICE_SIGNS = {"PRICE_LEVEL_INEXPENSIVE": "$", "PRICE_LEVEL_MODERATE": "$$", "PRICE_LEVEL_EXPENSIVE": "$$$",
+                "PRICE_LEVEL_VERY_EXPENSIVE": "$$$$"}
+GOOGLE_ATTRIBUTION = "Ratings and hours from Google Maps"
+
+
+def _stop_display(p, spec, zones):
+    """What the plan card and the PDF show for one stop besides its name and time: its zone, a Google Maps link and,
+    for food and coffee stops, rating, review count, price level, why it was picked and the guide that featured it."""
+    lat, lng = p.get("lat"), p.get("lng")
+    out = {"googleMapsUri": (p.get("url") if str(p.get("placeId", "")).startswith("gplace:") else None)
+           or (f"https://www.google.com/maps/search/?api=1&query={quote(str(p.get('name') or ''))}%20{lat},{lng}"
+               if lat is not None and lng is not None else None)}
+    zone = zones.get(p.get("zone") or "")
+    if zone and zone.get("label"):
+        out.update(zone=zone["id"], zoneLabel=zone["label"])
+    if not _is_food_place(p):
+        return out
+    food, text = (spec.get("preferences") or {}).get("food") or {}, " ".join(
+        str(p.get(k) or "") for k in ("name", "cuisine", "activity")).lower()
+    why = [c for c in spec.get("cuisines") or [] if c.lower() in text][:1]
+    why += [p["activity"]] if p.get("activity") and p["activity"].lower() not in " ".join(why).lower() else []
+    why += {"cafe": ["specialty coffee"] if food.get("coffee") else ["matcha and tea"] if food.get("tea") else [],
+            "dessert": ["desserts"] if food.get("dessert") else ["bakeries"] if food.get("bakery") else []
+            }.get(p.get("category"), [])
+    diets = {d.replace("_", "-") for d in (spec.get("preferences") or {}).get("dietary") or []}
+    why += [t for t in p.get("tags") or [] if t.split(" ")[0] in diets][:1]
+    host = re.sub(r"^www\.", "", urlparse(str(p.get("webSource") or "")).netloc.lower())
+    out.update(rating=p.get("rating"), reviews=p.get("reviews"), priceLevel=_PRICE_SIGNS.get(p.get("priceLevel")),
+               why=", ".join(dict.fromkeys(why[:3])) or None,
+               webSource=next((v for k, v in WEB_PUBLISHERS.items() if host == k or host.endswith("." + k)), None))
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def _day_route_url(d, names, stays):
+    """Google Maps directions from that night's hotel through the day's stops, in order."""
+    hotel = next((st for st in stays if st.get("city") and st.get("city") == d.get("city")), stays[0] if stays else {})
+    pts = [f"{x['lat']},{x['lng']}" for x in [hotel] + [names.get(s["placeId"], {}) for s in d["stops"]]
+           if x.get("lat") is not None and x.get("lng") is not None]
+    return "https://www.google.com/maps/dir/" + "/".join(pts) if len(pts) >= 2 else None
+
+
 def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id, rounds, version=1):
     names = {p["placeId"]: p for p in pool["places"]}
+    zones = {z["id"]: z for z in pool.get("zones") or []}
+    stays = _stays_of(seq, pool)
     days = []
     for i, d in enumerate(seq["days"]):
         dt = date.fromisoformat(d["date"])
@@ -3898,8 +3946,10 @@ def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id,
             p = names.get(s["placeId"], {})
             note = f"{s['travelMinutesFromPrev']} min {s.get('travelBy', '')}".strip() if s.get("travelMinutesFromPrev") else ""
             stops.append({"time": s.get("arriveAt", ""), "name": p.get("name", s["placeId"]), "note": note,
-                          "url": p.get("url") or p.get("mapsUrl")})
-        days.append({"title": title, "stops": stops, "note": story["dayNotes"].get(d["date"], "")})
+                          "url": p.get("url") or p.get("mapsUrl"), **_stop_display(p, spec, zones)})
+        route = _day_route_url(d, names, stays)
+        days.append({"title": title, "stops": stops, "note": story["dayNotes"].get(d["date"], ""),
+                     **({"routeUrl": route} if route else {})})
     totals = (verify_res or {}).get("totals", {})
     return {"tripId": trip_id, "title": story["title"], "summary": story["summary"],
             "currency": currency_code(spec),
@@ -3910,6 +3960,8 @@ def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id,
                       "status": "evaluated" if _is_valid_judge_result(judge_res) else "unavailable",
                       "passed": _judge_scores_pass(judge_res)},
             "repairRounds": rounds, "version": version, "route": _route_text(spec),
+            **({"attribution": GOOGLE_ATTRIBUTION} if any(str(s.get("placeId", "")).startswith("gplace:")
+                                                         for d in seq["days"] for s in d["stops"]) else {}),
             "hotels": [{"city": st.get("city"), "name": st.get("name"), "booked": bool(st.get("booked"))}
                        for st in _stays_of(seq, pool)]}
 
@@ -4417,9 +4469,13 @@ def deliver(state, best, usage, metrics, user_id, t0):
     state.setdefault("tripId", f"trip_{datetime.now(timezone.utc):%Y%m%d%H%M%S}_{uuid.uuid4().hex[:6]}")
     trip_id, version = state["tripId"], state["version"]
     yield ev("status", "Creating your PDF…")
+    names, zones, stays = {p["placeId"]: p for p in pool["places"]}, {z["id"]: z for z in pool.get("zones") or []}, _stays_of(seq, pool)
+    pdf_days = [{**d, "routeUrl": _day_route_url(d, names, stays),
+                 "stops": [{**s, **_stop_display(names.get(s["placeId"], {}), spec, zones)} for s in d["stops"]]}
+                for d in seq["days"]]
     pdf = gw.call("render_pdf", {"tripId": trip_id, "version": version, "title": story["title"],
-                                 "tripSpec": trip_spec_for_tools(spec), "itinerary": seq, "narrative": story,
-                                 "caveats": caveats})
+                                 "tripSpec": trip_spec_for_tools(spec), "itinerary": {**seq, "days": pdf_days},
+                                 "narrative": story, "caveats": caveats})
     if not pdf.get("ok"):
         print("render_pdf failed:", pdf)
         pdf = None
