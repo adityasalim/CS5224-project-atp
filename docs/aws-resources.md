@@ -25,7 +25,10 @@ Fill in the blanks once, so teammates can find everything. None of these values 
 ## Google Places quota
 
 Food and coffee come from Places API (New). One plan makes about 16 to 18 requests (one Nearby Search per scheduled
-zone, one "specialty coffee" Text Search per city), capped at 20. In Google Cloud console, set the daily request
-quota for Places API (New) to the plans you expect per day times 20 (for example 1,000 for 50 plans), add a billing
-budget alert on the project, and restrict the API key to Places API (New). When the quota runs out, food quietly falls
+zone, one "specialty coffee" Text Search per city), and the web-pick name lookups use what is left of a hard cap of
+20. The field mask (rating, review count, price level, opening hours, website) bills every request at the Enterprise
+tier, USD 35 per 1,000 after 1,000 free requests a month for each of Nearby Search and Text Search, so a plan costs
+about USD 0.60 to 0.70. In Google Cloud console, set the daily request quota for Places API (New) to the plans you
+expect per day times 20 (for example 1,000 for 50 plans, which can cost about USD 35 a day once the free requests are
+used), add a billing budget alert on the project with that cost in mind, and restrict the API key to Places API (New). When the quota runs out, food quietly falls
 back to the other providers, so a plan shows fewer rated food stops without an error.
