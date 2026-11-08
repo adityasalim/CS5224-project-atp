@@ -113,6 +113,7 @@ def verify(spec, it, pool, daily_spend):
     hc = spec.get("hardConstraints") or {}
     max_stops = int(hc.get("maxStopsPerDay", 6))
     min_free = int(hc.get("minFreeMinutesPerDay", 0))
+    ride_cap = int(hc.get("maxRideMinutes") or MAX_RIDE_MIN)
     day_start, day_end = _hm(spec.get("dayStart", "09:00")), _hm(spec.get("dayEnd", "21:00"))
     n_days = (end - start).days + 1
     days = it.get("days") or []
@@ -426,10 +427,10 @@ def verify(spec, it, pool, daily_spend):
 
         if stops and not trip_min:
             if (travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN or rides > MAX_RIDES_PER_DAY
-                    or max_ride > MAX_RIDE_MIN):
+                    or max_ride > ride_cap):
                 rep.warn("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
                                     f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN}), {rides} taxi rides between stops "
-                                    f"(limit {MAX_RIDES_PER_DAY}), longest ride {max_ride} min (limit {MAX_RIDE_MIN})",
+                                    f"(limit {MAX_RIDES_PER_DAY}), longest ride {max_ride} min (limit {ride_cap})",
                          "Replace the stop farthest from the others with a place near them, or move it to a day "
                          "in the same area.", day=dt)
         free = (day_end - day_start) - busy

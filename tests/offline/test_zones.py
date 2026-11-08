@@ -48,7 +48,7 @@ def agent(roots, stubs=None):
 
 
 A = agent(["build_zones", "_zone_view", "_zone_places", "_balance_meals", "_cafes_per_day", "_day_trip_for",
-           "_deterministic_quality_eval", "STOPS_PER_DAY", "normalize_prefs"])
+           "_deterministic_quality_eval", "STOPS_PER_DAY", "normalize_prefs", "_ride_max"])
 build_zones, zone_view, zone_places = A["build_zones"], A["_zone_view"], A["_zone_places"]
 km = A["_km"]
 
@@ -314,6 +314,16 @@ res = vf.verify({"startDate": "2026-12-01", "endDate": "2026-12-03", "pax": 1, "
                 {"flightOfferId": "fl", "stayId": "stay", "days": [{"date": "2026-12-02", "stops": stops}]}, v_pool, 100)
 ride = [w for w in res["warnings"] if w["check"] == "commute"]
 assert ride and "2 taxi rides between stops" in ride[0]["message"] and "longest ride 40 min" in ride[0]["message"], res["warnings"]
+# the traveler's longest ride between areas (form: 15, 30 or 45 min) sets the ride limit and the zone pairs shown
+one = stops[:3]
+v_spec = {"startDate": "2026-12-01", "endDate": "2026-12-03", "pax": 1, "budgetSGD": 5000}
+commute = lambda hc: [w for w in vf.verify({**v_spec, "hardConstraints": hc}, {"flightOfferId": "fl", "stayId": "stay",
+                      "days": [{"date": "2026-12-02", "stops": one}]}, v_pool, 100)["warnings"] if w["check"] == "commute"]
+assert commute({}) and "(limit 30)" in commute({})[0]["message"] and not commute({"maxRideMinutes": 45}), commute({})
+assert A["_ride_max"]({}) == 30 and A["_ride_max"]({"preferences": {"days": {"rideMaxMin": 15}}}) == 15
+r_zones = [{"id": f"R{i}", "leg": 0, "kind": "walk", "label": "", "sights": [], "lat": 35.68 + 0.04 * i, "lng": 139.76}
+           for i in range(3)]   # 4.4 km apart: about 22 min by taxi, 8.9 km: about 39 min
+assert [sorted(zone_view(r_zones, [], [], m)[0]["rideMin"]) for m in (15, 30, 45)] == [["R1"], ["R1"], ["R1", "R2"]]
 
 # ---------------------------------------------------------------- find_places zone mode
 os.environ["MOCK_MODE"] = "false"

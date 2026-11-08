@@ -1058,7 +1058,8 @@ def trip_spec_for_tools(spec):
     return {"startDate": spec["startDate"], "endDate": spec["endDate"], "pax": spec["pax"],
             **money_fields, "dayStart": p.get("dayStart") or "09:00",
             "dayEnd": p.get("dayEnd") or "21:00",
-            "hardConstraints": {"maxStopsPerDay": max_stops, "minFreeMinutesPerDay": min_free},
+            "hardConstraints": {"maxStopsPerDay": max_stops, "minFreeMinutesPerDay": min_free,
+                                "maxRideMinutes": _ride_max(spec)},
             "mustVisit": [x["placeId"] for x in spec.get("pinned") or [] if x.get("placeId")]}
 
 
@@ -1763,9 +1764,14 @@ def _zone_places(pool, spec, leg=None):
     return sorted(places, key=lambda p: (order[p["zone"]], _is_food_place(p), rank[p["placeId"]]))
 
 
-def _zone_view(zones, stays, places):
+def _ride_max(spec):
+    """The longest ride between zones: the traveler's choice (15, 30 or 45 min), else RIDE_MAX_MIN."""
+    return int(((spec.get("preferences") or {}).get("days") or {}).get("rideMaxMin") or RIDE_MAX_MIN)
+
+
+def _zone_view(zones, stays, places, ride_max=RIDE_MAX_MIN):
     """The zone map the planner sees: kind, label, sights and meal places, taxi minutes to the other zones of the
-    city (those of RIDE_MAX_MIN or less, else the nearest one) and from the first 4 stays shown."""
+    city (those of ride_max or less, else the nearest one) and from the first 4 stays shown."""
     out = []
     for z in zones:
         v = {"id": z["id"], "kind": z["kind"], "label": z["label"], "sights": len(z["sights"]),
@@ -1775,7 +1781,7 @@ def _zone_view(zones, stays, places):
         else:
             rides = sorted((_ride_min(z, o), o["id"]) for o in zones
                            if o is not z and o["leg"] == z["leg"] and o["kind"] != "daytrip")
-            v["rideMin"] = {i: m for m, i in [x for x in rides if x[0] <= RIDE_MAX_MIN] or rides[:1]}
+            v["rideMin"] = {i: m for m, i in [x for x in rides if x[0] <= ride_max] or rides[:1]}
             v["hotelMin"] = {s_["stayId"]: _ride_min(z, s_) for s_ in stays[:4] if s_.get("lat") is not None}
         out.append(v)
     return out
@@ -2778,7 +2784,7 @@ def compact_pool(pool, spec=None):
         places = [{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec)]
     else:
         places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
-    zones = _zone_view(pool["zones"], raw_stays, pool["places"]) if zoned else None
+    zones = _zone_view(pool["zones"], raw_stays, pool["places"], _ride_max(spec)) if zoned else None
 
     def dump():
         return json.dumps({"flights": flights, "stays": stays, "places": places, **({"zones": zones} if zones else {})},
@@ -2937,7 +2943,7 @@ def compact_pool_multi(spec, pool):
         floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
                        "checkOut": leg["checkOut"], "stays": stays, "places": places,
-                       **({"zones": _zone_view(leg_zones, raw, leg_places)} if leg_zones else {})})
+                       **({"zones": _zone_view(leg_zones, raw, leg_places, _ride_max(spec))} if leg_zones else {})})
     hops = []
     for i, (a, b) in enumerate(zip(spec["legs"], spec["legs"][1:])):
         hops.append({"from": a["city"], "to": b["city"], "date": a["checkOut"], "options": [

@@ -230,9 +230,9 @@ ZONE_RULES = """
 Zones (built by the system from walking and taxi times; they take precedence over older zone rules):
 - Every place has a "zone". The places of one zone lie within about 1.2 km of its center, so they are a walk apart.
   "zones" lists each zone's "kind" (walk, solo, park or daytrip), "label", how many "sights" and "food" places
-  (restaurants) it has, "rideMin" (estimated taxi minutes to the other zones of the same city, only pairs of at most
-  30 minutes, or the single nearest zone when none is that close) and "hotelMin" (estimated minutes from the first
-  listed stays).
+  (restaurants) it has, "rideMin" (estimated taxi minutes to the other zones of the same city, only pairs within the
+  traveler's longest ride, or the single nearest zone when none is that close) and "hotelMin" (estimated minutes
+  from the first listed stays).
 - A full city day uses one or two zones: a morning zone, then one ride (a pair listed in rideMin) to an afternoon
   zone. Prefer zones within 30 minutes of the chosen stay (hotelMin). Use a zone on a second day only if it still
   has unused sights.
