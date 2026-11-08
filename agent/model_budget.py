@@ -184,10 +184,16 @@ class BudgetReservation:
         self.ledger,self.identifier,self.quote,self.maximum=ledger,identifier,quote,maximum
 
     def settle(self,row):
-        estimate,basis=self.quote.estimate(row)
+        quote=self.quote
+        served=row.get('responseModelId')
+        # an Anthropic refusal re-run on a fallback model bills at that model's rates (other providers echo aliases)
+        if quote.provider=='anthropic' and served and served!=quote.model_id:
+            quote=self.ledger.quotes.get((quote.provider,served))
+        estimate,basis=quote.estimate(row) if quote else (None,'no verified quote for fallback model '+served)
+        quote=quote or self.quote
         if row.get('requestStarted') is False:estimate,basis=Decimal(0),'provider request never started'
         row.update(estimatedPaidTierCostUSD=str(estimate) if estimate is not None else None,
-                   costEstimateBasis=basis,pricingSource=self.quote.source,pricingVerifiedOn=self.quote.verified_on,
+                   costEstimateBasis=basis,pricingSource=quote.source,pricingVerifiedOn=quote.verified_on,
                    budgetReservationUSD=str(self.maximum),budgetReservationId=self.identifier)
         self.ledger.store.put_record(row)
         def finish(state):

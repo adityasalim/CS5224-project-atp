@@ -165,7 +165,7 @@ class ModelAdapter:
                           for r in b.content if getattr(r,'type',None)=='web_search_result']
                 usage=result.usage
                 row.update(inputTokens=usage.input_tokens,outputTokens=usage.output_tokens,cacheReadTokens=usage.cache_read_input_tokens or 0,
-                           cacheWriteTokens=usage.cache_creation_input_tokens or 0,finishReason=result.stop_reason,responseModelId=result.model,
+                           cacheWriteTokens=usage.cache_creation_input_tokens or 0,finishReason=result.stop_reason,responseModelId=result.model,fallbackUsed=result.model!=selected.model_id,
                            webSearchRequests=getattr(getattr(usage,'server_tool_use',None),'web_search_requests',None),
                            transport='anthropic.beta.messages.stream' if opus else 'anthropic.messages.stream')
             else:

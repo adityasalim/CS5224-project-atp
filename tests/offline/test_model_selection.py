@@ -387,6 +387,12 @@ assert sq.source.startswith("https://platform.claude.com/")
 truncated = ModelAdapter(ad_c.configuration, clients={"anthropic": FakeAnthropic("", "max_tokens")},
                          budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t3", system="s", messages=MSG)
 assert truncated["stopReason"] == "max_tokens" and truncated["_adapter"]["emptyBecauseTruncated"]
+# a refusal re-run on a fallback model is marked, and that model has a verified quote so the ledger prices it at its rates
+assert [r["fallbackUsed"] for r in ad_c.records if r["role"] == "planner"] == [False]
+fb = FakeAnthropic('{"ok": true}'); fb.messages.stream.reply.model = "claude-opus-4-8"
+ModelAdapter(ad_c.configuration, clients={"anthropic": fb}, budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t4", system="s", messages=MSG)
+assert SETTLED[-1]["fallbackUsed"] is True and SETTLED[-1]["responseModelId"] == "claude-opus-4-8"
+assert {("anthropic", "claude-opus-5"), ("anthropic", "claude-opus-4-8")} <= set(QUOTES)
 
 # optional web picks: Haiku with web search names venues; a pool match gets webSource, the rest are looked up by name, unpinned
 class FakeGw:
@@ -548,7 +554,7 @@ class MemStore:
 store = MemStore()
 ledger = BudgetLedger(store, cap_usd="50", provider_caps={"anthropic": "50"}, enforce_spending_caps=True,
                       quotes=[PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"]])
-web = FakeAnthropic('{"picks": []}')
+web = FakeAnthropic('{"picks": []}'); web.messages.stream.reply.model = "claude-haiku-5-5"
 web.messages.stream.reply.usage = SimpleNamespace(input_tokens=120000, output_tokens=2500, cache_read_input_tokens=0,
                                                   cache_creation_input_tokens=0, server_tool_use=SimpleNamespace(web_search_requests=3))
 ModelAdapter(ad_c.configuration, clients={"anthropic": web}, budget_authorizer=ledger.authorize, record_sink=ledger.record).generate(
