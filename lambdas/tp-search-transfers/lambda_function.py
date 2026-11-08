@@ -94,9 +94,12 @@ RAIL = {  # country (ISO 3166 alpha-2): (km/h, base, rate per rail km, currency,
     # (https://6abc.com/post/what-know-amtraks-new-high-speed-nextgen-acela-train/17671294/)
     "US": (160, 0, 0.37, "USD", "US mid-range advance fare, indicative"),
 }
-# A hop between two of these countries takes the lower v and the higher base and rate of the two rows (in SGD).
-# CH is not EU but is on the mainland rail network; GB to the continent keeps the generic estimate.
+# A hop between two of these countries averages the two rows' v, base and rate (in SGD), with v at most XB_MAX_KMH
+# because border lines are rarely full high-speed (Paris-Amsterdam 217 min against Eurostar's 3h18, Paris-Zurich
+# 243 against TGV Lyria's 4h04). CH is not EU but is on the mainland rail network; GB to the continent keeps the
+# generic estimate.
 RAIL_EU = {"FR", "ES", "IT", "DE", "NL", "AT", "SE", "CH"}
+XB_MAX_KMH = 160
 
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671, "JP"), "kyoto": (35.0116, 135.7681, "JP"), "osaka": (34.6937, 135.5023, "JP"),
                 "singapore": (1.2903, 103.8520, "SG"), "seoul": (37.5665, 126.9780, "KR"), "bangkok": (13.7563, 100.5018, "TH"),
@@ -246,9 +249,9 @@ def _rail(q):
     p = RAIL.get(q.get("cc"))
     if not p and q.get("ccPair"):
         r1, r2 = (RAIL[c] for c in q["ccPair"])
-        p = (min(r1[0], r2[0]), max(r1[1] * FX_TO_SGD[r1[3]], r2[1] * FX_TO_SGD[r2[3]]),
-             max(r1[2] * FX_TO_SGD[r1[3]], r2[2] * FX_TO_SGD[r2[3]]), "SGD",
-             "-".join(q["ccPair"]) + " cross-border, slower speed and higher fare of the two country rows")
+        p = (min(XB_MAX_KMH, (r1[0] + r2[0]) / 2), (r1[1] * FX_TO_SGD[r1[3]] + r2[1] * FX_TO_SGD[r2[3]]) / 2,
+             (r1[2] * FX_TO_SGD[r1[3]] + r2[2] * FX_TO_SGD[r2[3]]) / 2, "SGD",
+             "-".join(q["ccPair"]) + f" cross-border, average of the two country rows (at most {XB_MAX_KMH} km/h)")
     if not p:
         return None
     v, base, rate, cur, basis = p

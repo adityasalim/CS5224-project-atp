@@ -103,12 +103,14 @@ try:
     assert by["flight"]["recommended"] and by["flight"]["doorToDoorMinutes"] == 150 + 185
     print("LONDON-ROME OK", {m: o["doorToDoorMinutes"] for m, o in by.items()})
 
-    # two mainland-EU countries: the slower train (NL 75 km/h, not FR 295) and the higher fare (NL EUR 0.27/km)
+    # two mainland-EU countries: the average of FR 295 and NL 75 km/h, capped at 160, and the average fare per km
     q, _ = t._validate(hop({"city": "Paris"}, {"city": "Amsterdam"}))
     g, rail_km = t._ground(q), q["km"] * 1.25
     assert q["cc"] is None and q["ccPair"] == ["FR", "NL"], q
-    assert g["durationMinutes"] == round(15 + rail_km / 75 * 60) and g["doorToDoorMinutes"] == g["durationMinutes"] + 50, g
-    assert abs(g["priceTotalSGD"] - 0.27 * 1.45 * rail_km) < 0.01 and g["estimateBasis"].startswith("FR-NL cross-border"), g
+    assert g["durationMinutes"] == round(15 + rail_km / 160 * 60) and g["doorToDoorMinutes"] == g["durationMinutes"] + 50, g
+    assert 200 <= g["durationMinutes"] <= 230, g   # Eurostar's fastest Paris-Amsterdam is 3h18
+    assert abs(g["priceTotalSGD"] - (0.073 + 0.27) / 2 * 1.45 * rail_km) < 0.01, g
+    assert g["estimateBasis"].startswith("FR-NL cross-border"), g
     print("PARIS-AMSTERDAM OK", g["durationMinutes"], "min", round(per_adult(g, "EUR"), 2), "EUR pp")
 
     # BE has no row: Paris -> Brussels keeps the generic estimate
