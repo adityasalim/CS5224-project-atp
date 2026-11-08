@@ -35,7 +35,7 @@ import re
 import time
 import traceback
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote, urlparse
 
@@ -1872,6 +1872,7 @@ def gather_specials(spec, pool, calls, sources, only=None):
 
 WEB_PICK_DOMAINS = ["guide.michelin.com", "theworlds50best.com", "theworlds100bestcoffeeshops.com", "award.tabelog.com",
                     "europeancoffeetrip.com", "timeout.com", "eater.com", "sprudge.com"]
+WEB_PICK_WAIT_SECONDS = 90   # web picks are optional: the plan never waits longer than this for them
 WEB_PICK_PROMPT = ("Search the web for the best-reviewed specialty coffee shops (pour-over, roasters) and restaurants in {city}"
                    " that match: {wish}. Return JSON only: {{\"picks\": [{{\"name\": \"...\", \"kind\": \"cafe\" or \"restaurant\","
                    " \"source\": \"<url of the page that names it>\"}}]}} with at most 8 picks, each named on a page you found.")
@@ -1903,20 +1904,33 @@ def web_food_picks(spec, pool, usage, calls, sources):
         likes.append(food["coffeeStyle"].replace("_", "-") + " coffee")
     wish = "; ".join(x for x in [", ".join(spec.get("cuisines") or []), ", ".join(likes),
                                  ", ".join(spec.get("activities") or []), notes] if x)
-    for i, city in enumerate([l["city"] for l in spec["legs"]] if is_multi(spec) else [spec["destination"]]):
-        yield ev("status", f"Checking food guides for {city}…")
-        was_exhausted = adapter.quota_exhausted
+    cities = [l["city"] for l in spec["legs"]] if is_multi(spec) else [spec["destination"]]
+    yield ev("status", f"Checking food guides for {', '.join(cities)}…")
+    was_exhausted = adapter.quota_exhausted
+
+    def ask(city):
         try:
             resp = converse(EXECUTOR_MODEL, "You find real venues with web search and answer in JSON.",
                             [{"role": "user", "content": [{"text": WEB_PICK_PROMPT.format(city=city, wish=wish or "any")}]}], usage,
                             max_tokens=3000, model_role="executor",
                             tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "allowed_domains": WEB_PICK_DOMAINS}])
             # a pick whose source is not on an allowed publisher is dropped before it reaches the pool, prompts or UI
-            picks = [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8]
-                     if isinstance(p_, dict) and p_.get("name") and _web_source(p_.get("source"))]
+            return [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8]
+                    if isinstance(p_, dict) and p_.get("name") and _web_source(p_.get("source"))]
         except Exception as e:  # noqa: BLE001  (web picks are optional; the plan goes on without them)
             print("web picks failed:", type(e).__name__, e)
             adapter.quota_exhausted = was_exhausted   # a rate limit in this optional step must not stop the planner
+            return None
+    # the cities run in parallel; a call slower than WEB_PICK_WAIT_SECONDS finishes in the background and is dropped
+    ex = ThreadPoolExecutor(max_workers=len(cities))
+    futures = [ex.submit(ask, c) for c in cities]
+    wait(futures, timeout=WEB_PICK_WAIT_SECONDS)
+    ex.shutdown(wait=False)
+    for i, (city, f) in enumerate(zip(cities, futures)):
+        picks = f.result() if f.done() else None
+        if picks is None:
+            if not f.done():
+                print("web picks skipped:", city, f"no answer within {WEB_PICK_WAIT_SECONDS} s")
             continue
         by_name = {str(p_.get("name", "")).lower(): p_ for p_ in pool["places"]}
         missing = [p_ for p_ in picks if str(p_["name"]).lower() not in by_name]

@@ -465,6 +465,45 @@ assert not ad_c.quota_exhausted and gw.calls == []
 claude.messages.stream = saved_stream
 A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner")
 
+# the per-city web calls run in parallel (the barrier only opens when both are in flight), and the plan waits at most
+# WEB_PICK_WAIT_SECONDS: a slower call is dropped and adds nothing to the pool
+import threading, time
+class CityStream:
+    def __init__(s, gate=None, delay=0): s.gate, s.delay = gate, delay
+    def __call__(s, **kw):
+        s.city = "Tokyo" if "in Tokyo" in kw["messages"][0]["content"][0]["text"] else "Kyoto"
+        return s
+    def __enter__(s): return s
+    def __exit__(s, *a): return False
+    def get_final_message(s):
+        if s.gate: s.gate.wait()
+        time.sleep(s.delay)
+        name = {"Tokyo": "Kurasu Kyoto Station", "Kyoto": "Gion Karyo"}[s.city]
+        text = json.dumps({"picks": [{"name": name, "kind": "cafe" if s.city == "Tokyo" else "restaurant",
+                                      "source": "https://sprudge.com/" + s.city}]})
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason="end_turn", model="claude-haiku-5-5",
+                               usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
+                                                     cache_creation_input_tokens=0, server_tool_use=None))
+gate = threading.Barrier(2, timeout=10)
+claude.messages.stream = lambda **kw: CityStream(gate)(**kw)
+gw.calls.clear()
+two_city = {"legs": [{"city": "Tokyo"}, {"city": "Kyoto"}]}
+pool = {"places": []}
+events = list(A.web_food_picks(two_city, pool, uc, [], set()))
+assert events == [A.ev("status", "Checking food guides for Tokyo, Kyoto…")], events
+assert sorted((p["placeId"], p["leg"]) for p in pool["places"]) == [("gplace:karyo", 1), ("gplace:kurasu", 0)], pool
+saved_wait, A.WEB_PICK_WAIT_SECONDS = A.WEB_PICK_WAIT_SECONDS, 0.3
+claude.messages.stream = lambda **kw: CityStream(delay=0 if "in Tokyo" in kw["messages"][0]["content"][0]["text"] else 2)(**kw)
+gw.calls.clear()
+pool, t0 = {"places": []}, time.monotonic()
+list(A.web_food_picks(two_city, pool, uc, [], set()))
+assert time.monotonic() - t0 < 1.5 and [p["placeId"] for p in pool["places"]] == ["gplace:kurasu"], pool
+assert gw.calls == [{"city": "Tokyo", "names": ["Kurasu Kyoto Station"], "namesCategory": "cafe"}], gw.calls
+time.sleep(2)   # let the dropped Kyoto call finish before the next test reuses the fake
+A.WEB_PICK_WAIT_SECONDS = saved_wait
+claude.messages.stream = saved_stream
+assert not ad_c.quota_exhausted
+
 # the ledger reserves room for search results: a web-search call billed at 120,000 input tokens does not halt it
 from model_budget import BudgetLedger, PriceQuote
 class MemStore:
