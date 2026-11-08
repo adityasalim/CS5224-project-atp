@@ -27,19 +27,22 @@ Streams JSON events, one per line:
 Environment variables: see README.md (GATEWAY_*, *_MODEL_ID, TRIPS_TABLE, ITINERARIES_TABLE, ...).
 """
 import base64
+import copy
 import json
+import math
 import os
 import re
 import time
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
 
 from gateway_client import Gateway, GatewayError
-from prompts import get_prompt
+from prompts import get_prompt, ZONE_RULES
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
 from package_recommendations import recommend as recommend_packages, MODES as PACKAGE_MODES
@@ -149,7 +152,7 @@ POOL_FACTOR_X10 = 25          # candidate pool = 2.5 x the stops the planner nee
 MIN_PLACES_TARGET = 30
 MIN_STAYS_WANTED = 8
 
-MEAL_MAX_KM = 2.5               # a meal stop further than this from the day's other stops is swapped for a closer one
+MEAL_MAX_KM = 1.2               # a meal further than this from every sightseeing stop of its day is swapped (zone radius)
 MEAL_SWAP_SCORE_SLACK = 6.0     # a replacement may score at most this much lower than the meal it replaces
 _MEAL_WINDOWS = {"cafe": [(10 * 60, 17 * 60)], "dessert": [(10 * 60, 17 * 60)]}
 _DEFAULT_MEAL_WINDOWS = [(12 * 60, 14 * 60), (18 * 60, 20 * 60)]     # lunch or dinner
@@ -174,10 +177,11 @@ def _meal_hours_ok(c, original):
 
 
 def _balance_meals(spec, pool, plan):
-    """For every normal day, swap a restaurant/cafe/dessert stop that is far from the day's sightseeing stops for
+    """For every normal day, swap a restaurant/cafe/dessert stop that is far from every sightseeing stop of the day for
     the nearest unused candidate of the same category that is still a good replacement: same city, compatible
     with dietary, accessibility and avoid needs, the same cuisine and vibe, no loss of known opening hours, and a
-    preference score close to the original. Pinned, requested and day-trip places are never swapped. Changes
+    preference score close to the original. On a two-zone day whose two meals are in one zone, the second meal moves
+    to the other zone. Pinned, requested and day-trip places are never swapped. Changes
     plan["days"] in place; returns the list of swaps (empty when nothing changed, so calling it twice is harmless)."""
     byid = {p["placeId"]: p for p in pool.get("places", [])}
     used = {pid for d in plan.get("days", []) for pid in (d.get("placeIds") or [])}
@@ -219,23 +223,22 @@ def _balance_meals(spec, pool, plan):
         anchors = [byid[i] for i in ids if i in byid and not _is_food_place(byid[i]) and byid[i].get("lat") is not None]
         if not anchors:
             continue
-        centre = {"lat": sum(p["lat"] for p in anchors) / len(anchors),
-                  "lng": sum(p["lng"] for p in anchors) / len(anchors)}
+        gap = lambda c: min(_km(a, c) for a in anchors)   # km to the nearest sight of the day
         for idx, pid in enumerate(ids):
             p = byid.get(pid)
             if (not p or not _is_food_place(p) or pid in pinned or p.get("requested") or p.get("dayTrip")
-                    or p.get("lat") is None or _km(centre, p) <= MEAL_MAX_KM):
+                    or p.get("lat") is None or gap(p) <= MEAL_MAX_KM):
                 continue
             cands = sorted(
                 (c for c in pool.get("places", [])
                  if c["placeId"] not in used and c.get("category") == p.get("category") and _is_food_place(c)
                  and c.get("lat") is not None and not c.get("dayTrip")
                  and (not d.get("city") or c.get("city") == d.get("city"))),
-                key=lambda c: _km(centre, c))
-            limit_km = _km(centre, p) - 0.5          # only swap if the replacement is clearly closer
+                key=gap)
+            limit_km = gap(p) - 0.3                  # only swap if the replacement is clearly closer
             best = None
             for c in cands:
-                if _km(centre, c) >= limit_km:
+                if gap(c) >= limit_km:
                     break
                 if compatible(c, p):
                     best = c
@@ -245,6 +248,22 @@ def _balance_meals(spec, pool, plan):
                 used.discard(pid)
                 used.add(best["placeId"])
                 swaps.append({"date": d.get("date"), "from": pid, "to": best["placeId"]})
+        day_zones = list(dict.fromkeys(byid[i]["zone"] for i in ids if i in byid and byid[i].get("zone")
+                                       and not _is_food_place(byid[i])))
+        meals = [i for i in ids if i in byid and byid[i].get("category") in ("restaurant", "street_food")
+                 and i not in pinned and not byid[i].get("requested")]
+        if (pool.get("zones") and len(day_zones) == 2 and len(meals) == 2
+                and byid[meals[0]].get("zone") == byid[meals[1]].get("zone") in day_zones):
+            # two walkable zones: one meal in each, so the zone visited first holds lunch and the other dinner
+            p, target = byid[meals[1]], next(z for z in day_zones if z != byid[meals[0]]["zone"])
+            alt = next((c for c in sorted((c for c in pool["places"] if c.get("zone") == target
+                                           and c["placeId"] not in used and c.get("category") == p.get("category")),
+                                          key=lambda c: (-_place_score(c, spec), c["placeId"])) if compatible(c, p)), None)
+            if alt:
+                ids[ids.index(meals[1])] = alt["placeId"]
+                used.discard(meals[1])
+                used.add(alt["placeId"])
+                swaps.append({"date": d.get("date"), "from": meals[1], "to": alt["placeId"]})
         d["placeIds"] = ids
     if swaps:
         print(json.dumps({"stage": "balance-meals", "swaps": len(swaps)}))
@@ -1079,7 +1098,9 @@ def preference_search_categories(spec):
     # Cafes, coffee or desserts named anywhere in the wishes (cuisine chips, activities, notes) search those categories.
     wishes = json.dumps([spec.get("cuisines"), spec.get("activities"), (spec.get("preferences") or {}).get("notes")],
                         ensure_ascii=False).lower()
-    categories.update(c for c, w in (("cafe", r"caf|coffee"), ("dessert", r"dessert")) if re.search(w, wishes))
+    # Matcha and tea search tea houses with the cafes; bakeries and sweets search the dessert group.
+    categories.update(c for c, w in (("cafe", r"caf|coffee|matcha|\btea\b"),
+                                     ("dessert", r"dessert|bak(?:ery|eries)|pastr|sweets")) if re.search(w, wishes))
 
     return sorted(categories)
 
@@ -1324,10 +1345,11 @@ def gather(spec, usage, metrics):
               "departDate": spec["startDate"], "pax": spec["pax"]}
     if spec.get("flightType") != "oneway":
         flight["returnDate"] = spec["endDate"]
+    # Food comes per walkable zone (zone_food), so the city search asks for sights only and gets cached.
     cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
-                  | {"restaurant"})
-    keywords = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-                + list(spec.get("activities") or []))[:8]
+                  - ZONE_FOOD_CATS) or ["attraction"]
+    keywords = [k for k in ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
+                            + list(spec.get("activities") or [])) if not ZONE_FOOD_WORDS.search(str(k))][:8]
     name, booked, price = _hotel_wish(spec)
     hotel = {"city": spec["destination"], "checkIn": spec["startDate"],
              "checkOut": spec["endDate"], "guests": spec["pax"]}
@@ -1360,7 +1382,7 @@ def gather(spec, usage, metrics):
 
     # Relax-and-retry: too few candidates -> search once more without the soft filters and merge the results.
     for tool, args, field, key, id_key, wanted in [
-        ("find_places", place_args, "places", "places", "placeId", int(places_target(spec) * 0.6)),
+        ("find_places", place_args, "places", "places", "placeId", int(places_target(spec) * 0.4)),   # target counts food
         ("search_stays", hotel, "stays", "stays", "stayId", MIN_STAYS_WANTED),
     ]:
         if len(pool[key]) >= wanted:
@@ -1381,7 +1403,9 @@ def gather(spec, usage, metrics):
             relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
     yield from web_food_picks(spec, pool, usage, calls, sources)
-    counts = {k: len(v) for k, v in pool.items()}
+    build_zones(spec, pool)
+    yield from zone_food(spec, pool, calls, sources)
+    counts = {k: len(v) for k, v in pool.items() if k != "zones"}
     print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
                       "hotelFocus": focus if (focus and not area and not name) else None}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources),
@@ -1519,6 +1543,240 @@ def assign_zones(places, radius_km=ZONE_RADIUS_KM):
             c = {"lat": p["lat"], "lng": p["lng"], "zone": f"Z{len(centers) + 1}"}
             centers.append(c)
             p["zone"] = c["zone"]
+
+
+# ---- planner-guided walkable zones (built once per plan; the planner sees only zone members, see ZONE_RULES)
+ZONE_R_KM, ZONE_SPARSE_R_KM, ZONE_ATTACH_KM = 1.2, 1.6, 1.2   # 1.2 km seed radius: members <= 2.4 km apart, 42 min on foot
+ZONE_FOOD_KM, ZONE_FOOD_WIDE_KM, RIDE_MAX_MIN = 1.2, 2.0, 30
+ZONE_FOOD_WORKERS = int(os.environ.get("ZONE_FOOD_WORKERS", "6"))
+GOOGLE_FOOD_CAP = 20   # Google food requests per plan: one Nearby Search per zone plus one coffee Text Search per city
+ZONE_FOOD_CATS = {"restaurant", "cafe", "dessert"}
+ZONE_FOOD_WORDS = re.compile(r"caf|coffee|dessert|matcha|\btea\b|bak(?:ery|eries)|pastr", re.I)
+PARK_RE = re.compile(r"disney|universal studios|fuji-q", re.I)
+LONG_VISIT_CATS = {"museum", "zoo", "aquarium", "onsen", "theme_park"}
+
+
+def _ride_min(a, b):
+    """Taxi minutes, the same estimate as tp-sequence-day and tp-route-matrix, so zone rides match the itinerary."""
+    return math.ceil(_km(a, b) * 1.4 / 22 * 60 + 5)
+
+
+def _seed_clusters(sights, r, rank):
+    """The sight with the most unassigned neighbours within r seeds a zone of all of them; ties go to the better
+    rank, then the placeId, so input order never matters."""
+    left, out = list(sights), []
+    while left:
+        near = {p["placeId"]: [q for q in left if _km(p, q) <= r] for p in left}
+        seed = min(left, key=lambda p: (-len(near[p["placeId"]]), rank[p["placeId"]], p["placeId"]))
+        members = sorted(near[seed["placeId"]], key=lambda q: rank[q["placeId"]])
+        out.append((seed, members))
+        taken = {q["placeId"] for q in members}
+        left = [q for q in left if q["placeId"] not in taken]
+    return out
+
+
+def _park_day_trip(spec, p, city):
+    """A theme park far from the city is a day trip: it joins a day trip within 15 km (USJ joins an Osaka trip), else it
+    becomes one while fewer than 4 exist. Tags the park with dayTrip and returns True when it is a day trip."""
+    trips = spec.setdefault("dayTrips", [])
+    trip = next((t for t in trips if t.get("lat") is not None and _km(t, p) <= 15), None)
+    if trip is None and len(trips) < 4:
+        trip = {"place": str(p.get("name") or "theme park")[:40], "date": "",
+                "fromCity": city if is_multi(spec) else "", "lat": p["lat"], "lng": p["lng"]}
+        trips.append(trip)
+    if trip:
+        p["dayTrip"] = trip["place"]
+    return bool(trip)
+
+
+def build_zones(spec, pool):
+    """Walkable zones per city, stored in pool["zones"]. A place gets "zone": "<id>" when it belongs to a kept zone
+    and "" when it was considered and hidden. Pinned theme parks become park zones, or day trips when 25 km or more
+    from the city's sights; each day trip is one zone. On the first build of a city the top clamp(5 x nights, 10, 50)
+    sights are clustered at ZONE_R_KM (ZONE_SPARSE_R_KM when too few zones have 2 sights) and the best
+    2 x cityDays + 2 zones are kept, plus every zone with a pinned member. Other places join the nearest zone within
+    ZONE_ATTACH_KM; on later builds a farther sight becomes a solo zone. Returns the new zone ids; a second call on an
+    unchanged pool returns [] and changes nothing."""
+    zones = pool.setdefault("zones", [])
+    multi = is_multi(spec)
+    cities = [l["city"] for l in spec["legs"]] if multi else [spec["destination"]]
+    pinned = {x.get("placeId") for x in spec.get("pinned") or [] if isinstance(x, dict)}
+    is_pin = lambda q: bool(q.get("requested")) or q["placeId"] in pinned
+    food = lambda q: _is_food_place(q) and not is_pin(q)   # a pinned place is always a zone member
+    new = []
+
+    def add(kind, li, at, members, label, **extra):
+        z = {"id": f"Z{max([int(x['id'][1:]) for x in zones] + [0]) + 1}", "city": cities[li], "leg": li, "kind": kind,
+             "lat": round(at["lat"], 5), "lng": round(at["lng"], 5), "label": str(label or "")[:60],
+             "radiusKm": ZONE_R_KM, "sights": [m["placeId"] for m in members],
+             "score": round(sum(sorted((_place_score(m, spec) for m in members), reverse=True)[:3]), 1), **extra}
+        for m in members:
+            m["zone"] = z["id"]
+        zones.append(z)
+        new.append(z["id"])
+        return z
+
+    for li, city in enumerate(cities):
+        mine = [p for p in pool.get("places") or [] if (p.get("leg") or 0) == li
+                and p.get("lat") is not None and p.get("lng") is not None]
+        todo, made = sum("zone" not in p for p in mine), len(new)
+        focus = _sights_focus(spec, mine)
+        for p in mine:   # parks
+            if ("zone" not in p and not p.get("dayTrip") and is_pin(p) and not food(p)
+                    and (p.get("category") == "theme_park" or PARK_RE.search(str(p.get("name") or "")))):
+                if not (focus and _km(focus, p) >= DAY_TRIP_MIN_KM and _park_day_trip(spec, p, city)):
+                    add("park", li, p, [p], p.get("name"), radiusKm=0)
+        for t in spec.get("dayTrips") or []:
+            if (t.get("lat") is not None and (not multi or t.get("fromCity") == city)
+                    and not any(z["kind"] == "daytrip" and z["dayTrip"].lower() == t["place"].lower() for z in zones)):
+                add("daytrip", li, t, [], t["place"], dayTrip=t["place"], radiusKm=ZONE_FOOD_WIDE_KM)
+        r, n, k = None, 0, 0
+        if not any(z["leg"] == li and z["kind"] in ("walk", "solo") for z in zones):   # first build of this city
+            nights = int(spec["legs"][li].get("nights") or 1) if multi else trip_days(spec) - 1
+            city_days = max(1, nights - 1 - sum(z["leg"] == li and z["kind"] in ("park", "daytrip") for z in zones))
+            n, k = min(max(5 * nights, 10), 50), 2 * city_days + 2
+            cand = [p for p in mine if "zone" not in p and not p.get("dayTrip") and not food(p)]
+            ranked = _order_places(sorted(cand, key=lambda p: p["placeId"]), None, spec=spec)   # pinned keep input order
+            rank = {p["placeId"]: i for i, p in enumerate(ranked)}
+            top = [p for p in ranked if rank[p["placeId"]] < n or is_pin(p)]
+            r = ZONE_R_KM
+            groups = _seed_clusters(top, r, rank)
+            if sum(len(m) >= 2 for _, m in groups) < city_days + 1:
+                r = ZONE_SPARSE_R_KM
+                groups = _seed_clusters(top, r, rank)
+            keep = [(s_, m) for s_, m in groups if len(m) >= 2 or any(
+                is_pin(q) or rank[q["placeId"]] < 10 or q.get("category") in LONG_VISIT_CATS for q in m)]
+            keep.sort(key=lambda g: (-sum(sorted((_place_score(q, spec) for q in g[1]), reverse=True)[:3]),
+                                     g[0]["placeId"]))
+            kept = [g for i, g in enumerate(keep) if i < k or any(is_pin(q) for q in g[1])]
+            for s_, m in kept:
+                add("walk" if len(m) >= 2 else "solo", li, s_, m, f"near {s_.get('name')}", radiusKm=r)
+            for p in cand:
+                p.setdefault("zone", "")
+            if not kept:   # no usable sight: one zone at the city's first stay, so the city still gets food
+                stay = next((s_ for s_ in pool.get("stays") or [] if (s_.get("leg") or 0) == li
+                             and s_.get("lat") is not None), None)
+                if stay:
+                    add("walk", li, stay, [], f"near {stay.get('name')}")
+        walkable = [z for z in zones if z["leg"] == li and z["kind"] in ("walk", "solo")]
+        for p in mine:   # attach
+            if "zone" in p:
+                continue
+            if p.get("dayTrip"):
+                z = next((z for z in zones if z["kind"] == "daytrip"
+                          and z["dayTrip"].lower() == str(p["dayTrip"]).lower()), None)
+            else:
+                z = min(walkable, key=lambda z: (_km(z, p), z["id"]), default=None)
+                z = z if z and _km(z, p) <= ZONE_ATTACH_KM else None
+            if z:
+                p["zone"] = z["id"]
+                if not food(p):
+                    z["sights"].append(p["placeId"])
+            elif not food(p) and not p.get("dayTrip"):   # a later search result far from every zone
+                walkable.append(add("solo", li, p, [p], f"near {p.get('name')}"))
+            else:
+                p["zone"] = ""
+        if todo or len(new) > made:
+            print(json.dumps({"stage": "zones", "city": city, "n": n, "k": k, "radiusKm": r,
+                              "zones": sum(z["leg"] == li for z in zones),
+                              "hidden": sum(p.get("zone") == "" for p in mine)}))
+    return new
+
+
+def zone_food(spec, pool, calls, sources):
+    """Rated food for the zones with at most GOOGLE_FOOD_CAP Google requests: one "specialty coffee" Text Search per
+    city (when cafes are wished) and one combined Nearby Search per zone, none inside a theme park. The calls run on
+    ZONE_FOOD_WORKERS threads, each with its own copy of the warm Gateway (its own request id, the same token and
+    session). Results merge in zone order and the first zone to find a place keeps it, so the pool does not depend
+    on thread timing; the city-wide cafes then join the nearest zone within ZONE_ATTACH_KM."""
+    _, _, gw = _clients()
+    multi = is_multi(spec)
+    wished = [c for c in preference_search_categories(spec) if c in ZONE_FOOD_CATS]
+    jobs = []
+    for z in pool.get("zones") or []:
+        if z["kind"] == "park" or (z["kind"] == "daytrip" and PARK_RE.search(z["dayTrip"])):
+            continue   # no food search inside a theme park
+        cats = [c for c in wished if not (z["kind"] == "daytrip" and c == "dessert")]
+        jobs.append((z, with_prefs("find_places", spec, {
+            "lat": z["lat"], "lng": z["lng"], "categories": cats, "maxPerCategory": 4,
+            "foodRadiusKm": ZONE_FOOD_WIDE_KM if z["kind"] == "daytrip" else ZONE_FOOD_KM})))
+    coffee = []
+    for li in range(len(spec["legs"]) if multi else 1):
+        zs = [z for z in pool.get("zones") or [] if z["leg"] == li and z["kind"] in ("walk", "solo")]
+        if "cafe" in wished and zs:
+            c = {"lat": round(sum(z["lat"] for z in zs) / len(zs), 5), "lng": round(sum(z["lng"] for z in zs) / len(zs), 5)}
+            # wider than ZONE_FOOD_MAX_KM of tp-find-places, so it runs its one city-wide "specialty coffee" Text Search
+            reach = max(3.0, max(_km(c, z) for z in zs) + ZONE_ATTACH_KM)
+            args = with_prefs("find_places", spec, {**c, "categories": ["cafe"], "maxPerCategory": 20,
+                                                    "foodRadiusKm": round(reach, 1)})
+            coffee.append(({"leg": li}, {**args, "dietary": [], "cuisine": ""}))
+    jobs = coffee + jobs   # the city-wide coffee searches first, then the zones in order, up to the cap
+    skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
+    jobs = jobs[:GOOGLE_FOOD_CAP]
+    if not jobs:
+        return
+    yield ev("status", f"Finding rated food in {sum(1 for z, _ in jobs if 'id' in z)} walkable areas…")
+
+    def run(args):
+        try:
+            return copy.copy(gw).call("find_places", args)
+        except GatewayError as e:
+            return {"ok": False, "message": str(e)}
+    with ThreadPoolExecutor(max_workers=max(1, ZONE_FOOD_WORKERS)) as ex:
+        results = list(ex.map(run, [a for _, a in jobs]))
+    have = {p["placeId"] for p in pool["places"]}
+    found = 0
+    for (z, _), r in sorted(zip(jobs, results), key=lambda x: "id" not in x[0][0]):   # zones first, then coffee
+        calls.append("find_places")
+        if not r.get("ok"):
+            continue
+        sources.add(f"find_places:{r.get('source')}")
+        for p in r.get("places") or []:
+            if p["placeId"] in have:
+                continue
+            have.add(p["placeId"])
+            tag = {"zone": z["id"], **({"dayTrip": z["dayTrip"]} if z["kind"] == "daytrip" else {})} if "id" in z else {}
+            where = {"city": spec["legs"][z["leg"]]["city"], "leg": z["leg"]} if multi else {}
+            pool["places"].append({**p, **tag, **where})
+            found += 1
+    build_zones(spec, pool)   # the city-wide cafes join a zone or are hidden
+    print(json.dumps({"stage": "zone-food", "zones": len(pool["zones"]), "calls": len(jobs), "skippedOverCap": skipped,
+                      "found": found}))
+
+
+def _zone_places(pool, spec, leg=None):
+    """Places of kept zones (of one leg), in zone order, sights before food, then by rank."""
+    order = {z["id"]: i for i, z in enumerate(pool.get("zones") or []) if leg is None or z["leg"] == leg}
+    places = [p for p in pool["places"] if p.get("zone") in order]
+    rank = {p["placeId"]: i for i, p in enumerate(_order_places(places, None, spec=spec))}
+    return sorted(places, key=lambda p: (order[p["zone"]], _is_food_place(p), rank[p["placeId"]]))
+
+
+def _zone_view(zones, stays, places):
+    """The zone map the planner sees: kind, label, sights and meal places, taxi minutes to the other zones of the
+    city (those of RIDE_MAX_MIN or less, else the nearest one) and from the first 4 stays shown."""
+    out = []
+    for z in zones:
+        v = {"id": z["id"], "kind": z["kind"], "label": z["label"], "sights": len(z["sights"]),
+             "food": sum(p.get("zone") == z["id"] and p.get("category") in ("restaurant", "street_food") for p in places)}
+        if z["kind"] == "daytrip":
+            v["dayTrip"] = z["dayTrip"]
+        else:
+            rides = sorted((_ride_min(z, o), o["id"]) for o in zones
+                           if o is not z and o["leg"] == z["leg"] and o["kind"] != "daytrip")
+            v["rideMin"] = {i: m for m, i in [x for x in rides if x[0] <= RIDE_MAX_MIN] or rides[:1]}
+            v["hotelMin"] = {s_["stayId"]: _ride_min(z, s_) for s_ in stays[:4] if s_.get("lat") is not None}
+        out.append(v)
+    return out
+
+
+def _cafes_per_day(spec):
+    """Cafe stops per full day the traveller asked for ("two specialty pour-over coffees daily" -> 2), else 0."""
+    text = " ".join([str(x) for x in spec.get("activities") or []]
+                    + [str((spec.get("preferences") or {}).get("notes") or "")]).lower()
+    m = re.search(r"\b(one|two|three|[123])\b[\w\s-]{0,30}?\b(?:coffees?|caf[eé]s?)\b[\w\s-]{0,20}?"
+                  r"\b(?:a day|daily|per day|each day|every day)\b", text)
+    return ({"one": 1, "two": 2, "three": 3}.get(m.group(1)) or int(m.group(1))) if m else 0
           
 def gather_specials(spec, pool, calls, sources, only=None):
     """Code-driven lookups for things the traveller named: specific places (pinned, must be in the plan) and
@@ -1571,7 +1829,7 @@ def gather_specials(spec, pool, calls, sources, only=None):
                       - {"restaurant"})[:3] or ["attraction"]
         for t in spec["dayTrips"]:
             yield ev("status", f"Finding things to do on a day trip to {t['place']}…")
-            r = call({"city": t["place"], "categories": cats + ["restaurant"], "radiusKm": 5, "maxPerCategory": 4})
+            r = call({"city": t["place"], "categories": cats, "radiusKm": 5, "maxPerCategory": 4})   # food: zone_food
             if not r.get("ok") or not r.get("places"):
                 t["notFound"] = True
                 continue
@@ -2396,18 +2654,28 @@ def _spread_stays(ordered, n, cell_deg=0.015):
 
 
 def compact_pool(pool, spec=None):
-    assign_zones(pool.get("places") or [])
+    zoned = bool(pool.get("zones")) and spec is not None
+    if zoned:
+        build_zones(spec, pool)          # places found since the last build (chat searches) join a zone
+    else:
+        assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    stays = [_c_stay(s_) for s_ in _spread_stays(ordered_stays, 12)]
+    raw_stays = _spread_stays(ordered_stays, 12)
+    stays = [_c_stay(s_) for s_ in raw_stays]
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
     floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
-    places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
+    if zoned:   # distanceKm is from a search centre, not useful once places are grouped in zones
+        places = [{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec)]
+    else:
+        places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]
+    zones = _zone_view(pool["zones"], raw_stays, pool["places"]) if zoned else None
 
     def dump():
-        return json.dumps({"flights": flights, "stays": stays, "places": places}, separators=(",", ":"))
+        return json.dumps({"flights": flights, "stays": stays, "places": places, **({"zones": zones} if zones else {})},
+                          separators=(",", ":"))
     out = dump()
     if len(out) > MAX_POOL_CHARS:                           # first save space by dropping the short descriptions
         for p in places:
@@ -2453,12 +2721,11 @@ def gather_multi(spec, usage, metrics):
                                   "pax": pax})
     pool["flights"] = res.get("offers", []) if res.get("ok") else []
 
-    cats = sorted({
-        c for c in preference_search_categories(spec)
-        if c in PLACE_CATEGORIES
-    })
-    kws = ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
-           + list(spec.get("activities") or []))[:8]
+    # Food comes per walkable zone (zone_food), so the city searches ask for sights only and get cached.
+    cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
+                  - ZONE_FOOD_CATS) or ["attraction"]
+    kws = [k for k in ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
+                       + list(spec.get("activities") or [])) if not ZONE_FOOD_WORDS.search(str(k))][:8]
     leg_counts = []
     for i, leg in enumerate(legs):
         yield ev("status", f"Searching places and hotels in {leg['city']} ({leg['nights']} nights)…")
@@ -2483,7 +2750,7 @@ def gather_multi(spec, usage, metrics):
 
         # Relax-and-retry for this city when there are too few candidates.
         for tool, args, field, key, id_key, wanted in [
-            ("find_places", place_args, "places", "places", "placeId", int(leg_places_target(spec, leg) * 0.6)),
+            ("find_places", place_args, "places", "places", "placeId", int(leg_places_target(spec, leg) * 0.4)),
             ("search_stays", stay_args, "stays", "stays", "stayId", MIN_STAYS_WANTED),
         ]:
             if sum(1 for x in pool[key] if x.get("leg") == i) >= wanted:
@@ -2511,6 +2778,8 @@ def gather_multi(spec, usage, metrics):
             pool["transfers"].append({**o, "hop": i})
     yield from gather_specials(spec, pool, calls, sources)
     yield from web_food_picks(spec, pool, usage, calls, sources)
+    build_zones(spec, pool)
+    yield from zone_food(spec, pool, calls, sources)
     print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
                    poolCounts=leg_counts, relaxedSearches=relaxed)
@@ -2531,7 +2800,11 @@ def multi_pool_gaps(spec, pool):
 
 
 def compact_pool_multi(spec, pool):
-    assign_zones(pool.get("places") or [])
+    zoned = bool(pool.get("zones"))
+    if zoned:
+        build_zones(spec, pool)          # places found since the last build (chat searches) join a zone
+    else:
+        assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     cities = []
@@ -2548,12 +2821,16 @@ def compact_pool_multi(spec, pool):
         other_stays = sum(v for k, v in min_by_leg.items() if k != i) + min_transfers
         leg_stays = _order_stays([s_ for s_ in pool["stays"] if s_.get("leg") == i],
                                  spec=spec, flights=ordered_flights, other_cost=other_stays)
-        stays = [_c_stay(s_) for s_ in _spread_stays(leg_stays, 8)]
+        raw = _spread_stays(leg_stays, 8)
+        stays = [_c_stay(s_) for s_ in raw]
         leg_places = [p for p in pool["places"] if p.get("leg") == i]
-        places = [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)]
+        leg_zones = [z for z in pool.get("zones") or [] if z["leg"] == i]
+        places = ([{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec, leg=i)]
+                  if leg_zones else [_c_place(p) for p in _select_places(leg_places, leg_places_target(spec, leg), spec)])
         floors.append(max(6, -(-max(1, int(leg.get("nights") or 1)) * STOPS_PER_DAY.get(spec.get("pace"), 5) * 15 // 10)))
         cities.append({"city": leg["city"], "nights": leg["nights"], "checkIn": leg["checkIn"],
-                       "checkOut": leg["checkOut"], "stays": stays, "places": places})
+                       "checkOut": leg["checkOut"], "stays": stays, "places": places,
+                       **({"zones": _zone_view(leg_zones, raw, leg_places)} if leg_zones else {})})
     hops = []
     for i, (a, b) in enumerate(zip(spec["legs"], spec["legs"][1:])):
         hops.append({"from": a["city"], "to": b["city"], "date": a["checkOut"], "options": [
@@ -2593,9 +2870,10 @@ def planning_context(spec, pool):
     """Trip + candidate pool as one text block. It is identical for propose and every repair round of the same
     trip, so it is sent as a cached system block (see _request_parts) and paid for in full only once."""
     multi = is_multi(spec)
-    return get_prompt("POOL_CONTEXT_MULTI" if multi else "POOL_CONTEXT").format(
+    ctx = get_prompt("POOL_CONTEXT_MULTI" if multi else "POOL_CONTEXT").format(
         spec=_sj(spec), currency=currency_code(spec), daily=f"{trip_daily(spec, DAILY_SPEND):g}", bookable=_bookable(spec),
         pool=compact_pool_multi(spec, pool) if multi else compact_pool(pool, spec=spec))
+    return ctx + ZONE_RULES if pool.get("zones") else ctx
 
 
 def _special_rules(spec):
@@ -2628,7 +2906,7 @@ def _planning_guidance(spec, pool):
             top_s = feasible_stays[:2]
             s_txt = ", ".join(f"{s_['stayId']} ({curr} {p_:g}, {s_.get('starRating')}*)" for s_, p_ in top_s)
             notes.append(f"- Budget-feasible recommended stayIds (within {curr} {bookable} bookable): {s_txt}.")
-    ordered_p = _order_places(pool.get("places", []), 12, spec=spec)
+    ordered_p = _order_places([p for p in pool.get("places", []) if not pool.get("zones") or p.get("zone")], 12, spec=spec)
     if ordered_p:
         top_non_food = [p["placeId"] for p in ordered_p if str(p.get("category") or "").lower() not in _FOOD_CATS][:5]
         top_food = [p["placeId"] for p in ordered_p if str(p.get("category") or "").lower() in _FOOD_CATS and not _is_supermarket(p)][:4]
@@ -2688,6 +2966,7 @@ def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, 
         and not _is_supermarket(p)
         and (not city or not p.get("city") or str(p.get("city")).lower() == str(city).lower())
         and (predicate is None or predicate(p))
+        and (not pool.get("zones") or p.get("zone"))
     ]
     if near is not None:
         shortlist = cands[:max(limit * 6, 12)]
@@ -2937,6 +3216,26 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
             if alt_repls:
                 msg = f"Priority 6 [day {weakest_day}]: reduce repeated '{most_cat}' stops by swapping one for {', '.join(alt_repls)}."
                 issues.append({"priority": 6, "day": weakest_day, "status": "repetition", "message": msg})
+                suggestions.append(msg)
+
+    # 6. Zone day shape (priority 6, status "zones": steers a repair, never blocks delivery)
+    sp = spec or {}
+    edge = {sp.get("startDate"), sp.get("endDate")} | {l.get("checkIn") for l in (sp.get("legs") or [])[1:]}
+    want_cafes = _cafes_per_day(sp)
+    for d in days if pool.get("zones") else []:
+        st = [by_id[i] for i in ([s.get("placeId") for s in d.get("stops") or [] if isinstance(s, dict)]
+                                 or d.get("placeIds") or []) if i in by_id]
+        if not st or d.get("dayTrip") or d.get("date") in edge or any(PARK_RE.search(p.get("name") or "") for p in st):
+            continue
+        zs = sorted({p["zone"] for p in st if p.get("zone") and not _is_food_place(p)})
+        meals = sum(p.get("category") in ("restaurant", "street_food") for p in st)
+        cafes = sum(p.get("category") == "cafe" for p in st)
+        for bad, msg in ((len(zs) > 2, f"{d['date']} uses zones {', '.join(zs)}: keep the day to one or two zones "
+                                       f"joined by one ride listed in rideMin."),
+                         (meals < 2, f"{d['date']} needs a lunch and a dinner from that day's zones."),
+                         (cafes < want_cafes, f"{d['date']} needs {want_cafes} cafe stops from that day's zones.")):
+            if bad:
+                issues.append({"priority": 6, "day": d.get("date"), "status": "zones", "message": msg})
                 suggestions.append(msg)
 
     return {
