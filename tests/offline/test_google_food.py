@@ -97,6 +97,31 @@ w = fp.lambda_handler(ev2, None)
 assert w["source"].endswith("-cache") and [p["placeId"] for p in w["places"] if p["name"] == "Good Roaster"] == ["gplace:rst"], w["places"]
 fp._amazon_location = _amazon_location
 
+# a web pick (namesCategory) is verified on Google only, one Text Search per name, with the 4.0-star, 50-review and
+# open floor; a pinned name still tries Amazon Location first
+POSTS.clear()
+GOOD = {"id": "good", "displayName": {"text": "Good Roaster"}, "location": {"latitude": 35.0, "longitude": 135.76},
+        "rating": 4.7, "userRatingCount": 1200, "priceLevel": "PRICE_LEVEL_MODERATE", "businessStatus": "OPERATIONAL"}
+LOOKUP = {"Good Roaster": [GOOD], "New Cafe": [{**GOOD, "id": "thin", "rating": 5.0, "userRatingCount": 3}],
+          "Low Rated": [{**GOOD, "id": "low", "rating": 3.8}],
+          "Closed Bistro": [{**GOOD, "id": "shut", "businessStatus": "CLOSED_PERMANENTLY"}]}
+def by_name(url, headers=None, json=None, timeout=None):
+    POSTS.append({"mask": headers["X-Goog-FieldMask"], **json})
+    return Resp({"places": LOOKUP.get(json["textQuery"], [])})
+fp.requests.post = by_name
+GEO = []
+class Geo:
+    def geocode(s, **k): return {"ResultItems": [{"Position": [135.7681, 35.0116]}]}
+    def search_text(s, **k): GEO.append(k["QueryText"]); return {"ResultItems": []}
+saved_client, fp.boto3.client = fp.boto3.client, lambda name, **k: Geo()
+r = fp.lambda_handler({"city": "Kyoto", "names": list(LOOKUP), "namesCategory": "cafe"}, None)
+assert [p["placeId"] for p in r["places"]] == ["gplace:good"] and r["notFound"] == ["New Cafe", "Low Rated", "Closed Bistro"], r
+assert r["places"][0]["reviews"] == 1200 and r["places"][0]["priceLevel"] == "PRICE_LEVEL_MODERATE" and r["places"][0]["category"] == "cafe"
+assert len(POSTS) == 4 and all(p["maxResultCount"] == 1 and "places.userRatingCount" in p["mask"] for p in POSTS) and GEO == [], (POSTS, GEO)
+fp.lambda_handler({"city": "Kyoto", "names": ["Good Roaster"]}, None)
+assert GEO == ["Good Roaster"], GEO
+fp.boto3.client = saved_client
+
 fp._secret_cache = {}   # no key: food goes through the free chain as before
 SIGHTS.clear()
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)

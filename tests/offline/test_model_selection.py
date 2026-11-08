@@ -438,6 +438,16 @@ by = {p["placeId"]: p for p in pool["places"]}
 assert by["gplace:arabica"]["category"] == "cafe" and by["gplace:arabica"]["webSource"] == "https://sprudge.com/a"
 assert by["gplace:karyo"]["category"] == "restaurant" and not by["gplace:karyo"]["requested"]
 assert by["gplace:kurasu"] is pinned and pinned["requested"] == "Kurasu Kyoto" and pinned["tags"] == ["requested by user"]
+# each name is one Google request, so the lookups stop at what the zone food left of GOOGLE_FOOD_CAP
+gw.calls.clear()
+list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), google_left=2))
+assert [(c_["namesCategory"], c_["names"]) for c_ in gw.calls] == [("cafe", ["Arabica Kyoto Higashiyama", "Kurasu Kyoto Station"])], gw.calls
+gw.calls.clear()
+list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), google_left=0))
+assert gw.calls == []
+tree_src = (AGENT / "tp_travel_agent.py").read_text(encoding="utf-8")
+assert tree_src.count("used = yield from zone_food(spec, pool, calls, sources)\n"
+                      "    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)") == 2
 
 # a pick is kept only with an https source on one of the 8 allowed publishers; any other source drops the pick
 gw.calls.clear()

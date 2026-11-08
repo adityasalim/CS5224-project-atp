@@ -92,7 +92,7 @@
       },
       "namesCategory": {
         "type": "string",
-        "description": "Leave out for places the traveller named. 'cafe' or 'restaurant' looks the names up as ordinary candidates of that category instead: not marked requested and not required in the plan."
+        "description": "Leave out for places the traveler named. 'cafe' or 'restaurant' looks the names up on Google as ordinary candidates of that category instead: kept only when rated 4.0+ with 50+ reviews, not marked requested and not required in the plan."
       }
     },
     "required": []

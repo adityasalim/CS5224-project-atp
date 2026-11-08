@@ -709,10 +709,13 @@ NAMED_MAX_KM = 80   # a named place further than this from the city is probably 
 
 
 def _named(q, deadline):
-    """Look up places the user named. Returns (places, notFound). Amazon Location first, then Google."""
+    """Look up places the user named. Returns (places, notFound). Amazon Location first, then Google. Web-searched
+    venues (namesCategory) are ordinary cafes or restaurants, not pinned, and come from Google only, rated 4.0+ with
+    50+ reviews and open, so a pick never skips the floor the zone food has."""
     found, missing = [], []
     gkey = None
-    cat = q.get("namesCategory") or "requested"   # web-searched venues are ordinary cafes or restaurants, not pinned
+    cat = q.get("namesCategory") or "requested"
+    web = cat != "requested"
     for name in q.get("names", []):
         hit = None
         if _mock_mode():
@@ -721,7 +724,7 @@ def _named(q, deadline):
                          f"{name} (sample)", cat, q["lat"] + 0.006 * (i + 1), q["lng"] - 0.004 * (i + 1), q,
                          hours_raw="10:00-20:00", simple={"open": "10:00", "close": "20:00"}, fame_known=False,
                          description=f"Sample entry for the requested place {name}.")
-        if hit is None and deadline - time.time() > 3:
+        if hit is None and not web and deadline - time.time() > 3:
             try:
                 r = boto3.client("geo-places", config=_GEO_CFG).search_text(
                     QueryText=name, MaxResults=3, BiasPosition=[q["lng"], q["lat"]])
@@ -744,14 +747,22 @@ def _named(q, deadline):
                                                     "radius": 50000}}},
                         headers={"X-Goog-Api-Key": gkey, "Content-Type": "application/json",
                                  "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
-                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating"})
+                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating"
+                                                     + (",places.userRatingCount,places.priceLevel,places.businessStatus"
+                                                        if web else "")})
                     for gp in (r.json().get("places") or []) if r.status_code < 400 else []:
+                        if web and (gp.get("businessStatus", "OPERATIONAL") != "OPERATIONAL"
+                                    or (gp.get("rating") or 0) < GOOGLE_MIN_RATING
+                                    or (gp.get("userRatingCount") or 0) < GOOGLE_MIN_REVIEWS):
+                            continue
                         loc = gp.get("location", {})
                         if loc and _km(q["lat"], q["lng"], loc["latitude"], loc["longitude"]) <= NAMED_MAX_KM:
                             raw = "; ".join((gp.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
                             hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), cat,
                                          loc["latitude"], loc["longitude"], q, hours_raw=raw,
                                          url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False)
+                            if web:
+                                hit.update(reviews=gp.get("userRatingCount"), priceLevel=gp.get("priceLevel"))
                 except Exception as e:  # noqa: BLE001
                     print("named lookup (google) failed:", e)
         if hit:

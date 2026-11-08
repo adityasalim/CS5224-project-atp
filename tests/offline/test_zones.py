@@ -224,21 +224,27 @@ class FakeGateway:
 
 Z = agent(["zone_food"], stubs={"_clients": lambda: (None, None, FakeGateway()), "GatewayError": RuntimeError})
 z_spec, z_pool = copy.deepcopy(spec), copy.deepcopy(pool)
-list(Z["zone_food"](z_spec, z_pool, [], set()))
+def drain(gen):
+    while True:
+        try:
+            next(gen)
+        except StopIteration as stop:
+            return stop.value
+used = drain(Z["zone_food"](z_spec, z_pool, [], set()))
 nearby = [a for _, a in SENT if a["foodRadiusKm"] <= 2]
 city_coffee = [a for _, a in SENT if a["foodRadiusKm"] > 2]
 assert len(city_coffee) == 2 and all(a["categories"] == ["cafe"] and not a["dietary"] for a in city_coffee), city_coffee
 fed = {(round(a["lat"], 5), round(a["lng"], 5)) for a in nearby}
 assert all(((z["lat"], z["lng"]) in fed) == (z["kind"] in ("walk", "solo") or z.get("dayTrip") == "Kawaguchiko")
            for z in zones), "every zone but the parks gets one food search"
-assert len(SENT) == 17 and 16 <= len(SENT) <= 20, len(SENT)
+assert len(SENT) == 17 == used, (len(SENT), used)   # the web picks get the 3 requests left of the cap
 assert all(set(a["categories"]) == ({"restaurant", "cafe", "dessert"} if a["foodRadiusKm"] == 1.2 else {"restaurant", "cafe"})
            for a in nearby), "walk zones ask for every wished food kind, day trips skip desserts"
 assert all(p.get("zone") is not None for p in z_pool["places"]), "the city-wide cafes join a zone or are hidden"
 SENT.clear()
 big_spec, big_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 big_pool["zones"] = [dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(30)]
-list(Z["zone_food"](big_spec, big_pool, [], set()))
+assert drain(Z["zone_food"](big_spec, big_pool, [], set())) == 20 and drain(Z["zone_food"](spec, {"places": []}, [], set())) == 0
 assert len(SENT) == 20, f"hard cap of 20 Google requests per plan, sent {len(SENT)}"
 callers = {f.name for f in top.values() if isinstance(f, ast.FunctionDef)
            for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "zone_food"}

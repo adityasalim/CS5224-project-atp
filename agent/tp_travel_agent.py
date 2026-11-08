@@ -1417,9 +1417,10 @@ def gather(spec, usage, metrics):
             sources.add(f"{tool}:{result.get('source')}")
             relaxed.append(tool)
     yield from gather_specials(spec, pool, calls, sources)
-    yield from web_food_picks(spec, pool, usage, calls, sources)
     build_zones(spec, pool)
-    yield from zone_food(spec, pool, calls, sources)
+    used = yield from zone_food(spec, pool, calls, sources)
+    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)
+    build_zones(spec, pool)   # the web picks join a zone or are hidden
     counts = {k: len(v) for k, v in pool.items() if k != "zones"}
     print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
                       "hotelFocus": focus if (focus and not area and not name) else None}))
@@ -1700,7 +1701,8 @@ def build_zones(spec, pool):
 
 def zone_food(spec, pool, calls, sources):
     """Rated food for the zones with at most GOOGLE_FOOD_CAP Google requests: one "specialty coffee" Text Search per
-    city (when cafes are wished) and one combined Nearby Search per zone, none inside a theme park. The calls run on
+    city (when cafes are wished) and one combined Nearby Search per zone, none inside a theme park. Returns the number
+    of requests, so the web picks get only what is left of the cap. The calls run on
     ZONE_FOOD_WORKERS threads, each with its own copy of the warm Gateway (its own request id, the same token and
     session). Results merge in zone order and the first zone to find a place keeps it, so the pool does not depend
     on thread timing; the city-wide cafes then join the nearest zone within ZONE_ATTACH_KM."""
@@ -1729,7 +1731,7 @@ def zone_food(spec, pool, calls, sources):
     skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
     jobs = jobs[:GOOGLE_FOOD_CAP]
     if not jobs:
-        return
+        return 0
     yield ev("status", f"Finding rated food in {sum(1 for z, _ in jobs if 'id' in z)} walkable areas…")
 
     def run(args):
@@ -1757,6 +1759,7 @@ def zone_food(spec, pool, calls, sources):
     build_zones(spec, pool)   # the city-wide cafes join a zone or are hidden
     print(json.dumps({"stage": "zone-food", "zones": len(pool["zones"]), "calls": len(jobs), "skippedOverCap": skipped,
                       "found": found}))
+    return len(jobs)
 
 
 def _zone_places(pool, spec, leg=None):
@@ -1889,10 +1892,11 @@ def _web_source(url):
     return url if u.scheme == "https" and any(host == d or host.endswith("." + d) for d in WEB_PICK_DOMAINS) else None
 
 
-def web_food_picks(spec, pool, usage, calls, sources):
+def web_food_picks(spec, pool, usage, calls, sources, google_left=GOOGLE_FOOD_CAP):
     """Claude roles only: Haiku with web search names venues per city from editorial domains.
-    A pick that matches a pool place by name gets webSource; others are looked up by name and added as ordinary,
-    unpinned candidates. A pick that cannot be found is dropped, so no venue comes from model text alone."""
+    A pick that matches a pool place by name gets webSource; others are looked up by name on Google (one request per
+    name, at most google_left in all) and added as ordinary, unpinned candidates when rated 4.0+ with 50+ reviews.
+    A pick that cannot be found is dropped, so no venue comes from model text alone."""
     adapter = getattr(usage, "adapter", None)
     if adapter is None or adapter.configuration.selections["executor"].provider != "anthropic":
         return
@@ -1944,11 +1948,13 @@ def web_food_picks(spec, pool, usage, calls, sources):
             sought = {re.sub(r"[^\w\s&'.,()-]", "", str(p_["name"]))[:60].strip(): p_.get("source") for p_ in missing
                       if ("cafe" if p_.get("kind") == "cafe" else "restaurant") == kind}
             sought.pop("", None)
-            if not sought:
+            names = list(sought)[:min(6, google_left)]
+            if not names:
                 continue
+            google_left -= len(names)
             calls.append("find_places")
             try:
-                r = gw.call("find_places", {"city": city, "names": list(sought)[:6], "namesCategory": kind})
+                r = gw.call("find_places", {"city": city, "names": names, "namesCategory": kind})
             except GatewayError:
                 r = {"ok": False}
             found = [{**p_, "category": kind, "webSource": sought[p_["requested"]], "requested": None, "matches": [],
@@ -2915,9 +2921,10 @@ def gather_multi(spec, usage, metrics):
         for o in res.get("options", []) if res.get("ok") else []:
             pool["transfers"].append({**o, "hop": i})
     yield from gather_specials(spec, pool, calls, sources)
-    yield from web_food_picks(spec, pool, usage, calls, sources)
     build_zones(spec, pool)
-    yield from zone_food(spec, pool, calls, sources)
+    used = yield from zone_food(spec, pool, calls, sources)
+    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)
+    build_zones(spec, pool)   # the web picks join a zone or are hidden
     print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
                    poolCounts=leg_counts, relaxedSearches=relaxed)
