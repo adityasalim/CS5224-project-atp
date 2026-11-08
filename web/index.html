@@ -135,6 +135,20 @@
     font-size: 17px;
     margin: 0 0 16px;
   }
+  .trip-section > summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    cursor: pointer;
+    list-style: none;
+  }
+  .trip-section > summary::-webkit-details-marker { display: none; }
+  .trip-section > summary h3 { margin: 0; }
+  .trip-section > summary::after { content: "▾"; margin-left: auto; color: var(--muted); }
+  .trip-section[open] > summary { margin-bottom: 16px; }
+  .trip-section[open] > summary::after { content: "▴"; }
+  .trip-section-summary { font-size: 13px; color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
   .trip-field {
     display: flex;
     flex-direction: column;
