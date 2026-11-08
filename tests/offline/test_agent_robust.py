@@ -125,7 +125,10 @@ class Ctx:
 
 def run(prompt):
     its, msgs = [], []
-    for e in A.invoke({"prompt": prompt}, Ctx()):
+    events = list(A.invoke({"prompt": prompt}, Ctx()))
+    if events and events[-1].get("choices"):     # the one-time preference question: tap "Use defaults"
+        events += list(A.invoke({"prompt": "Use defaults"}, Ctx()))
+    for e in events:
         if e["type"] == "itinerary": its.append(e["itinerary"])
         elif e["type"] in ("message", "question", "error"): msgs.append((e["type"], e["message"]))
     print(">>>", prompt[:70]); [print("   ", t, "|", m[:160]) for t, m in msgs]

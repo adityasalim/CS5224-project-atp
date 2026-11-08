@@ -694,7 +694,7 @@ async function send() {
   let gotPlan = false, ok = true;
   const handle = (ev) => {
     if (ev.type === "status") work.step(ev.message);
-    else if (ev.type === "question" || ev.type === "message") add("bot", ev.message);
+    else if (ev.type === "question" || ev.type === "message") { add("bot", ev.message); if (ev.choices) showChips(ev.choices); }
     else if (ev.type === "itinerary") { add("itinerary", { ...ev.itinerary, receivedAt: Date.now() }); gotPlan = true; }
     else if (ev.type === "error") { add("error", ev.message); ok = false; }
   };

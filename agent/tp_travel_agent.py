@@ -845,7 +845,8 @@ def resolve_airport(place, usage=None):
 
 # ====================================================================== spec helpers
 _PREF_DEFAULTS = {"vibe": "balanced", "audience": "any", "sortBy": "price", "cabin": "economy", "prefer": "cheapest",
-                  "avoidOvernight": True}
+                  "avoidOvernight": True, "bags": "carry_on", "coffeeStyle": "either", "transport": "transit",
+                  "rideMaxMin": 30, "dayTripLimit": "listed"}
 _PRIVATE_KEYS = {"missing", "question", "_paceExplicit"}
 
 
@@ -888,7 +889,8 @@ def normalize_special(spec):
             trips.append({"place": place, "date": dt if re.fullmatch(r"\d{4}-\d{2}-\d{2}", dt) else "",
                           "fromCity": str(t.get("fromCity") or "").strip()[:40],
                           **{k: t[k] for k in ("lat", "lng") if isinstance(t.get(k), (int, float))}})
-    spec["dayTrips"] = trips[:4]
+    limit = {"none": 0, "1": 1, "2": 2}.get(((spec.get("preferences") or {}).get("days") or {}).get("dayTripLimit"), 4)
+    spec["dayTrips"] = trips[:limit]
     return spec
 
 
@@ -1028,10 +1030,8 @@ def leg_index(spec, dt):
 
 def trip_spec_for_tools(spec):
     p = spec.get("preferences") or {}
-    max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5)
-    # Daily cafe stops the traveller asks for come on top of the pace (planner rule), so the cap makes room for two
-    if re.search(r"caf|coffee", json.dumps([spec.get("activities"), p.get("notes")], ensure_ascii=False).lower()):
-        max_stops += 2
+    # Daily cafe stops the traveller asks for come on top of the pace (planner rule), so the cap makes room for them
+    max_stops = {"relaxed": 4, "moderate": 5, "packed": 7}.get(spec.get("pace"), 5) + int((p.get("food") or {}).get("perDay") or 0)
     min_free = {"relaxed": 180, "moderate": 90, "packed": 0}.get(spec.get("pace"), 60)
     money_fields = ({'budget': trip_budget(spec), 'dailySpend': spec['dailySpend'], 'fxQuote': spec['_fx']}
                     if 'budget' in spec else {'budgetSGD': float(spec['budgetSGD'])})
@@ -1076,10 +1076,11 @@ def preference_search_categories(spec):
             categories.update(options)
 
     categories.add("restaurant")
-    # Cafes, coffee or desserts named anywhere in the wishes (cuisine chips, activities, notes) search those categories.
-    wishes = json.dumps([spec.get("cuisines"), spec.get("activities"), (spec.get("preferences") or {}).get("notes")],
-                        ensure_ascii=False).lower()
-    categories.update(c for c, w in (("cafe", r"caf|coffee"), ("dessert", r"dessert")) if re.search(w, wishes))
+    food = (spec.get("preferences") or {}).get("food") or {}
+    if food.get("coffee") or food.get("tea") or food.get("perDay"):
+        categories.add("cafe")
+    if food.get("dessert") or food.get("bakery"):
+        categories.add("dessert")
 
     return sorted(categories)
 
@@ -1171,6 +1172,8 @@ def normalize_prefs(spec):
     hotel = p.get("hotel") if isinstance(p.get("hotel"), dict) else {}
     flight = p.get("flight") if isinstance(p.get("flight"), dict) else {}
     transfer = p.get("transfer") if isinstance(p.get("transfer"), dict) else {}
+    food = p.get("food") if isinstance(p.get("food"), dict) else {}
+    days = p.get("days") if isinstance(p.get("days"), dict) else {}
     num = lambda v, lo, hi: min(max(float(v), lo), hi) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
     stops = flight.get("maxStops")
     out = {
@@ -1185,7 +1188,7 @@ def normalize_prefs(spec):
                   "minReviewScore": num(hotel.get("minReviewScore"), 0, 10), "area": str(hotel.get("area") or "")[:60],
                   "sortBy": hotel.get("sortBy") if hotel.get("sortBy") in ("price", "rating", "value") else "price",
                   "name": str(hotel.get("name") or "").strip()[:80], "booked": bool(hotel.get("booked")),
-                  "chain": str(hotel.get("chain") or "").strip()[:40],
+                  "programs": [x[:40] for x in lst(hotel.get("programs"))][:4],
                   "bookedPriceSGD": num(hotel.get("bookedPriceSGD"), 0, 1e6)},
         "flight": {"maxStops": int(stops) if isinstance(stops, (int, float)) and not isinstance(stops, bool) else None,
                    "departAfter": hhmm(flight.get("departAfter")), "departBefore": hhmm(flight.get("departBefore")),
@@ -1193,12 +1196,21 @@ def normalize_prefs(spec):
                    "returnDepartBefore": hhmm(flight.get("returnDepartBefore")),
                    "preferredAirlines": lst(flight.get("preferredAirlines")),
                    "avoidAirlines": lst(flight.get("avoidAirlines")),
+                   "alliances": [a for a in ALLIANCES if a.lower() in {x.lower() for x in lst(flight.get("alliances"))}],
+                   "bags": "checked" if flight.get("bags") == "checked" else "carry_on",
                    "sortBy": flight.get("sortBy") if flight.get("sortBy") in ("price", "duration", "best") else "price",
                    "cabin": flight.get("cabin") if flight.get("cabin") in ("economy", "premium_economy", "business",
                                                                            "first") else "economy"},
         "transfer": {"prefer": transfer.get("prefer") if transfer.get("prefer") in ("cheapest", "fastest", "ground",
                                                                                     "flight") else "cheapest",
                      "avoidOvernight": transfer.get("avoidOvernight") is not False},
+        "food": {**{k: bool(food.get(k)) for k in ("coffee", "tea", "bakery", "dessert")},
+                 "perDay": int(num(food.get("perDay"), 0, 2)),
+                 "coffeeStyle": food.get("coffeeStyle") if food.get("coffeeStyle") in ("pour_over", "espresso") else "either",
+                 "priceLevel": int(num(food.get("priceLevel"), 0, 4))},
+        "days": {"transport": days.get("transport") if days.get("transport") in ("taxi", "car") else "transit",
+                 "rideMaxMin": days.get("rideMaxMin") if days.get("rideMaxMin") in (15, 45) else 30,
+                 "dayTripLimit": str(days.get("dayTripLimit")) if str(days.get("dayTripLimit")) in ("none", "1", "2") else "listed"},
         "notes": str(p.get("notes") or "")[:300],
     }
     out["avoid"] = list(dict.fromkeys(out["avoid"]))[:8]
@@ -1605,7 +1617,13 @@ def web_food_picks(spec, pool, usage, calls, sources):
         return
     _, _, gw = _clients()
     notes = (spec.get("preferences") or {}).get("notes")
-    wish = "; ".join(x for x in [", ".join(spec.get("cuisines") or []), ", ".join(spec.get("activities") or []), notes] if x)
+    food = (spec.get("preferences") or {}).get("food") or {}
+    likes = [w for k, w in (("coffee", "specialty coffee"), ("tea", "matcha and tea"), ("bakery", "bakeries"),
+                            ("dessert", "desserts")) if food.get(k)]
+    if food.get("coffeeStyle") in ("pour_over", "espresso"):
+        likes.append(food["coffeeStyle"].replace("_", "-") + " coffee")
+    wish = "; ".join(x for x in [", ".join(spec.get("cuisines") or []), ", ".join(likes),
+                                 ", ".join(spec.get("activities") or []), notes] if x)
     for i, city in enumerate([l["city"] for l in spec["legs"]] if is_multi(spec) else [spec["destination"]]):
         yield ev("status", f"Checking food guides for {city}…")
         was_exhausted = adapter.quota_exhausted
@@ -1683,7 +1701,7 @@ def _c_place(p, with_hours=True):
     item = {"id": p["placeId"], "name": p.get("name"), "category": p.get("category"), "distanceKm": p.get("distanceKm"), "rating": p.get("rating"), "lat": p.get("lat"), "lng": p.get("lng")}
     if p.get("zone"):
         item["zone"] = p["zone"]
-    for k in ("requested", "dayTrip", "reviews", "webSource"):
+    for k in ("requested", "dayTrip", "reviews", "priceLevel", "webSource"):
         if p.get(k):
             item[k] = p[k]
     if with_hours:
@@ -2156,6 +2174,34 @@ def _flight_total_stops(f):
     return None
 
 
+# Airline alliance members as flight offers name them (lower case, long and short forms). Sources, checked 2026-11-09:
+# https://www.staralliance.com/en/member-airlines (26 members; Asiana leaves on 16 Dec 2026),
+# https://www.oneworld.com/members (15) and https://www.skyteam.com/en/about/members (18; Aeroflot suspended).
+ALLIANCES = {
+    "Star Alliance": {"aegean", "aegean airlines", "air canada", "air china", "air india", "air new zealand", "ana",
+                      "all nippon airways", "asiana", "asiana airlines", "austrian", "austrian airlines", "avianca",
+                      "brussels airlines", "copa", "copa airlines", "croatia airlines", "egyptair", "ethiopian",
+                      "ethiopian airlines", "eva air", "ita", "ita airways", "lot", "lot polish airlines", "lufthansa",
+                      "shenzhen airlines", "singapore airlines", "south african airways", "swiss",
+                      "swiss international air lines", "tap air portugal", "thai", "thai airways", "turkish airlines",
+                      "united", "united airlines"},
+    "oneworld": {"alaska", "alaska airlines", "american", "american airlines", "british airways", "cathay pacific",
+                 "fiji airways", "finnair", "iberia", "japan airlines", "jal", "malaysia airlines", "oman air", "qantas",
+                 "qatar airways", "royal air maroc", "royal jordanian", "srilankan", "srilankan airlines"},
+    "SkyTeam": {"aerolineas argentinas", "aerolíneas argentinas", "aeromexico", "aeroméxico", "air europa", "air france",
+                "china airlines", "china eastern", "china eastern airlines", "delta", "delta air lines",
+                "garuda indonesia", "kenya airways", "klm", "korean air", "middle east airlines", "saudia", "sas",
+                "scandinavian airlines", "tarom", "vietnam airlines", "virgin atlantic", "xiamenair", "xiamen airlines"},
+}
+LOYALTY_MAX_PREMIUM = 1.25   # a loyalty match is preferred when it costs at most 25% more than the best option
+
+
+def _in_alliances(airline, alliances):
+    """True when one of the offer's airlines ("ANA / United") belongs to one of the alliances."""
+    names = {n.strip() for n in str(airline or "").lower().split("/")}
+    return any(names & ALLIANCES.get(a, set()) for a in alliances)
+
+
 def _order_flights(flights, spec=None):
     """Deterministic flight ranking considering airline/cabin/stops/timing preferences, price, duration and stops.
     Independent of original API order and never invents missing duration or timing values."""
@@ -2163,6 +2209,7 @@ def _order_flights(flights, spec=None):
         return []
     f_pref = ((spec or {}).get("preferences") or {}).get("flight") or {} if isinstance(spec, dict) else {}
     pref_airlines = {str(a).lower().strip() for a in (f_pref.get("preferredAirlines") or []) if str(a).strip()}
+    alliances = [a for a in (f_pref.get("alliances") or []) if a in ALLIANCES]
     avoid_airlines = {str(a).lower().strip() for a in (f_pref.get("avoidAirlines") or []) if str(a).strip()}
     req_cabin = str(f_pref.get("cabin") or "").lower().strip()
     max_stops = f_pref.get("maxStops")
@@ -2181,10 +2228,6 @@ def _order_flights(flights, spec=None):
         slices = f.get("slices") or []
 
         avoided = bool(avoid_airlines and airline_l and any(a in airline_l or airline_l in a for a in avoid_airlines))
-        pref_air = bool(pref_airlines and (
-            (airline_l and any(a in airline_l or airline_l in a for a in pref_airlines))
-            or any("airline" in m for m in matches)
-        ))
 
         cabin_ok = True
         cabin_match = False
@@ -2225,10 +2268,9 @@ def _order_flights(flights, spec=None):
                         timing_score += 1 if m_ret <= ret_before else -2
 
         pref_score = (
-            (3 if pref_air else 0)
-            + (2 if cabin_match else 0)
+            (2 if cabin_match else 0)
             + timing_score
-            + len(matches)
+            + len([m for m in matches if "airline" not in m])   # a preferred airline counts only through loyal()
             - (2 if f.get("filterNote") else 0)
         )
 
@@ -2260,7 +2302,7 @@ def _order_flights(flights, spec=None):
         )
 
     # Sort descending on all preference/metric criteria, with offerId ascending for deterministic tie-breaking
-    return sorted(
+    ordered = sorted(
         flights,
         key=lambda f: (
             flight_key(f)[:-1],
@@ -2269,11 +2311,58 @@ def _order_flights(flights, spec=None):
         ),
         reverse=True,
     )
+    if not (pref_airlines or alliances):
+        return ordered
+    best = next((f for f in ordered if flight_key(f)[:2] == (True, True) and known_price(f) is not None), None)
+    cap = known_price(best) * LOYALTY_MAX_PREMIUM if best else None
+    # stable sort: loyal offers within the 25% cap move up, the rest keep their order
+    return sorted(ordered, key=lambda f: flight_key(f)[:2] + (cap is not None and _loyal_flight(f, spec)
+                                                               and known_price(f) is not None and known_price(f) <= cap,),
+                  reverse=True)
+
+
+def _loyal_flight(f, spec):
+    """The offer is on an airline or alliance the traveller prefers."""
+    f_pref = (spec.get("preferences") or {}).get("flight") or {}
+    airline_l = str(f.get("airline") or "").lower().strip()
+    pref = {str(a).lower().strip() for a in f_pref.get("preferredAirlines") or [] if str(a).strip()}
+    return bool((pref and (airline_l and any(a in airline_l or airline_l in a for a in pref)
+                           or any("airline" in str(m).lower() for m in f.get("matches") or [])))
+                or _in_alliances(f.get("airline"), f_pref.get("alliances") or []))
 
 
 LOC_SCALE_KM = 8.0        # a hotel this far from the search centre gets no location credit
 LOC_WEIGHT = 12.0         # how many ranking points the nearest hotel earns (packed pace earns more)
 REVIEW_PRIOR = 50         # reviews needed before a hotel's own score outweighs the average
+
+
+# Brand names in a hotel's name that belong to each loyalty program (the programs' own brand lists).
+HOTEL_PROGRAM_BRANDS = {
+    "marriott bonvoy": ("marriott", "sheraton", "westin", "ritz-carlton", "st. regis", "w hotel", "le meridien",
+                        "le méridien", "renaissance", "courtyard", "aloft", "moxy", "four points", "autograph collection",
+                        "luxury collection", "edition", "fairfield", "element", "ac hotel", "tribute portfolio",
+                        "residence inn", "design hotels", "bulgari"),
+    "hilton honors": ("hilton", "conrad", "waldorf astoria", "doubletree", "hampton", "embassy suites", "canopy",
+                      "curio", "tapestry", "homewood", "home2", "motto", "tempo", "lxr", "signia", "spark", "tru by"),
+    "ihg one rewards": ("intercontinental", "kimpton", "crowne plaza", "holiday inn", "hotel indigo", "voco",
+                        "six senses", "regent", "even hotel", "staybridge", "candlewood", "avid", "vignette"),
+    "world of hyatt": ("hyatt", "andaz", "alila", "thompson", "caption by", "miraval", "destination by hyatt"),
+    "accor all": ("sofitel", "novotel", "ibis", "mercure", "pullman", "fairmont", "raffles", "swissotel", "swissôtel",
+                  "mgallery", "movenpick", "mövenpick", "adagio", "mantra", "peppers", "25hours", "mama shelter",
+                  "tribe", "banyan tree"),
+    "wyndham": ("wyndham", "ramada", "days inn", "super 8", "la quinta", "howard johnson", "microtel", "tryp",
+                "dolce", "baymont", "hawthorn", "wingate", "travelodge"),
+}
+
+
+def _program_brands(programs):
+    """Brand words for the traveller's programs; a program not listed matches its own name without generic words."""
+    out = []
+    for prog in programs or []:
+        key = str(prog).strip().lower()
+        out += HOTEL_PROGRAM_BRANDS.get(key) or [re.sub(r"\b(rewards?|honors|club|circle|loyalty|program(me)?|points)\b",
+                                                        "", key).strip()]
+    return [b for b in out if b]
 
 
 def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
@@ -2301,7 +2390,7 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
     h_pref = ((spec.get("preferences") or {}).get("hotel") or {})
     want_styles = {str(s).lower() for s in (h_pref.get("style") or []) if str(s).strip()}
     want_name = str(h_pref.get("name") or "").strip().lower()
-    want_chain = str(h_pref.get("chain") or "").strip().lower()
+    brands = _program_brands(h_pref.get("programs"))
     loc_weight = LOC_WEIGHT * (1.3 if spec.get("pace") == "packed" else 1.0)   # NEW
 
     known_reviews = [float(x.get("reviewScore") or x.get("review")) for x in stays
@@ -2350,8 +2439,6 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
         qual = c_weight * ((review - 7.0) * 6.0 + (stars - 2.5) * 4.0) + len(matches) * 4.5
         if want_styles and (styles & want_styles):
             qual += 6.0
-        if want_chain and want_chain in name_l:
-            qual += 8.0
         dist = s_.get("distanceKm")                                            # NEW: location credit
         if isinstance(dist, (int, float)) and not isinstance(dist, bool):
             qual += loc_weight * max(0.0, 1.0 - float(dist) / LOC_SCALE_KM)
@@ -2369,7 +2456,20 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
                     qual -= ((price - ref_price * 1.45) / max(1.0, ref_price)) * 35.0
         return (feasible, round(qual, 4), -(price if price is not None else float("inf")), str(s_.get("stayId") or ""))
 
-    return sorted(stays, key=stay_key, reverse=True)
+    ordered = sorted(stays, key=stay_key, reverse=True)
+    if not brands:
+        return ordered
+    # Loyalty is optional: a program hotel goes first only when it is within budget and costs at most 25% more than
+    # the best-ranked hotel; a named or booked hotel stays first.
+    best = next((x for x in ordered if stay_key(x)[0] == 1 and _price(x) is not None), None)
+    cap = _price(best) * LOYALTY_MAX_PREMIUM if best else None
+    return sorted(ordered, key=lambda x: (stay_key(x)[0] == 2, cap is not None and stay_key(x)[0] == 1
+                                          and _loyal_stay(x, brands) and _price(x) <= cap), reverse=True)
+
+
+def _loyal_stay(s_, brands):
+    name = str(s_.get("name") or "").lower()
+    return any(re.search(r"(?<!\w)" + re.escape(b) + r"(?!\w)", name) for b in brands)
 
 
 def _spread_stays(ordered, n, cell_deg=0.015):
@@ -3514,6 +3614,37 @@ def _stays_of(seq, pool):
     return [{**by_id.get(i, {}), **next((x for x in seq.get("stays") or [] if x["stayId"] == i), {})} for i in ids]
 
 
+def _loyalty_caveats(spec, seq, pool):
+    """One line per loyalty wish the plan does not meet: nothing matched, or the cheapest match cost more than 25%
+    over the option the plan uses. A match the planner passed over within the 25% limit gets no line."""
+    pref, out = spec.get("preferences") or {}, []
+
+    def line(what, chosen, name, matches):
+        if not matches:
+            return f"No {what} was found, so the plan uses {name}."
+        m = min(matches, key=known_price)
+        if known_price(chosen) and known_price(m) > known_price(chosen) * LOYALTY_MAX_PREMIUM:
+            pct = round((known_price(m) / known_price(chosen) - 1) * 100)
+            return (f"The cheapest {what}, {m.get('name') or m.get('airline')}, cost {pct}% more than {name}, "
+                    f"above the 25% limit, so the plan uses {name}.")
+        return None
+
+    programs = (pref.get("hotel") or {}).get("programs") or []
+    brands = _program_brands(programs)
+    for st in _stays_of(seq, pool) if brands else []:
+        if st.get("name") and not st.get("booked") and not _loyal_stay(st, brands):
+            matches = [x for x in pool["stays"] if x.get("leg") == st.get("leg") and _loyal_stay(x, brands) and known_price(x)]
+            out.append(line(f"{' or '.join(programs)} hotel" + (f" in {st['city']}" if st.get("city") else ""),
+                            st, st["name"], matches))
+    f_pref = pref.get("flight") or {}
+    wanted = list(f_pref.get("alliances") or []) + list(f_pref.get("preferredAirlines") or [])
+    chosen = next((f for f in pool.get("flights") or [] if f.get("offerId") == seq.get("flightOfferId")), None)
+    if wanted and chosen and not _loyal_flight(chosen, spec):
+        matches = [f for f in pool["flights"] if _loyal_flight(f, spec) and known_price(f)]
+        out.append(line(f"{' or '.join(wanted)} flight", chosen, chosen.get("airline") or "the cheapest flight", matches))
+    return [x for x in out if x]
+
+
 def _route_text(spec):
     if not is_multi(spec):
         return ""
@@ -4239,6 +4370,9 @@ def deliver(state, best, usage, metrics, user_id, t0):
             caveats.append(f"I couldn't find places for a day trip to {t['place']}.")
     if vres.get("totals", {}).get("dailySpendAssumption"):
         caveats.append(f"Total includes an estimate of {vres['totals']['dailySpendAssumption']}.")
+    caveats += _loyalty_caveats(spec, seq, pool)
+    if (prefs_.get("flight") or {}).get("bags") == "checked":
+        caveats.append("Flight prices are the fares found and may not include a checked bag; check the airline's bag fee.")
 
     package_result=None
     if os.environ.get('PACKAGE_RECOMMENDATIONS_ENABLED','false').lower()=='true':
@@ -4808,6 +4942,20 @@ def _restore(state, snap):
         state.pop(k, None)
     state.update(snap)
 
+USE_DEFAULTS = "Use defaults"
+PREFS_QUESTION = ("Before I search, any preferences? For example \"business class, direct flights only\", "
+                  "\"4-star or better, Marriott Bonvoy\" or \"a relaxed pace\". Or tap Use defaults "
+                  "(economy, any stops, any hotel, moderate pace).")
+
+
+def _key_prefs_set(spec):
+    """The traveller already chose cabin, stops, hotel stars or program, or pace (asked once when none is set)."""
+    p = spec.get("preferences") or {}
+    f, h = p.get("flight") or {}, p.get("hotel") or {}
+    return bool(f.get("cabin") not in (None, "economy") or f.get("maxStops") is not None or h.get("minStars")
+                or h.get("programs") or spec.get("pace") in ("relaxed", "packed") or spec.get("_paceExplicit"))
+
+
 def chat_turn(message, session_id, user_id):
     """One user message -> streamed events. State lives per Runtime session (same microVM)."""
     t0 = time.time()
@@ -4865,8 +5013,12 @@ def chat_turn(message, session_id, user_id):
                        "(use them when they fit; anything in the request above wins): "
                        + "; ".join(state["memory"]))
     carry = state.pop("carry", None)
-    spec = intake(intake_text, state.get("pendingSpec") or carry, usage, carried=bool(carry) and not state.get("pendingSpec"),
-                  budget_override=state.pop("requestedBudget", None))
+    pending = state.get("pendingSpec")
+    if pending and not pending["missing"] and message.strip().lower() == USE_DEFAULTS.lower():
+        spec = pending        # the one-tap answer to the preference question: plan the trip as already parsed
+    else:
+        spec = intake(intake_text, pending or carry, usage, carried=bool(carry) and not pending,
+                      budget_override=state.pop("requestedBudget", None))
     if state["memory"]:
         spec["rememberedPreferences"] = state["memory"]
     if _NO_DIETARY_MSG_RE.search(message):
@@ -4877,6 +5029,11 @@ def chat_turn(message, session_id, user_id):
         q = spec.get("question") or f"Could you tell me the {', '.join(spec['missing'])}?"
         _remember(state, "assistant", q)
         yield ev("question", q)
+        return
+    if not carry and not state.get("prefsAsked") and not _key_prefs_set(spec):
+        state.update(pendingSpec=spec, pendingRequest=state["request"], prefsAsked=True)
+        _remember(state, "assistant", PREFS_QUESTION)
+        yield ev("question", PREFS_QUESTION, choices=[USE_DEFAULTS])
         return
     state.pop("pendingSpec", None)
     state.pop("pendingRequest", None)

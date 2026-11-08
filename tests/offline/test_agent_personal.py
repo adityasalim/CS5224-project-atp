@@ -139,22 +139,18 @@ assert "hidden gem" in SEEN["judge"] or "local pick" in SEEN["judge"]
 print("versions:", [i["version"] for i in its])
 A.improve = _improve
 
-# ---- form wishes that reach the tools: cuisines without the cafe chip (6 kept), cafe and dessert categories
-owner = {"cuisines": ["Japanese", "Italian", "French", "Turkish", "Middle Eastern", "Cafés & desserts", "Fine dining",
-                      "American"], "activities": ["pour-over coffee"], "preferences": {}}
+# ---- form cuisines reach the tools (6 kept); coffee, desserts and per-day cafes are in test_ui_preferences
+owner = {"cuisines": ["Japanese", "Italian", "French", "Turkish", "Middle Eastern", "Fine dining", "American"],
+         "preferences": {"food": {"coffee": True, "dessert": True}}}
+A.normalize_prefs(owner)
 assert A.pref_args("find_places", owner)["cuisine"] == "japanese|italian|french|turkish|middle_eastern|fine_dining"
 assert {"cafe", "dessert", "restaurant"} <= set(A.preference_search_categories(owner))
-assert "cafe" in A.preference_search_categories({"preferences": {"notes": "two specialty coffee stops a day"}})
 assert "dessert" not in A.preference_search_categories({"cuisines": ["Italian"]})
-# daily cafes come on top of a moderate day's lunch, dinner and 2-3 sights, so the verifier allows two more stops
-day_t = {"startDate": "2026-12-10", "endDate": "2026-12-12", "pax": 2, "budgetSGD": 3000, "pace": "moderate"}
-assert A.trip_spec_for_tools(day_t)["hardConstraints"]["maxStopsPerDay"] == 5
-assert A.trip_spec_for_tools({**day_t, "preferences": {"notes": "two pour-over coffees daily"}})["hardConstraints"]["maxStopsPerDay"] == 7
 
-# ---- hotel chain ranks up; a per-city hotel area stays with its city
-spec_c = {"preferences": {"hotel": {"chain": "Hilton"}}}
+# ---- a hotel program ranks up at the same price; a per-city hotel area stays with its city
+spec_c = {"preferences": {"hotel": {"programs": ["Hilton Honors"]}}}
 A.normalize_prefs(spec_c)
-assert spec_c["preferences"]["hotel"]["chain"] == "Hilton"
+assert spec_c["preferences"]["hotel"]["programs"] == ["Hilton Honors"]
 stays = [{"stayId": "s1", "name": "Grand Kyoto Hotel", "starRating": 4, "reviewScore": 8.6, "priceTotalSGD": 1500},
          {"stayId": "s2", "name": "Hilton Kyoto", "starRating": 4, "reviewScore": 8.2, "priceTotalSGD": 1500}]
 assert [x["stayId"] for x in A._order_stays(stays, spec_c)] == ["s2", "s1"]
