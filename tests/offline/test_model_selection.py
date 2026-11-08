@@ -396,8 +396,11 @@ class FakeGw:
         return {"ok": True, "places": [{"placeId": "aloc:k", "name": "Kurasu", "category": "requested", "requested": "Kurasu",
                                         "tags": ["requested by user"], "matches": ["requested"]}]}
 gw = FakeGw(); A._clients = lambda: (Bedrock(), None, gw)
+def searched(*urls):   # the result block web_search returns, with the pages it found
+    return SimpleNamespace(type="web_search_tool_result", content=[SimpleNamespace(type="web_search_result", url=u) for u in urls])
 assert list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, u, [], set())) == [] and gw.calls == [],     "no web step on the configuration-19 roles"
-claude.messages.stream.reply.content = [SimpleNamespace(type="text", text='{"picks": [{"name": "Weekenders Coffee", "kind": "cafe", '
+claude.messages.stream.reply.content = [searched("https://www.timeout.com/kyoto", "https://sprudge.com/kurasu"),
+                                        SimpleNamespace(type="text", text='{"picks": [{"name": "Weekenders Coffee", "kind": "cafe", '
     '"source": "https://www.timeout.com/kyoto"}, {"name": "Kurasu", "kind": "cafe", "source": "https://sprudge.com/kurasu"}]}')]
 pool = {"places": [{"placeId": "gplace:w", "name": "Weekenders Coffee", "category": "cafe"}]}
 list(A.web_food_picks({"destination": "Kyoto", "cuisines": ["Italian"], "activities": ["pour-over coffee"],
@@ -424,7 +427,8 @@ class NamesGw:
         return {"ok": True, "places": [{"placeId": s.IDS[n], "name": n, "category": args["namesCategory"], "requested": n,
                                         "tags": [], "matches": []} for n in args["names"] if n in s.IDS]}
 gw = NamesGw(); A._clients = lambda: (Bedrock(), None, gw)
-claude.messages.stream.reply.content = [SimpleNamespace(type="text", text=json.dumps({"picks": [
+claude.messages.stream.reply.content = [searched("https://sprudge.com/a", "https://sprudge.com/k", "https://guide.michelin.com/g"),
+                                        SimpleNamespace(type="text", text=json.dumps({"picks": [
     {"name": "% Arabica Kyoto Higashiyama", "kind": "cafe", "source": "https://sprudge.com/a"},
     {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://sprudge.com/k"},
     {"name": "Gion Karyo", "kind": "restaurant", "source": "https://guide.michelin.com/g"}]}))]
@@ -451,7 +455,9 @@ assert tree_src.count("used = yield from zone_food(spec, pool, calls, sources)\n
 
 # a pick is kept only with an https source on one of the 8 allowed publishers; any other source drops the pick
 gw.calls.clear()
-claude.messages.stream.reply.content = [SimpleNamespace(type="text", text=json.dumps({"picks": [
+claude.messages.stream.reply.content = [searched(
+    "http://www.timeout.com/kyoto", "https://evil-timeout.com/kyoto", "https://timeout.com.evil.io/kyoto",
+    "https://www.tripadvisor.com/x", "https://tokyo.eater.com/kurasu/"), SimpleNamespace(type="text", text=json.dumps({"picks": [
     {"name": "Plain Http", "kind": "cafe", "source": "http://www.timeout.com/kyoto"},
     {"name": "Lookalike", "kind": "cafe", "source": "https://evil-timeout.com/kyoto"},
     {"name": "Suffix Trick", "kind": "cafe", "source": "https://timeout.com.evil.io/kyoto"},
@@ -466,6 +472,18 @@ assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesC
 by = {p["placeId"]: p.get("webSource") for p in pool["places"]}
 assert by == {"gplace:p": None, "gplace:kurasu": "https://Tokyo.Eater.com/kurasu"}, by
 assert A._web_source(None) is None and A._web_source("https://guide.michelin.com/jp/en/kyoto") == "https://guide.michelin.com/jp/en/kyoto"
+
+# the cited source must be a page the search returned (host and path; www. and a trailing slash do not matter): an
+# invented URL on an allowed publisher drops the pick, and a search error block adds no page
+gw.calls.clear()
+claude.messages.stream.reply.content = [
+    searched("https://www.sprudge.com/real"),
+    SimpleNamespace(type="web_search_tool_result", content=SimpleNamespace(type="web_search_tool_result_error", error_code="max_uses_exceeded")),
+    SimpleNamespace(type="text", text=json.dumps({"picks": [
+        {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://sprudge.com/real/"},
+        {"name": "Gion Karyo", "kind": "restaurant", "source": "https://guide.michelin.com/invented"}]}))]
+list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set()))
+assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesCategory": "cafe"}], gw.calls
 
 # a rate limit in the optional web step does not mark the adapter exhausted, so the planner call still runs
 class RateLimited(Exception):
@@ -494,7 +512,8 @@ class CityStream:
         name = {"Tokyo": "Kurasu Kyoto Station", "Kyoto": "Gion Karyo"}[s.city]
         text = json.dumps({"picks": [{"name": name, "kind": "cafe" if s.city == "Tokyo" else "restaurant",
                                       "source": "https://sprudge.com/" + s.city}]})
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=text)], stop_reason="end_turn", model="claude-haiku-5-5",
+        return SimpleNamespace(content=[searched("https://sprudge.com/" + s.city), SimpleNamespace(type="text", text=text)],
+                               stop_reason="end_turn", model="claude-haiku-5-5",
                                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
                                                      cache_creation_input_tokens=0, server_tool_use=None))
 gate = threading.Barrier(2, timeout=10)

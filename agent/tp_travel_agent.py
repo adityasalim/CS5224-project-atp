@@ -1892,6 +1892,12 @@ def _web_source(url):
     return url if u.scheme == "https" and any(host == d or host.endswith("." + d) for d in WEB_PICK_DOMAINS) else None
 
 
+def _page_key(url):
+    """Host without www. plus path without a trailing slash, to match a cited source to a search result page."""
+    u = urlparse(url)
+    return re.sub(r"^www\.", "", (u.hostname or "").lower()) + u.path.rstrip("/")
+
+
 def web_food_picks(spec, pool, usage, calls, sources, google_left=GOOGLE_FOOD_CAP):
     """Claude roles only: Haiku with web search names venues per city from editorial domains.
     A pick that matches a pool place by name gets webSource; others are looked up by name on Google (one request per
@@ -1919,9 +1925,10 @@ def web_food_picks(spec, pool, usage, calls, sources, google_left=GOOGLE_FOOD_CA
                             [{"role": "user", "content": [{"text": WEB_PICK_PROMPT.format(city=city, wish=wish or "any")}]}], usage,
                             max_tokens=3000, model_role="executor",
                             tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3, "allowed_domains": WEB_PICK_DOMAINS}])
-            # a pick whose source is not on an allowed publisher is dropped before it reaches the pool, prompts or UI
+            pages = {_page_key(u) for u in resp.get("webResultUrls") or []}
             return [p_ for p_ in extract_json(reply_text(resp)).get("picks", [])[:8]
-                    if isinstance(p_, dict) and p_.get("name") and _web_source(p_.get("source"))]
+                    if isinstance(p_, dict) and p_.get("name") and _web_source(p_.get("source"))
+                    and _page_key(p_["source"]) in pages]
         except Exception as e:  # noqa: BLE001  (web picks are optional; the plan goes on without them)
             print("web picks failed:", type(e).__name__, e)
             adapter.quota_exhausted = was_exhausted   # a rate limit in this optional step must not stop the planner

@@ -103,6 +103,7 @@ class ModelAdapter:
              'temperatureRequested':temperature,'temperatureApplied':None}
         if cache_system_prefix:row['requestOptions']['cacheSystemPrefix']=True
         reservation=None
+        web_urls=[]
         if selected.provider!='google':
             if self.budget_authorizer is None:
                 raise ValueError('Verified pricing and budget authorization required before paid-capable calls')
@@ -159,6 +160,9 @@ class ModelAdapter:
                       else client.messages.stream(**request)) as stream:
                     result=stream.get_final_message()
                 text=''.join(b.text for b in result.content if b.type=='text')
+                # the pages the search really returned, so a cited source can be checked against them
+                web_urls=[r.url for b in result.content if b.type=='web_search_tool_result' and isinstance(b.content,list)
+                          for r in b.content if getattr(r,'type',None)=='web_search_result']
                 usage=result.usage
                 row.update(inputTokens=usage.input_tokens,outputTokens=usage.output_tokens,cacheReadTokens=usage.cache_read_input_tokens or 0,
                            cacheWriteTokens=usage.cache_creation_input_tokens or 0,finishReason=result.stop_reason,responseModelId=result.model,
@@ -274,7 +278,7 @@ class ModelAdapter:
                     'usage':{'inputTokens':row['inputTokens'] or 0,'outputTokens':row['outputTokens'] or 0,
                              'cacheReadInputTokens':row['cacheReadTokens'] or 0,'cacheWriteInputTokens':row['cacheWriteTokens'] or 0},
                     'stopReason':'max_tokens' if row.get('finishReason') in ('length','max_tokens') else 'end_turn',
-                    '_adapter':row}
+                    'webResultUrls':web_urls,'_adapter':row}
         except Exception as error:
             logger = logging.getLogger(__name__)
             logger.error(
