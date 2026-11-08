@@ -57,7 +57,11 @@ LUNCH_FLOOR = 11 * 60 + 30
 DINNER_FLOOR = 17 * 60 + 30
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
-MAX_WALK_MINUTES = 30  # longer walks switch to the car/taxi time for that hop (mode "walk")
+# Longer walks switch to the car/taxi time for that hop (mode "walk"). 45 keeps a planner zone (1.2 km radius, so
+# members at most 2.4 km apart: ceil(2.4 x 1.3 / 4.5 x 60) = 42 min) on foot; pairs of a sparse 1.6 km zone more
+# than about 2.6 km apart take a short taxi.
+MAX_WALK_MINUTES = 45
+LOCK_MAX_WAIT_MIN = 45   # leave a walkable group early only if its next stop would wait longer
 
 _dynamodb = boto3.resource("dynamodb")
 
@@ -208,22 +212,38 @@ def _resolve(event):
     return start, stops, None
 
 
+def _walk_groups(walk_m, n):
+    """Group id per matrix index (0 = start): stops joined by a chain of walks of MAX_WALK_MINUTES or less."""
+    g = list(range(n + 1))
+
+    def root(i):
+        while g[i] != i:
+            i = g[i]
+        return i
+    for i in range(1, n + 1):
+        for j in range(i + 1, n + 1):
+            if max(walk_m[i][j], walk_m[j][i]) <= MAX_WALK_MINUTES:
+                g[root(j)] = root(i)
+    return [root(i) for i in range(n + 1)]
+
+
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
              max_stops=0, min_free=0):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
     opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
     11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted.
-    max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules."""
+    max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules.
+    In walk mode the day starts in the walkable group farthest from the hotel and finishes a group before it takes a
+    ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
     meals_done = 0                              # meal stops (restaurant / street food) already scheduled
     busy = 0                                    # visit + travel minutes used so far
-    while remaining:
-        if max_stops and len(out) >= max_stops:
-            break
+
+    def pick(cands):
         best = None
-        for i in remaining:
+        for i in cands:
             s = stops[i - 1]
             travel, how = _hop(walk_m, car_m, cur, i, mode)
             arrive = t + travel
@@ -245,6 +265,21 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                 score -= 60                     # nudge the lunch into the lunch window
             if best is None or score < best[0]:
                 best = (score, i, travel, how, arrive, begin, end)
+        return best
+
+    group = _walk_groups(walk_m, len(stops)) if mode == "walk" else None
+    while remaining:
+        if max_stops and len(out) >= max_stops:
+            break
+        if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
+            far = max({group[i] for i in remaining},
+                      key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
+            here = [i for i in remaining if group[i] == far]
+        else:
+            here = [i for i in remaining if group and group[i] == group[cur]]
+        best = pick(here) if here else None
+        if best is None or best[5] - best[4] > LOCK_MAX_WAIT_MIN:   # nothing in this walkable group fits now
+            best = pick(remaining)
         if best is None:
             break
         _, i, travel, how, arrive, begin, end = best
