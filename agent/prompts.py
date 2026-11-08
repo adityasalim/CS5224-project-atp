@@ -211,6 +211,31 @@ Candidate pool, grouped by city in travel order (the only valid IDs):
 {pool}
 """
 
+# Appended after the filled-in pool context whenever the pool has zones (tp_travel_agent.planning_context), so it is
+# always the built-in text and str.format never sees it. The stop counts match trip_spec_for_tools' maxStopsPerDay.
+ZONE_RULES = """
+Zones (built by the system from walking and taxi times; they take precedence over older zone rules):
+- Every place has a "zone". The places of one zone lie within about 1.2 km of its center, so they are a walk apart.
+  "zones" lists each zone's "kind" (walk, solo, park or daytrip), "label", how many "sights" and "food" places
+  (restaurants) it has, "rideMin" (estimated taxi minutes to the other zones of the same city, only pairs of at most
+  30 minutes, or the single nearest zone when none is that close) and "hotelMin" (estimated minutes from the first
+  listed stays).
+- A full city day uses one or two zones: a morning zone, then one ride (a pair listed in rideMin) to an afternoon
+  zone. Prefer zones within 30 minutes of the chosen stay (hotelMin). Use a zone on a second day only if it still
+  has unused sights.
+- Arrival, departure and moving days use 0-2 stops in one zone close to that night's stay.
+- A "park" zone fills a full day on its own (meals are inside the park), never an arrival, departure or moving day.
+  A "daytrip" zone is a day-trip town or a far theme park: on that full day use only its places and set "dayTrip"
+  to the zone's "dayTrip" value.
+- Every full city day has a lunch and a dinner: on a two-zone day one meal from each zone, on a one-zone day both
+  from it. When activities or preferences.notes ask for a number of cafe or coffee stops per day, add that many
+  "cafe" stops on every full city day, from that day's zones. Dessert, tea and bakery stops also come from that
+  day's zones. A zone with "food": 0 takes its meals from the day's other zone.
+- The sights of a full city day follow the pace (relaxed 1-2, moderate 2-3, packed 4-5) and come from its zones.
+  Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 4 (relaxed), 5 (moderate)
+  or 7 (packed) stops, or 2 more when cafe or coffee stops are requested.
+"""
+
 # POSITIONAL: tp_travel_agent._special_rules() splits this text on "\n- " and keeps the rule at index i only when
 # flag i is true (0 pinned places, 1 named hotel, 2 day trips). Keep exactly these three rules, in this order, and
 # do not add another line that starts with "- ".

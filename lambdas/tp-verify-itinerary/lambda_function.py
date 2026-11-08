@@ -40,6 +40,8 @@ DEPARTURE_BUFFER_MIN = 180   # leave for the airport this long before take-off
 TRANSFER_BUFFER_MIN = 60     # after a transfer arrives: get to the hotel / drop bags
 MAX_DAY_TRAVEL_MIN = int(os.environ.get("MAX_DAY_TRAVEL_MIN", "180"))   # travel between stops per day
 MAX_HOP_MIN = int(os.environ.get("MAX_HOP_MIN", "50"))                   # longest single hop
+MAX_RIDES_PER_DAY = int(os.environ.get("MAX_RIDES_PER_DAY", "1"))        # taxi rides between stops (between zones)
+MAX_RIDE_MIN = int(os.environ.get("MAX_RIDE_MIN", "30"))                 # longest taxi ride between stops
 MAX_KM_FROM_BASE = int(os.environ.get("MAX_KM_FROM_BASE", "120"))         # was 120
 DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day trip
 DAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
@@ -324,7 +326,7 @@ def verify(spec, it, pool, daily_spend):
         base = base_stay(dt) if dt else None
         base_pt = base if base and base.get("lat") is not None else None
         hotel_pt, trip_min, busy = base_pt, 0, 0
-        travel_total, max_hop = 0, 0
+        travel_total, max_hop, rides, max_ride = 0, 0, 0, 0
         dtrip = d.get("dayTrip") if isinstance(d.get("dayTrip"), dict) else None
         if dtrip and dtrip.get("lat") is not None and dtrip.get("lng") is not None:
             tp = {"lat": float(dtrip["lat"]), "lng": float(dtrip["lng"]), "name": dtrip.get("place", "day trip")}
@@ -382,6 +384,9 @@ def verify(spec, it, pool, daily_spend):
                 busy += int(need)
                 travel_total += int(need)
                 max_hop = max(max_hop, int(need))
+                if idx > 0 and s_.get("travelBy") == "taxi":   # the ride from the hotel to the first stop is not counted
+                    rides += 1
+                    max_ride = max(max_ride, int(need))
             if idx == 0 and trip_min and a < day_start + trip_min:
                 rep.fail("day_trip", f"{dt}: {name} at {s_['arriveAt']} is before you can reach "
                                      f"{dtrip.get('place')} ({trip_min} min from the hotel)",
@@ -420,9 +425,11 @@ def verify(spec, it, pool, daily_spend):
             busy += math.floor(_km(prev_place, hotel_pt) / FASTEST_CITY_KMH * 60)   # the trip back to the hotel
 
         if stops and not trip_min:
-            if travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN:
+            if (travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN or rides > MAX_RIDES_PER_DAY
+                    or max_ride > MAX_RIDE_MIN):
                 rep.warn("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
-                                    f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN})",
+                                    f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN}), {rides} taxi rides between stops "
+                                    f"(limit {MAX_RIDES_PER_DAY}), longest ride {max_ride} min (limit {MAX_RIDE_MIN})",
                          "Replace the stop farthest from the others with a place near them, or move it to a day "
                          "in the same area.", day=dt)
         free = (day_end - day_start) - busy

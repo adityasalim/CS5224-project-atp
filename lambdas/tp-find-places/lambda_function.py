@@ -8,6 +8,9 @@ Google for the food again. Fallback chain: Overpass (one request for all categor
 in groups, restaurants and cafes first) -> Amazon Location Places -> Google Places (if GOOGLE_MAPS_KEY in secret)
 -> mock. Categories that Overpass returns too few places for are topped up from Amazon Location. The whole chain is bounded by
 TIME_BUDGET_SECONDS (default 45), so the tool always answers before the 60 s Lambda timeout.
+Zone mode: a call with lat/lng, only restaurant/cafe/dessert categories and foodRadiusKm <= 2 is one walkable zone of
+the planner. It makes ONE Google Nearby Search inside that circle (Amazon Location if Google fails, no Overpass) and is
+never cached.
 
 Environment variables:
   SECRET_ARN   secret with optional {"GOOGLE_MAPS_KEY": "..."}
@@ -110,6 +113,12 @@ GOOGLE_FIRST = {"restaurant", "cafe", "dessert"}
 GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS = 4.0, 50
 GOOGLE_FOOD_TEXT = {"cafe": "specialty coffee"}   # Google text for a category's generic search text
 FOOD_KEYWORDS = ("restaurant", "eatery", "dining")   # keyword searches that mean "a place to eat"
+ZONE_FOOD_MAX_KM = 2.0   # a food-only call this small around lat/lng is one walkable zone (hard boundary, no cache)
+G_MEAL_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining", "french", "greek", "indian",
+                "indonesian", "italian", "japanese", "korean", "lebanese", "mediterranean", "mexican", "middle_eastern",
+                "ramen", "seafood", "spanish", "sushi", "thai", "turkish", "vegan", "vegetarian", "vietnamese"}
+G_CAFE_TYPES = ["cafe", "coffee_shop", "coffee_roastery", "tea_house"]
+G_TREAT_TYPES = ["bakery", "dessert_shop"]
 
 
 def _is_food_keyword(kw):
@@ -626,6 +635,52 @@ def _google(q, deadline=None):
     return out, None
 
 
+def _google_zone(q, deadline):
+    """One walkable zone: ONE Nearby Search inside a hard circle of foodRadiusKm around lat/lng for the asked
+    categories (restaurants with the wished cuisine types, cafes and tea houses, bakeries and dessert shops),
+    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order."""
+    key = _secret("GOOGLE_MAPS_KEY")
+    if not key:
+        return None, "no GOOGLE_MAPS_KEY in secret"
+    if deadline - time.time() < 4:
+        return None, "time budget used up"
+    kinds = [c for c in (q["cuisine"] or "").split("|") if c] + list(q["prefs"]["dietary"])
+    types = {"cafe": G_CAFE_TYPES, "dessert": G_TREAT_TYPES,
+             "restaurant": ["restaurant"] + [f"{c}_restaurant" for c in kinds if c in G_MEAL_TYPES]
+             + (["steak_house"] if "steak" in kinds else [])}
+    cat_of = {t: c for c in q["categories"] for t in types[c]}
+    body = {"includedPrimaryTypes": sorted(cat_of), "maxResultCount": 20, "rankPreference": "POPULARITY",
+            "locationRestriction": {"circle": {"center": {"latitude": q["lat"], "longitude": q["lng"]},
+                                               "radius": q["foodRadiusKm"] * 1000}}}
+    headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
+               "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
+                                   "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType"}
+    try:
+        r = requests.post("https://places.googleapis.com/v1/places:searchNearby", headers=headers, json=body, timeout=8)
+    except requests.RequestException as e:
+        return None, f"google {type(e).__name__}"
+    if r.status_code >= 400:
+        return None, f"google http {r.status_code}: {r.text[:200]}"
+    scored = []
+    for p in r.json().get("places", []):
+        n, rating, kind = p.get("userRatingCount") or 0, p.get("rating") or 0, str(p.get("primaryType") or "")
+        if (p.get("businessStatus", "OPERATIONAL") != "OPERATIONAL" or rating < GOOGLE_MIN_RATING
+                or n < GOOGLE_MIN_REVIEWS):
+            continue
+        loc = p.get("location", {})
+        raw = "; ".join((p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
+        g = _place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat_of.get(kind, "restaurant"),
+                   loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, website=p.get("websiteUri"),
+                   url=p.get("googleMapsUri"), rating=rating, fame_known=False,
+                   cuisine=kind.replace("_restaurant", "").replace("_", " ") if kind not in ("", "restaurant") else None)
+        g.update(reviews=n, priceLevel=p.get("priceLevel"), matches=_matches(g, q["prefs"]))
+        scored.append(((n * rating + 150 * 4.2) / (n + 150), g))   # Bayesian: 4.6 with 900 reviews before 4.9 with 60
+    scored.sort(key=lambda x: (-x[0], x[1]["placeId"]))
+    ranked = [g for _, g in scored if _allowed(g, q["prefs"])]
+    return [g for c in q["categories"] for g in [x for x in ranked if x["category"] == c][:q["maxPerCategory"]]], None
+
+
 def _mock(q):
     out = []
     tag = f"{q['lat']:.2f},{q['lng']:.2f}"   # different IDs for different cities
@@ -822,6 +877,19 @@ def lambda_handler(event, context):
         _pool_put(places)
         return {"ok": True, "source": "mock", "query": q, "places": places,
                 "note": "Mock data — not real places.", **extra}
+
+    if (q["categories"] and set(q["categories"]) <= GOOGLE_FIRST and q["foodRadiusKm"] <= ZONE_FOOD_MAX_KM
+            and event.get("lat") is not None):   # one walkable zone: Google inside a hard boundary, never cached
+        places, err = _google_zone(q, deadline)
+        source = "google-zone"
+        if not places:   # Overpass is skipped: it can take 26 s per try
+            found, err2 = _amazon_location({**q, "keywords": []}, deadline)
+            places, source = _rank(found or [], q), "amazon_location-zone"
+            err = "; ".join(e for e in (err, err2) if e) or None
+        _pool_put(named + places)
+        return {"ok": True, "source": source, "query": q, "places": named + places, "fallbacksTried": [err] if err else [],
+                "attribution": "Ratings and places from Google Maps" if source == "google-zone"
+                               else "Place data © Amazon Location Service / HERE", **extra}
 
     key = _cache_key({**q, "names": []})
     cached = _cache_get(key)
