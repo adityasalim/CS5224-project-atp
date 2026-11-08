@@ -436,6 +436,24 @@ assert by["gplace:arabica"]["category"] == "cafe" and by["gplace:arabica"]["webS
 assert by["gplace:karyo"]["category"] == "restaurant" and not by["gplace:karyo"]["requested"]
 assert by["gplace:kurasu"] is pinned and pinned["requested"] == "Kurasu Kyoto" and pinned["tags"] == ["requested by user"]
 
+# a pick is kept only with an https source on one of the 8 allowed publishers; any other source drops the pick
+gw.calls.clear()
+claude.messages.stream.reply.content = [SimpleNamespace(type="text", text=json.dumps({"picks": [
+    {"name": "Plain Http", "kind": "cafe", "source": "http://www.timeout.com/kyoto"},
+    {"name": "Lookalike", "kind": "cafe", "source": "https://evil-timeout.com/kyoto"},
+    {"name": "Suffix Trick", "kind": "cafe", "source": "https://timeout.com.evil.io/kyoto"},
+    {"name": "Other Site", "kind": "restaurant", "source": "https://www.tripadvisor.com/x"},
+    {"name": "No Source", "kind": "cafe"},
+    {"name": "Not Text", "kind": "cafe", "source": 5},
+    {"name": "Bad Host", "kind": "cafe", "source": "https://[timeout.com"},
+    {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://Tokyo.Eater.com/kurasu"}]}))]
+pool = {"places": [{"placeId": "gplace:p", "name": "Plain Http", "category": "cafe"}]}
+list(A.web_food_picks({"destination": "Kyoto"}, pool, uc, [], set()))
+assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesCategory": "cafe"}], gw.calls
+by = {p["placeId"]: p.get("webSource") for p in pool["places"]}
+assert by == {"gplace:p": None, "gplace:kurasu": "https://Tokyo.Eater.com/kurasu"}, by
+assert A._web_source(None) is None and A._web_source("https://guide.michelin.com/jp/en/kyoto") == "https://guide.michelin.com/jp/en/kyoto"
+
 # a rate limit in the optional web step does not mark the adapter exhausted, so the planner call still runs
 class RateLimited(Exception):
     status_code = 429
