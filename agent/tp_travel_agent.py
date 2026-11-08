@@ -1562,7 +1562,7 @@ def _ride_min(a, b):
 
 
 def _seed_clusters(sights, r, rank):
-    """The sight with the most unassigned neighbours within r seeds a zone of all of them; ties go to the better
+    """The sight with the most unassigned neighbors within r seeds a zone of all of them; ties go to the better
     rank, then the placeId, so input order never matters."""
     left, out = list(sights), []
     while left:
@@ -1771,7 +1771,7 @@ def _zone_view(zones, stays, places):
 
 
 def _cafes_per_day(spec):
-    """Cafe stops per full day the traveller asked for ("two specialty pour-over coffees daily" -> 2), else 0."""
+    """Cafe stops per full day the traveler asked for ("two specialty pour-over coffees daily" -> 2), else 0."""
     text = " ".join([str(x) for x in spec.get("activities") or []]
                     + [str((spec.get("preferences") or {}).get("notes") or "")]).lower()
     m = re.search(r"\b(one|two|three|[123])\b[\w\s-]{0,30}?\b(?:coffees?|caf[eé]s?)\b[\w\s-]{0,20}?"
@@ -2667,7 +2667,7 @@ def compact_pool(pool, spec=None):
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
     floor = max(10, -(-days * STOPS_PER_DAY.get((spec or {}).get("pace"), 5) * 15 // 10))   # never trim below 1.5x
-    if zoned:   # distanceKm is from a search centre, not useful once places are grouped in zones
+    if zoned:   # distanceKm is from a search center, not useful once places are grouped in zones
         places = [{k: v for k, v in _c_place(p).items() if k != "distanceKm"} for p in _zone_places(pool, spec)]
     else:
         places = [_c_place(p) for p in _select_places(pool["places"], target, spec)]

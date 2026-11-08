@@ -215,7 +215,7 @@ Candidate pool, grouped by city in travel order (the only valid IDs):
 # always the built-in text and str.format never sees it. The stop counts match trip_spec_for_tools' maxStopsPerDay.
 ZONE_RULES = """
 Zones (built by the system from walking and taxi times; they take precedence over older zone rules):
-- Every place has a "zone". The places of one zone lie within about 1.2 km of its centre, so they are a walk apart.
+- Every place has a "zone". The places of one zone lie within about 1.2 km of its center, so they are a walk apart.
   "zones" lists each zone's "kind" (walk, solo, park or daytrip), "label", how many "sights" and "food" places
   (restaurants) it has, "rideMin" (estimated taxi minutes to the other zones of the same city, only pairs of at most
   30 minutes, or the single nearest zone when none is that close) and "hotelMin" (estimated minutes from the first
