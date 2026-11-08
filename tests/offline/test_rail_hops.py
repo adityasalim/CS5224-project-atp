@@ -1,6 +1,6 @@
-"""Country rail model and door-to-door rule in tp-search-transfers.
+"""Country rail model and door-to-door rule in tp-search-transfers, and how the agent uses "recommended".
 Offline: fake AWS, fake geocoder, fake SerpApi; nothing leaves the machine."""
-import os
+import json, os, pathlib, sys, types
 from fakes import load, STORE
 
 t = load("tp-search-transfers")
@@ -105,4 +105,32 @@ finally:
     os.environ["MOCK_MODE"] = "true"
     t.boto3.client = saved_client
 
+# ---- agent: the compacted hop shows doorMin/recommended, and the fallback takes the recommended over a cheaper flight
+bac = types.ModuleType("bedrock_agentcore")
+class App:
+    def entrypoint(self, f): return f
+    def run(self): pass
+bac.BedrockAgentCoreApp = App
+sys.modules["bedrock_agentcore"] = bac
+os.environ.setdefault("GATEWAY_URL", "http://127.0.0.1:1/mcp")
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "agent"))
+import tp_travel_agent as A
+
+legs = [{"city": "Tokyo", "airport": "HND", "nights": 2, "checkIn": "2027-03-08", "checkOut": DATE},
+        {"city": "Kyoto", "airport": "KIX", "nights": 2, "checkIn": DATE, "checkOut": "2027-03-12"}]
+spec = {"legs": legs, "pace": "moderate", "preferences": {}, "pax": 1}
+pool = {"flights": [], "stays": [], "places": [], "transfers": [
+    {"transferId": "tfl:cheap", "mode": "flight", "priceTotalSGD": 90.0, "durationMinutes": 75, "doorToDoorMinutes": 260,
+     "recommended": False, "hop": 0},
+    {"transferId": "tgr:rail", "mode": "ground", "priceTotalSGD": 125.35, "durationMinutes": 128, "doorToDoorMinutes": 178,
+     "recommended": True, "estimate": True, "hop": 0}]}
+_, transfers = A._plan_stays(spec, pool, {"stays": [], "transfers": []})
+assert transfers[0]["transferId"] == "tgr:rail", transfers
+hops = json.loads(A.compact_pool_multi(spec, pool))["transfers"]
+opts = {o["id"]: o for o in hops[0]["options"]}
+assert opts["tgr:rail"]["doorMin"] == 178 and opts["tgr:rail"]["recommended"] is True, opts
+assert opts["tfl:cheap"]["doorMin"] == 260 and opts["tfl:cheap"]["recommended"] is False
+import prompts
+assert "take the transfer marked\n  recommended" in prompts.PLANNER_MULTI
+print("AGENT RECOMMENDED OK")
 print("RAIL HOPS OK")
