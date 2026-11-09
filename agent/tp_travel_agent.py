@@ -1877,7 +1877,7 @@ def gather_specials(spec, pool, calls, sources, only=None):
 
 
 WEB_PICK_DOMAINS = ["guide.michelin.com", "theworlds50best.com", "theworlds100bestcoffeeshops.com", "award.tabelog.com",
-                    "europeancoffeetrip.com", "timeout.com", "eater.com", "sprudge.com"]
+                    "europeancoffeetrip.com", "timeout.com", "sprudge.com"]
 WEB_PICK_WAIT_SECONDS = 90   # web picks are optional: the plan never waits longer than this for them
 WEB_PICK_PROMPT = ("Search the web for the best-reviewed specialty coffee shops (pour-over, roasters) and restaurants in {city}"
                    " that match: {wish}. Return JSON only: {{\"picks\": [{{\"name\": \"...\", \"kind\": \"cafe\" or \"restaurant\","
@@ -4238,7 +4238,7 @@ def _web_selected_flight(spec, seq, pool):
 WEB_PUBLISHERS = {"guide.michelin.com": "the MICHELIN Guide", "theworlds50best.com": "The World's 50 Best",
                   "theworlds100bestcoffeeshops.com": "The World's 100 Best Coffee Shops",
                   "europeancoffeetrip.com": "European Coffee Trip", "award.tabelog.com": "the Tabelog Award",
-                  "timeout.com": "Time Out", "eater.com": "Eater", "sprudge.com": "Sprudge"}
+                  "timeout.com": "Time Out", "sprudge.com": "Sprudge"}
 _PRICE_SIGNS = {"PRICE_LEVEL_INEXPENSIVE": "$", "PRICE_LEVEL_MODERATE": "$$", "PRICE_LEVEL_EXPENSIVE": "$$$",
                 "PRICE_LEVEL_VERY_EXPENSIVE": "$$$$"}
 GOOGLE_ATTRIBUTION = "Ratings and hours from Google Maps"

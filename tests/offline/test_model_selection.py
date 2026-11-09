@@ -459,11 +459,11 @@ tree_src = (AGENT / "tp_travel_agent.py").read_text(encoding="utf-8")
 assert tree_src.count("used = yield from zone_food(spec, pool, calls, sources)\n"
                       "    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)") == 2
 
-# a pick is kept only with an https source on one of the 8 allowed publishers; any other source drops the pick
+# a pick is kept only with an https source on one of the 7 allowed publishers; any other source drops the pick
 gw.calls.clear()
 claude.messages.stream.reply.content = [searched(
     "http://www.timeout.com/kyoto", "https://evil-timeout.com/kyoto", "https://timeout.com.evil.io/kyoto",
-    "https://www.tripadvisor.com/x", "https://tokyo.eater.com/kurasu/"), SimpleNamespace(type="text", text=json.dumps({"picks": [
+    "https://www.tripadvisor.com/x", "https://kyoto.sprudge.com/kurasu/"), SimpleNamespace(type="text", text=json.dumps({"picks": [
     {"name": "Plain Http", "kind": "cafe", "source": "http://www.timeout.com/kyoto"},
     {"name": "Lookalike", "kind": "cafe", "source": "https://evil-timeout.com/kyoto"},
     {"name": "Suffix Trick", "kind": "cafe", "source": "https://timeout.com.evil.io/kyoto"},
@@ -471,12 +471,12 @@ claude.messages.stream.reply.content = [searched(
     {"name": "No Source", "kind": "cafe"},
     {"name": "Not Text", "kind": "cafe", "source": 5},
     {"name": "Bad Host", "kind": "cafe", "source": "https://[timeout.com"},
-    {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://Tokyo.Eater.com/kurasu"}]}))]
+    {"name": "Kurasu Kyoto Station", "kind": "cafe", "source": "https://Kyoto.Sprudge.com/kurasu"}]}))]
 pool = {"places": [{"placeId": "gplace:p", "name": "Plain Http", "category": "cafe"}]}
 list(A.web_food_picks({"destination": "Kyoto"}, pool, uc, [], set()))
 assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesCategory": "cafe"}], gw.calls
 by = {p["placeId"]: p.get("webSource") for p in pool["places"]}
-assert by == {"gplace:p": None, "gplace:kurasu": "https://Tokyo.Eater.com/kurasu"}, by
+assert by == {"gplace:p": None, "gplace:kurasu": "https://Kyoto.Sprudge.com/kurasu"}, by
 assert A._web_source(None) is None and A._web_source("https://guide.michelin.com/jp/en/kyoto") == "https://guide.michelin.com/jp/en/kyoto"
 
 # the cited source must be a page the search returned (host and path; www. and a trailing slash do not matter): an
