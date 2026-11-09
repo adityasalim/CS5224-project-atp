@@ -399,6 +399,41 @@ cab = {"stays": [], "flights": [{"offerId": "m0", "airline": "A", "cabin": "mixe
 assert A._upgrade_choices(pe, cab, {"stayId": None, "flightOfferId": "m0"}, {"totals": {"total": "5000"}}) == [
     "Fly D in premium economy, +SGD 300.00"], "a cabin upgrade never loses the nonstop flight"
 
+# ---- direct only reaches the flight search; over budget with a firm cabin and direct only -> cheaper-flight choices
+bd = {**spec_h, "originAirport": "SIN", "destinationAirport": "HND", "legs": [],
+      "preferences": {"flight": {"cabin": "business", "maxStops": 0}}}
+A.normalize_prefs(bd)
+fa = A.pref_args("search_flights", bd)
+assert fa["maxStops"] == 0 and fa["cabin"] == "business", fa
+class AltGw:
+    def __init__(self): self.calls = []
+    def call(self, tool, args):
+        self.calls.append(args)
+        if args.get("cabin") == "premium_economy":   # the cheaper cabin: a mixed fare, a 1-stop, and the nonstop to pick
+            return {"ok": True, "offers": [
+                {"offerId": "pm", "airline": "Mix Air", "cabin": "mixed", "priceTotalSGD": 3000, "stops": 0},
+                {"offerId": "p1", "airline": "Hop Air", "cabin": "premium_economy", "priceTotalSGD": 3500, "stops": 1},
+                {"offerId": "p0", "airline": "ANA", "cabin": "premium_economy", "priceTotalSGD": 4604, "stops": 0}]}
+        return {"ok": True, "offers": [{"offerId": "b1", "airline": "Singapore Airlines", "cabin": "business",
+                                        "priceTotalSGD": 6083, "slices": [{"stops": 1}, {"stops": 0}]}]}
+bd_pool = {"flights": [{"offerId": "jal", "airline": "JAL", "cabin": "business", "priceTotalSGD": 8000, "stops": 0}]}
+bd_seq = {"flightOfferId": "jal"}
+gw_alt = AltGw()
+assert A._cheaper_flight_choices(bd, bd_pool, bd_seq, {"totals": {"total": "16100"}}, gw_alt) == [
+    "Fly ANA in premium economy nonstop, saves about SGD 3,400",
+    "Fly Singapore Airlines in business with 1 stop, saves about SGD 1,920"], "next cabin down, then one stop"
+assert sorted((c.get("cabin"), c.get("maxStops")) for c in gw_alt.calls) == [("business", 1), ("premium_economy", 0)], gw_alt.calls
+assert gw_alt.calls[0]["origin"] == "SIN" and gw_alt.calls[0]["returnDate"] == "2026-12-20"
+gw_alt = AltGw()
+assert A._cheaper_flight_choices(bd, bd_pool, bd_seq, {"totals": {"total": "12000"}}, gw_alt) == [] and not gw_alt.calls, \
+    "within the budget: no extra search"
+eco = {**bd, "preferences": {"flight": {"maxStops": 1}}}
+A.normalize_prefs(eco)
+assert A._cheaper_flight_choices(eco, bd_pool, bd_seq, {"totals": {"total": "16100"}}, gw_alt) == [] and not gw_alt.calls, \
+    "economy without direct only: no extra search"
+dear = {"flights": [{"offerId": "jal", "airline": "JAL", "cabin": "business", "priceTotalSGD": 3000, "stops": 0}]}
+assert A._cheaper_flight_choices(bd, dear, bd_seq, {"totals": {"total": "16100"}}, AltGw()) == [], "only fares that save money"
+
 
 def claude_run(lows):
     it = iter(lows); REPAIRS.clear(); sig = A._quality_signature

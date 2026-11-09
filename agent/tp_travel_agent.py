@@ -1283,7 +1283,8 @@ def pref_args(tool, spec):
     else:
         return {}
     return {k: v for k, v in a.items() if v not in (None, "", [], 0, False, "any", "balanced", "price", "cheapest",
-                                                     "economy") or (k == "avoidOvernight" and v is False)}
+                                                     "economy") or (k == "avoidOvernight" and v is False)
+            or (k == "maxStops" and v == 0 and v is not False)}
 
 
 def with_prefs(tool, spec, args, relax=False):
@@ -4202,6 +4203,68 @@ def _upgrade_choices(spec, pool, seq, vres):
     return out[:3]
 
 
+CABIN_DOWN = {"first": "business", "business": "premium_economy", "premium_economy": "economy"}
+CABIN_TEXT = {"economy": "economy", "premium_economy": "premium economy", "business": "business", "first": "first class"}
+
+
+def _flight_args(spec):
+    """search_flights arguments for the trip's route and dates (round trip, one-way or open-jaw)."""
+    multi = is_multi(spec)
+    args = {"origin": spec["originAirport"], "destination": spec["legs"][0]["airport"] if multi
+            else spec["destinationAirport"], "departDate": spec["startDate"], "returnDate": spec["endDate"],
+            "pax": spec["pax"]}
+    if spec.get("flightType") == "oneway":
+        args.pop("returnDate", None)
+    elif multi:
+        args["returnFrom"] = spec["legs"][-1]["airport"]
+    return args
+
+
+def _cheaper_flight_choices(spec, pool, seq, vres, gw):
+    """When the plan is over budget and the traveler chose a cabin above economy or direct only, search once each
+    for the next cabin down (same stops) and for the same cabin with one stop, and offer the cheapest fare of each
+    that costs less than the plan's flight. Worded like the upgrade choices, so the router reads the wish back."""
+    totals = (vres or {}).get("totals") or {}
+    total = totals.get("total", totals.get("totalSGD"))
+    f_pref = (spec.get("preferences") or {}).get("flight") or {}
+    cabin, stops = str(f_pref.get("cabin") or "economy"), f_pref.get("maxStops")
+    cur = next((f for f in pool.get("flights") or [] if f.get("offerId") == seq.get("flightOfferId")), None)
+    if total is None or float(total) <= budget_amount(spec) or not cur or known_price(cur) is None:
+        return []
+    alts = ([{"cabin": CABIN_DOWN[cabin], "maxStops": stops}] if cabin in CABIN_DOWN else []) + \
+        ([{"cabin": cabin, "maxStops": 1}] if stops == 0 else [])
+    if not alts:
+        return []
+    avoid = [str(a).lower() for a in f_pref.get("avoidAirlines") or []]
+
+    def search(alt):
+        aspec = copy.deepcopy(spec)
+        aspec["preferences"]["flight"].update(alt)
+        try:
+            res = gw.call("search_flights", with_prefs("search_flights", aspec, _flight_args(aspec)))
+        except GatewayError as e:
+            res = {"ok": False, "message": str(e)}
+        if not res.get("ok"):
+            print(json.dumps({"stage": "cheaper_flights", "alt": alt, "error": res.get("message") or res.get("error")}))
+            return None
+        offers = prepare_pool(aspec, {"flights": res.get("offers") or []}, _daily_spend(spec))["flights"]
+        fits = [f for f in offers if f.get("airline") and known_price(f) is not None
+                and known_price(f) < known_price(cur)
+                and str(f.get("cabin") or alt["cabin"]) == alt["cabin"]
+                and (_flight_total_stops(f) or 0) <= (alt["maxStops"] if alt["maxStops"] is not None else 9)
+                and not any(a in str(f["airline"]).lower() for a in avoid)]
+        if not fits:
+            return None
+        f = min(fits, key=lambda f: (known_price(f), str(f.get("offerId"))))
+        n = _flight_total_stops(f) or 0
+        how = "nonstop" if n == 0 else f"with {n} stop{'s' if n > 1 else ''}"
+        saved = round(known_price(cur) - known_price(f), -1)
+        return f"Fly {f['airline']} in {CABIN_TEXT[alt['cabin']]} {how}, saves about {currency_code(spec)} {saved:,.0f}"
+
+    with ThreadPoolExecutor(max_workers=len(alts)) as ex:
+        return [c for c in ex.map(search, alts) if c]
+
+
 def _route_text(spec):
     if not is_multi(spec):
         return ""
@@ -5252,7 +5315,8 @@ def new_plan(state, request, user_id, usage, metrics, t0):
     if spec.get("notFound"):
         msg += f" (I couldn't find {', '.join(spec['notFound'])} on the map; tell me the area and I'll add it.)"
     _remember(state, "assistant", msg)
-    choices = _upgrade_choices(spec, pool, best["seq"], best["verify"])
+    choices = _upgrade_choices(spec, pool, best["seq"], best["verify"]) or \
+        _cheaper_flight_choices(spec, pool, best["seq"], best["verify"], _clients()[2])
     yield ev("message", msg, **({"choices": choices} if choices else {}))
     return True
 
@@ -5344,14 +5408,7 @@ def refresh_bookings(state, spec, what, metrics):
             pool["stays"] = new
     if "flights" in what:
         yield ev("status", "Searching flights again with your new wishes…")
-        args = {"origin": spec["originAirport"], "destination": spec["legs"][0]["airport"] if multi
-                else spec["destinationAirport"], "departDate": spec["startDate"], "returnDate": spec["endDate"],
-                "pax": spec["pax"]}
-        if spec.get("flightType") == "oneway":
-            args.pop("returnDate", None)
-        elif multi:
-            args["returnFrom"] = spec["legs"][-1]["airport"]
-        r = call("search_flights", args)
+        r = call("search_flights", _flight_args(spec))
         if r.get("ok") and r.get("offers"):
             pool["flights"] = r["offers"]
     if "transfers" in what and multi:
@@ -5531,7 +5588,8 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
                 f"the area or full name?"
     msg = f"{note} (This is version {state['version']}; ask for more changes any time.)"
     _remember(state, "assistant", msg)
-    choices = _upgrade_choices(spec, state["pool"], best["seq"], best["verify"])
+    choices = _upgrade_choices(spec, state["pool"], best["seq"], best["verify"]) or \
+        _cheaper_flight_choices(spec, state["pool"], best["seq"], best["verify"], _clients()[2])
     yield ev("message", msg, **({"choices": choices} if choices else {}))
 
 
