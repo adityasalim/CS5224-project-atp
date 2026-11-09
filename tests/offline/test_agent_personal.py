@@ -504,6 +504,21 @@ A.normalize_prefs(named)
 list(A.refresh_bookings({"pool": {"stays": [], "flights": []}}, named, {"stays"}, {}))
 assert sg.calls and sg.calls[0]["name"] == "Imperial Hotel, Tokyo", sg.calls
 A._clients = clients
+# a tapped "Stay at X in Kyoto" on a multi-city trip: the router's legs carry no dates, the old legs keep theirs
+ms = {**spec_m2, "originAirport": "SIN", "pax": 2, "budget": {"amount": "12995", "currency": "SGD"}, "preferences": {}}
+A.normalize_prefs(ms)
+sg = StayGw()
+A._clients = lambda: (None, None, sg)
+st_ = {"spec": ms, "pool": {"stays": [], "flights": [], "transfers": [], "places": []}, "version": 1, "history": [],
+       "request": "Plan Tokyo and Kyoto"}
+gen = A.revise(st_, "Stay at Hotel X in Kyoto", {"legs": [{"city": "Tokyo", "nights": 3},
+                                                       {"city": "Kyoto", "nights": 2, "hotel": {"name": "Hotel X"}}]},
+               "u", A.Usage(), {}, time.time())
+next(gen)   # the first status line comes after the spec is saved and before the hotels are searched
+legs_ = st_["spec"]["legs"]
+assert [l["checkIn"] for l in legs_] == ["2026-12-15", "2026-12-18"] and legs_[1]["hotel"] == {"name": "Hotel X"}, legs_
+gen.close()
+A._clients = clients
 # the search categories keep the traveler's interest order (tp-find-places asks Google first for the first 4 sights)
 order = A.preference_search_categories({"interests": ["temple", "shrine", "museum", "viewpoint", "garden"]})
 assert order[:5] == ["temple", "shrine", "museum", "viewpoint", "garden"], order

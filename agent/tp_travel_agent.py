@@ -4198,8 +4198,10 @@ def _upgrade_choices(spec, pool, seq, vres):
     out = []
     for st in _stays_of(seq, pool):
         cur = known_price(st)
-        wished = set(st.get("matches") or [])   # the style wishes the plan's hotel meets; never offer one losing them
-        if cur is None or st.get("booked") or "requested hotel" in wished:
+        # the wishes the plan's hotel meets; never offer one losing them (a requested hotel's "requested hotel" match
+        # is on no other hotel, so it gets no upgrade)
+        wished = set(st.get("matches") or [])
+        if cur is None or st.get("booked"):
             continue
         better = [x for x in pool["stays"] if x.get("leg") == st.get("leg") and x.get("stayId") != st.get("stayId")
                   and x.get("name") and known_price(x) is not None and 0 < known_price(x) - cur <= room
