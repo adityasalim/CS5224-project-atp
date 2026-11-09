@@ -301,8 +301,10 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
     The reasons are written for the traveller: no IDs, similar notes merged, at most MAX_NOTES.
     """
     violations = [v for v in ((verify_res or {}).get("violations") or []) if isinstance(v, dict)]
+    # a requested place that didn't fit is delivered with a named note (owner decision); dietary, accessibility and
+    # avoid conflicts still block
     mandatory = [v for v in violations if violation_priority(v) == 1
-                 and str(v.get("check") or "").lower().strip() not in ("budget", "verify_error")]
+                 and str(v.get("check") or "").lower().strip() not in ("budget", "verify_error", "must_visit")]
     diag_mandatory, diag_caveat = split_diag_issues(diag)
     mandatory += diag_mandatory
     if mandatory:
@@ -320,11 +322,16 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
 
     reasons = []
     if not verified:
-        for v in violations[:6]:
+        missing = [v for v in violations if str(v.get("check") or "").lower().strip() == "must_visit"]
+        for v in missing:
+            reasons.append(f"{v.get('placeName') or 'A place you asked for'} didn't fit into this plan. "
+                           "Ask me to swap it in for another day.")
+        for v in [v for v in violations if v not in missing][:6]:
             t = _finding_text(v)
             if t:
                 reasons.append(t)
-        reasons.append("This itinerary did not pass every automatic check, so it is not fully verified.")
+        if len(missing) < len(violations):
+            reasons.append("This itinerary did not pass every automatic check, so it is not fully verified.")
     if loop_enabled:
         if judge_scores_pass(judge_res, judge_pass):
             pass
@@ -332,8 +339,8 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
             reasons.append(f"The preference review scored this plan below the required {judge_pass} "
                            f"out of 5 on at least one criterion (lowest score {judge_min(judge_res)}).")
         else:
-            reasons.append("The preference-quality review was unavailable for this itinerary, "
-                           "so its fit to your preferences is not confirmed.")
+            reasons.append("The preference review didn't run for this plan, so its fit to your preferences hasn't "
+                           "been double-checked.")
     judge_ok = (judge_res is None and not loop_enabled) or judge_scores_pass(judge_res, judge_pass)
     for i in diag_caveat:
         t = _finding_text(i)

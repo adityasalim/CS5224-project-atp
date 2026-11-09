@@ -194,7 +194,7 @@ A.judge, A.repair = saved
 print("reviewer down:", len(JUDGE_CALLS), "judge call,", len(REPAIRS), "correction,", best["acceptanceState"], best["judge"]["status"])
 assert JUDGE_CALLS == [1] and REPAIRS == [1], (JUDGE_CALLS, REPAIRS)
 assert best["judge"]["unavailable"] and best["judge"]["status"] == "unavailable" and best["seq"]["days"]
-assert any("unavailable" in r_ for r_ in best["acceptanceReasons"]), best["acceptanceReasons"]
+assert any("review didn't run" in r_ for r_ in best["acceptanceReasons"]), best["acceptanceReasons"]
 
 # ---- Claude on the website: a second correction only when a review score is below 3
 from acceptance import JUDGE_CRITERIA
@@ -243,6 +243,50 @@ for adapter, want in ((claude, 2), (strict.adapter, 1)):
     else:
         assert isinstance(best, ValueError), "configuration 19 keeps its strict refusal"
 A._clients = saved_clients
+
+# ---- a named place that still does not fit: a named note, not a refusal; dietary conflicts still block
+from acceptance import classify_acceptance
+miss = {"ok": True, "passed": False, "violations": [{"check": "must_visit", "item": "aloc:x", "placeName": "Tokyo Disneyland",
+                                                     "message": "Tokyo Disneyland was requested by the user but is not planned"}]}
+state_, reasons_ = classify_acceptance(miss, None, {"issues": []}, [], loop_enabled=False)
+assert state_ == "caveated" and reasons_ == ["Tokyo Disneyland didn't fit into this plan. Ask me to swap it in for another day."], reasons_
+diet = {"ok": True, "passed": False, "violations": [{"check": "dietary", "message": "Pork bar is not vegetarian"}]}
+assert classify_acceptance(diet, None, {"issues": []}, [], loop_enabled=False)[0] == "blocked"
+# the verifier's raw ID becomes the traveller's own name, and the repair hint names the place and the day
+pin_spec = json.loads(json.dumps(spec_r))
+first_id = next(i for d in plan_r["days"] for i in d.get("placeIds") or [])
+pin_spec["pinned"] = [{"name": "Tokyo Disneyland", "placeId": first_id}]
+class MissVerify(FailVerify):
+    def call(self, tool, args):
+        if tool == "verify_itinerary":
+            return {"ok": True, "passed": False, "violations": [{"check": "must_visit", "item": first_id,
+                                                                 "message": f"{first_id} was requested by the user but is not planned"}]}
+        return self.gw.call(tool, args)
+SEQ_ARGS = []
+class SeqSpy(MissVerify):
+    def call(self, tool, args):
+        if tool == "sequence_day":
+            SEQ_ARGS.append(args)
+        return super().call(tool, args)
+A._clients = lambda: (b_, m_, SeqSpy(g_))
+A.repair = lambda spec, pool, plan, *a, **k: json.loads(json.dumps(plan))
+gen = A.improve(pin_spec, pool_r, plan_r, request_r, A.Usage(adapter=claude, trip_id="t-pin"))
+try:
+    while True:
+        next(gen)
+except StopIteration as stop:
+    best = stop.value
+A._clients, A.repair = saved_clients, saved[1]
+assert best["acceptanceState"] == "caveated" and     best["acceptanceReasons"][0] == "Tokyo Disneyland didn't fit into this plan. Ask me to swap it in for another day.", best
+assert any(first_id in a_.get("pinned", []) for a_ in SEQ_ARGS), "day ordering is told which places to keep"
+hint = A._enrich_violations(pin_spec, pool_r, plan_r, {"violations": [{"check": "must_visit", "item": first_id, "message": "x"}]},
+                            [{"placeId": first_id, "date": "2026-12-03"}])
+assert any("Tokyo Disneyland" in h.get("repairHint", "") and "Never drop a pinned place" in h.get("repairHint", "")
+           for h in hint), hint
+assert not any("drop it" in h.get("repairHint", "") for h in hint if h.get("item") == first_id), hint
+# one role per place: Mount Fuji as a day trip is not also pinned
+one = A.normalize_special({"mustInclude": ["Mount Fuji", "teamLab Planets"], "dayTrips": ["Mount Fuji"]})
+assert [m["name"] for m in one["mustInclude"]] == ["teamLab Planets"] and one["dayTrips"][0]["place"] == "Mount Fuji", one
 
 # ---- spare budget: firm star wish, hotels by rating and flights by price and travel time when the budget has room
 def prefs_for(amount):
