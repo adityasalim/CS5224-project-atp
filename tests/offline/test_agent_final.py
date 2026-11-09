@@ -21,7 +21,7 @@ import gateway_client as G
 from acceptance import classify_acceptance
 
 SAVED = {k: getattr(A, k) for k in ("_clients", "ask_json", "narrative", "save", "converse", "recommend_packages",
-                                    "planning_context", "money_text")}
+                                    "planning_context", "money_text", "_hide_brand_repeats", "new_plan")}
 
 
 def restore():
@@ -218,7 +218,9 @@ saved_np = {k: getattr(A, k) for k in ("gather", "propose", "improve", "deliver"
 def fake_gather(spec, usage, metrics):
     yield A.ev("status", "searching")
     return {**copy.deepcopy(pool1), "flights": [{"offerId": "f1", "airline": "X", "priceTotalSGD": 1000}]}
+ORDER = []
 def bad_propose(*a, **k):
+    ORDER.append("propose")
     raise A.MalformedPlan("the plan has no list of days")
 def fake_improve(spec, pool, plan, request, usage, change=None):
     SEEN_PLAN.append(plan)
@@ -232,9 +234,11 @@ def no_choices(*a):
     yield
 A.gather, A.propose, A.improve, A.deliver, A._plan_choices = fake_gather, bad_propose, fake_improve, fake_deliver, no_choices
 A.prepare_pool = lambda *a, **k: None
+A._hide_brand_repeats = lambda spec, pool, plan=None: ORDER.append(("brands", plan)) or []
 st = {"spec": copy.deepcopy(spec1), "request": "r"}
 events, ok = quiet(drain, A.new_plan(st, "r", "u1", A.Usage(), {}, time.time()))
 assert ok is True and SEEN_PLAN == [{"days": []}] and events[-1]["type"] == "message", events
+assert ORDER == [("brands", None), "propose"], "one venue per brand before the planner sees the pool"
 print("PLAN SHAPE OK")
 
 # ---------------------------------------------------------------- 6. after the delivered version nothing raises
@@ -246,13 +250,18 @@ events, ok = quiet(drain, A.new_plan({"spec": copy.deepcopy(spec1), "request": "
 A.money_text, A.deliver = SAVED["money_text"], fake_deliver
 assert ok is True and events[-1] == A.ev("message", "Here's your 3-day plan. Want any changes?"), events[-1]
 saved_rev = {k: getattr(A, k) for k in ("repair", "search_more", "_hide_brand_repeats")}
-for reasoning, note in ((["slower", "fewer stops"], "slower fewer stops"), (7, "7"), (None, "I've updated the plan.")):
-    A.repair = lambda *a, **k: copy.deepcopy(plan1)
-    A.improve = lambda spec, pool, plan, request, usage, change=None, r=reasoning: fake_improve(
-        spec, pool, {**plan, "reasoning": r}, request, usage)
+for reasoning, note in ((["slower", "fewer stops"], "slower fewer stops"), (7, "7"), (None, "I've updated the plan."),
+                        ("no plan", "I've updated the plan.")):
+    ORDER.clear()
+    A.repair = lambda *a, **k: ORDER.append("repair") or copy.deepcopy(plan1)
+    def improve_with(spec, pool, plan, request, usage, change=None, r=reasoning):   # "no plan": the tail itself fails
+        best = yield from fake_improve(spec, pool, plan, request, usage)
+        return {**best, "plan": None if r == "no plan" else {**plan, "reasoning": r}}
+    A.improve = improve_with
     st = {"spec": copy.deepcopy(spec1), "request": "r", "plan": plan1, "pool": copy.deepcopy(pool1), "version": 1}
     events, _ = quiet(drain, A.revise(st, "more relaxed", {}, "u1", A.Usage(), {}, time.time()))
     assert events[-1] == A.ev("message", f"{note} (This is version 2; ask for more changes any time.)"), events[-1]
+    assert ORDER == [("brands", plan1), "repair"], ORDER   # the current plan's venues keep their brand
 for k, v in {**saved_np, **saved_rev}.items():
     setattr(A, k, v)
 print("AFTER DELIVERY OK")
@@ -289,6 +298,17 @@ st = {"spec": copy.deepcopy(spec1), "request": "r", "plan": plan1, "pool": pool1
 events, _ = quiet(drain, A.revise(st, "three of us", {"pax": "three"}, "u1", A.Usage(), {}, time.time()))
 assert events == [A.ev("message", "I can't make that change yet: the number of travellers is missing. Could you clarify?")]
 assert st["spec"]["pax"] == 2, "the session keeps its spec"
+assert "the number of travellers is missing" in A._check_spec({**spec1, "pax": "three"})
+REPLANS = []
+def fake_new_plan(state, request, *a):
+    REPLANS.append(state["spec"]["pax"])
+    return True
+    yield
+A.new_plan = fake_new_plan
+st = {"spec": copy.deepcopy(spec1), "request": "r", "plan": plan1, "pool": pool1}
+quiet(drain, A.revise(st, "three of us", {"pax": "3 people"}, "u1", A.Usage(), {}, time.time()))
+A.new_plan = SAVED["new_plan"]
+assert REPLANS == [3], REPLANS   # the tools get a number
 print("MODEL STRINGS OK")
 
 # ---------------------------------------------------------------- 7. web picks: no late writes from the worker threads
