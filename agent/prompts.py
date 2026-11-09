@@ -36,7 +36,9 @@ SCORE_RULES = """- Priority order: (1) Mandatory constraints (budget, dates, kno
   comfort: well-reviewed, comfortable stays balanced with cost inside the remaining budget.
   intensity: controls daily activity density (pace), not attraction importance.
 - Respect all trip.cuisines across meals; never exceed the bookable budget or pick a disproportionately expensive hotel
-  merely because comfort or food is rated high."""
+  merely because comfort or food is rated high. When the plan uses well under the bookable budget, spend the spare on
+  the traveler's stated comfort wishes (hotel stars, cabin, fewer stops): pick the better-rated stay or flight that
+  still fits the budget."""
 
 PERSONALISE_RULES = """- Personalise using verified candidate metadata ("category", "activity", "about", "cuisine", "matches", "tags"),
   not superficial names: for hiking or specific activities, prefer candidates with explicit trail/activity evidence over

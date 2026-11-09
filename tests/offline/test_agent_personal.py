@@ -195,4 +195,35 @@ print("reviewer down:", len(JUDGE_CALLS), "judge call,", len(REPAIRS), "correcti
 assert JUDGE_CALLS == [1] and REPAIRS == [1], (JUDGE_CALLS, REPAIRS)
 assert best["judge"]["unavailable"] and best["judge"]["status"] == "unavailable" and best["seq"]["days"]
 assert any("unavailable" in r_ for r_ in best["acceptanceReasons"]), best["acceptanceReasons"]
+
+# ---- Claude on the website: a second correction only when a review score is below 3
+from acceptance import JUDGE_CRITERIA
+claude = SimpleNamespace(strict_no_retry=True,
+                         configuration=SimpleNamespace(selections={"planner": SimpleNamespace(provider="anthropic")}))
+for low, want in ((2, 2), (3, 1)):
+    REPAIRS.clear()
+    A.judge = lambda *a, low=low, **k: {"scores": {c: low for c in JUDGE_CRITERIA}, "rationale": "r", "suggestions": []}
+    A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
+    gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=claude, trip_id="t-claude"))
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        best = stop.value
+    A.judge, A.repair = saved
+    assert len(REPAIRS) == want and best["rounds"] == want, (low, REPAIRS, best["rounds"])
+assert A._planner_provider(strict) is None, "configuration 19 keeps one correction"
+
+# ---- spare budget: firm star wish, hotels by rating and flights by price and travel time when the budget has room
+def prefs_for(amount):
+    s = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2,
+         "budget": {"amount": str(amount), "currency": "SGD"}, "dailySpend": {"amount": "100", "currency": "SGD"},
+         "preferences": {"hotel": {"minStars": 5}, "flight": {"cabin": "premium_economy"}}}
+    A.normalize_prefs(s)
+    return A.pref_args("search_stays", s), A.pref_args("search_flights", s)
+stays, flights = prefs_for(12995)
+assert stays["sortBy"] == "rating" and stays["minStars"] == 5 and stays["minKeep"] == 1, stays
+assert flights["sortBy"] == "best" and flights["cabin"] == "premium_economy", flights
+stays, flights = prefs_for(5000)   # SGD 3,800 bookable for 2 travelers x 5 nights is under SGD 500 each per night
+assert "sortBy" not in stays and stays["minKeep"] == 1 and "sortBy" not in flights, (stays, flights)
 print("PERSONALISATION OK")

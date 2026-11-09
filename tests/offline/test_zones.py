@@ -222,7 +222,8 @@ class FakeGateway:
              "lat": z_lat + 0.001, "lng": z_lng, "rating": 4.5, "reviews": 300} for c in args["categories"]]}
 
 
-Z = agent(["zone_food"], stubs={"_clients": lambda: (None, None, FakeGateway()), "GatewayError": RuntimeError})
+Z = agent(["zone_food"], stubs={"_clients": lambda: (None, None, FakeGateway()), "GatewayError": RuntimeError,
+                              "_budget_room": lambda spec: False})
 z_spec, z_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 def drain(gen):
     while True:

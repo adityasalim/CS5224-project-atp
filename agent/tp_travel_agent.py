@@ -92,6 +92,7 @@ MAX_REPAIR_ROUNDS = max(0, int(os.environ.get("MAX_REPAIR_ROUNDS", "3")))
 JSON_MAX_ATTEMPTS = 3        # normal mode only; strict experiment mode always makes exactly one attempt
 LOOP_ENABLED = os.environ.get("LOOP", "true").lower() == "true"   # "false" = ablation variant B
 DAILY_SPEND = float(os.environ.get("DAILY_SPEND_SGD_PER_PERSON", "100"))   # same as the verifier
+ROOMY_NIGHT_SHARE = 5   # see _budget_room
 JUDGE_PASS = max(4, int(os.environ.get("JUDGE_PASS_SCORE", "4")))   # every criterion must reach at least 4/5
 HOME_AIRPORT = os.environ.get("DEFAULT_HOME_AIRPORT", "SIN")
 GATHER_TOOLS = ("search_flights", "search_stays", "find_places")
@@ -1262,11 +1263,15 @@ def pref_args(tool, spec):
         # Only what the traveller asked for is sent. The comfort score no longer forces star/review floors:
         # tp-search-stays uses it to weight its ranking, and relaxes any filter that would leave too few hotels.
         a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"],
-             "sortBy": h["sortBy"], "comfort": (spec.get("preferenceScores") or {}).get("comfort", 5)}
+             "sortBy": "rating" if h["sortBy"] == "price" and _budget_room(spec) else h["sortBy"],
+             "comfort": (spec.get("preferenceScores") or {}).get("comfort", 5),
+             "minKeep": 1 if h["minStars"] else 0}   # stars the traveler chose are kept unless no hotel has them
     elif tool == "search_flights":
         f = p["flight"]
         a = {k: f[k] for k in ("maxStops", "departAfter", "departBefore", "returnDepartAfter", "returnDepartBefore",
                                "preferredAirlines", "avoidAirlines", "sortBy", "cabin")}
+        if a["sortBy"] == "price" and _budget_room(spec):
+            a["sortBy"] = "best"
     elif tool == "search_transfers":
         a = dict(p["transfer"])
     else:
@@ -3026,6 +3031,16 @@ def _bookable(spec):
     return round(budget_amount(spec) - trip_daily(spec, DAILY_SPEND) * spec["pax"] * ((e - s).days + 1))
 
 
+def _budget_room(spec):
+    """True when the bookable budget leaves at least ROOMY_NIGHT_SHARE x the daily-spend estimate per traveler per
+    night (about SGD 500): then hotels rank by rating and flights by price and travel time, not price alone."""
+    try:
+        nights = max(1, trip_days(spec) - 1)
+        return _bookable(spec) >= ROOMY_NIGHT_SHARE * trip_daily(spec, DAILY_SPEND) * spec["pax"] * nights
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
 def planning_context(spec, pool):
     """Trip + candidate pool as one text block. It is identical for propose and every repair round of the same
     trip, so it is sent as a cached system block (see _request_parts) and paid for in full only once."""
@@ -4611,11 +4626,20 @@ def _can_judge_on_failed_verify(vres, seq, usage, judge_cache):
     return True
 
 
+def _planner_provider(usage):
+    try:
+        return usage.adapter.configuration.selections["planner"].provider
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+
 def improve(spec, pool, plan, full_request, usage, change=None):
     """Sequence, verify, judge, repair and classify the best itinerary."""
     _, _, gw = _clients()
     strict_mode = bool(getattr(getattr(usage, 'adapter', None), 'strict_no_retry', False))
     round_limit = 1 if strict_mode else MAX_REPAIR_ROUNDS
+    # Claude on the website: a second correction when a review score is below 3, and the best-ranked plan is kept
+    claude = _planner_provider(usage) == "anthropic"
     prepare_pool(spec, pool, DAILY_SPEND)
     tspec = trip_spec_for_tools(spec)
     best, rounds = None, 0
@@ -4679,7 +4703,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
                              "rationale": None, "priorSuggestions": list(prior_reviewer_suggestions),
                              "suggestions": list(dict.fromkeys(prior_reviewer_suggestions + det_suggestions))[:6]}
         score = _plan_rank(spec, pool, seq, vres, judge_res, unscheduled)
-        improved_this_round = (best is None or strict_mode or score > best["score"])
+        improved_this_round = (best is None or (strict_mode and not claude) or score > best["score"])
         if improved_this_round:
             best = {"score": score, "plan": plan, "seq": seq, "verify": vres, "judge": judge_res,
                     "unscheduled": unscheduled, "diag": diag, "unpriced": unpriced}
@@ -4690,7 +4714,8 @@ def improve(spec, pool, plan, full_request, usage, change=None):
         done = _verified(vres) and judge_ok and not unscheduled and not unpriced
         if LOOP_ENABLED and judge_res is not None and judge_res.get("unavailable"):
             judge_res["status"] = "unavailable"
-        if done or not LOOP_ENABLED or rounds >= round_limit:
+        limit = 2 if strict_mode and claude and (_judge_min(best["judge"]) or 5) < 3 else round_limit
+        if done or not LOOP_ENABLED or rounds >= limit:
             stop_reason = STOP_ACCEPTED if done else (STOP_LOOP_DISABLED if not LOOP_ENABLED else STOP_ROUND_LIMIT)
             break
         if (not strict_mode and _verified(vres) and not unscheduled
@@ -4700,12 +4725,12 @@ def improve(spec, pool, plan, full_request, usage, change=None):
         if not strict_mode and no_progress_streak >= 2:
             stop_reason = STOP_NO_PROGRESS
             break
-        base = best if (best is not None and not strict_mode and score < best["score"]) else {
+        base = best if (best is not None and (not strict_mode or claude) and score < best["score"]) else {
             "plan": plan, "verify": vres, "judge": judge_res, "unscheduled": unscheduled}
         rounds += 1
         why = ("hard checks" if not _verified(base["verify"])
                else "preference fit" if base["judge"] and not _judge_scores_pass(base["judge"]) else "timing")
-        yield ev("status", f"Improving the plan (round {rounds} of {round_limit}, fixing {why})…")
+        yield ev("status", f"Improving the plan (round {rounds} of {limit}, fixing {why})…")
         try:
             next_plan = repair(spec, pool, base["plan"], base["verify"], base["judge"],
                                base["unscheduled"], usage, change=change)
