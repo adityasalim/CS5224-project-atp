@@ -1386,8 +1386,9 @@ def _hotel_focus(spec, places, centre=None):
 def _call_tool(g, spec, tool, args, relax=False):
     """One tool call with the traveller's preferences filled in; any failure (a Gateway error, a raw read timeout)
     becomes a failed result, so one search never ends the whole parallel gather."""
+    a = with_prefs(tool, spec, args, relax=relax)   # outside the try: a bug here still raises with its traceback
     try:
-        return g.call(tool, with_prefs(tool, spec, args, relax=relax))
+        return g.call(tool, a)
     except GatewayError as e:
         return {"ok": False, "error": "gateway_error", "message": str(e)}
     except Exception as e:  # noqa: BLE001
