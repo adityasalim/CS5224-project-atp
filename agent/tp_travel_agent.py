@@ -1836,8 +1836,11 @@ def build_zones(spec, pool):
 
 
 def food_cap(spec):
-    """Google food requests per plan: 2 per trip day, between GOOGLE_FOOD_CAP and GOOGLE_FOOD_CAP_MAX."""
-    return min(GOOGLE_FOOD_CAP_MAX, max(GOOGLE_FOOD_CAP, 2 * trip_days(spec)))
+    """Google food requests per plan: 2 per trip day (at least GOOGLE_FOOD_CAP), plus 1 per wished cuisine per city
+    beyond the first 2 (the cuisine searches come before the zone searches), at most GOOGLE_FOOD_CAP_MAX."""
+    cuisines = len([c for c in str(pref_args("find_places", spec).get("cuisine") or "").split("|") if c][:5])
+    cities = len({str(l.get("city")).lower() for l in spec.get("legs") or []}) or 1
+    return min(GOOGLE_FOOD_CAP_MAX, max(GOOGLE_FOOD_CAP, 2 * trip_days(spec)) + cities * max(0, cuisines - 2))
 
 
 def zone_food(spec, pool, calls, sources):

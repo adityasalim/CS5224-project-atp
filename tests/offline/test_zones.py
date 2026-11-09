@@ -330,7 +330,7 @@ SENT.clear()
 assert drain(Z["zone_food"](dict(copy.deepcopy(two), endDate="2026-12-06"), few(25), [], set())) == 20 == len(SENT)
 assert counts() == [1, 2, 17, 0], counts()
 # a city visited twice (Tokyo 4, Kyoto 3, Tokyo 2 nights; 5 cuisines and coffee; cap 20): one coffee and one search
-# per cuisine per city, the cities' zones take turns, and the second Tokyo leg's zones (the same 4 places) are not
+# per cuisine per city (cap 20 + 2 cities x 3 cuisines beyond 2 = 26), the cities' zones take turns, and the second Tokyo leg's zones (the same 4 places) are not
 # searched again; every place found serves both Tokyo legs
 rep = copy.deepcopy(spec)
 rep.update(startDate="2026-12-01", endDate="2026-12-10", cuisines=["Italian", "Indian", "Thai", "French", "Sushi"])
@@ -341,18 +341,19 @@ kyoto_z = [dict(z) for z in zones if z["leg"] == 1 and z["kind"] in ("walk", "so
 assert len(kyoto_z) >= 4, kyoto_z
 rep_pool = dict(copy.deepcopy(pool), zones=walks_at(8) + kyoto_z + walks_at(4, leg=2))
 SENT.clear()
-assert drain(Z["zone_food"](rep, rep_pool, [], set())) == 20 == len(SENT), len(SENT)
-assert counts() == [2, 10, 8, 0], counts()
+assert Z["food_cap"](rep) == 26
+assert drain(Z["zone_food"](rep, rep_pool, [], set())) == 26 == len(SENT), len(SENT)
+assert counts() == [2, 10, 14, 0], counts()   # all 14 distinct zones (8 Tokyo, 6 Kyoto); no request left for area searches
 assert sorted(a["cuisine"] for _, a in SENT if is_cuisine(a)) == sorted(2 * ["italian", "indian", "thai", "french", "sushi"])
 zone_lats = [a["lat"] for _, a in SENT if is_zone(a)]
-assert sum(lat < 35.3 for lat in zone_lats) == 4, "Kyoto gets 4 of the 8 zone searches"
+assert sum(lat < 35.3 for lat in zone_lats) == len(kyoto_z), "every Kyoto zone gets its search"
 tokyo_coffee = next(a for _, a in SENT if is_coffee(a) and a["lat"] > 35.3)
 cid = f"g:{tokyo_coffee['lat']:.4f}:{tokyo_coffee['lng']:.4f}:cafe"
 assert sorted(p["leg"] for p in rep_pool["places"] if p["placeId"] == cid) == [0, 2], "the city's coffee serves both legs"
 z0 = rep_pool["zones"][0]
 rid = f"g:{z0['lat']:.4f}:{z0['lng']:.4f}:restaurant"
 assert sorted((p["leg"], p["zone"]) for p in rep_pool["places"] if p["placeId"] == rid) == [(0, "Z100"), (2, "Z200")]
-print("Google food for Tokyo 4, Kyoto 3, Tokyo 2 nights (cap 20): 2 coffee, 10 cuisines, 8 zones (4 Kyoto), 0 area")
+print("Google food for Tokyo 4, Kyoto 3, Tokyo 2 nights (cap 26): 2 coffee, 10 cuisines, 14 zones, 0 area")
 
 # run 7: a wished cuisine the pool has but the plan does not becomes a correction naming the nearest candidates
 n_spec, n_pool = copy.deepcopy(spec), copy.deepcopy(pool)
