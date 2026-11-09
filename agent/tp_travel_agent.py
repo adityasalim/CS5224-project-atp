@@ -4763,7 +4763,8 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             vres["passed"] = False
         print(json.dumps({"stage": "verify", "round": rounds, "passed": vres.get("passed") is True, "violations": [
             {"check": v.get("check"), "day": v.get("day"), "message": str(v.get("message") or "")[:160]}
-            for v in (vres.get("violations") or [])[:10] if isinstance(v, dict)]}, ensure_ascii=False))
+            for v in (vres.get("violations") if isinstance(vres.get("violations"), list) else [])[:10]
+            if isinstance(v, dict)]}, ensure_ascii=False))
         diag = _deterministic_quality_eval(spec, pool, seq)
         unpriced = _unpriced_bookings(spec, pool, seq)
         det_suggestions = list(diag["suggestions"])
