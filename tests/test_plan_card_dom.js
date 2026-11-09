@@ -34,6 +34,33 @@ assert.equal(route.textContent, "Day route in Google Maps");
 assert.equal(route.href, "https://www.google.com/maps/dir/?api=1&origin=35,135&destination=35.01,135.77");
 assert.equal(doc.querySelector("#chat .attribution").textContent, "Ratings and hours from Google Maps");
 
+// the checks badge: green only when every review score is 4 or more; neutral when the lowest is below 4
+const cardOf = (it) => { win.renderItinerary(it); return [...doc.querySelectorAll("#chat .card")].pop(); };
+const badgeOf = (it) => { const b = cardOf(it).querySelector(".totals .badge"); return [b.className, b.textContent]; };
+const scores = (low) => ({preferenceFit: low, theme: 4, pacing: 5, variety: 4});
+const checked = {title: "T", totals: {total: 1000, budget: 2000}, days: [], verified: true};
+assert.deepEqual(badgeOf({...checked, judge: {status: "evaluated", scores: scores(4)}}), ["badge ok", "All checks passed"]);
+assert.deepEqual(badgeOf({...checked, judge: {status: "evaluated", scores: scores(3)}}),
+                 ["badge partial", "Checks passed · some preferences partly met"]);
+assert.deepEqual(badgeOf({...checked, judge: {status: "unavailable", scores: {}}}), ["badge ok", "All checks passed"]);
+assert.deepEqual(badgeOf({...checked, verified: false, judge: {status: "evaluated", scores: scores(2)}}), ["badge demo", "See notes"]);
+const partial = cardOf({...checked, judge: {status: "evaluated", scores: scores(3)},
+                        caveats: ["Some of your preferences are only partly met (lowest review score 3 of 5)."]});
+assert.deepEqual([...partial.querySelectorAll(".notes li")].map(li => li.textContent),
+                 ["Some of your preferences are only partly met (lowest review score 3 of 5)."]);
+assert.notEqual(getComputedStyleColor(partial.querySelector(".badge")), getComputedStyleColor(cardOf(
+  {...checked, judge: {status: "evaluated", scores: scores(5)}}).querySelector(".badge")), "not the green badge");
+function getComputedStyleColor(e) { return win.getComputedStyle(e).color; }
+
+// the agent's own lines (park meals, check-out, leaving for the airport) show as timed rows like the stops
+const lines = cardOf({title: "T", days: [
+  {title: "Day 3", stops: [{time: "09:00", name: "Tokyo Disneyland"}, {time: "", name: "🍽 Lunch and dinner inside the park"}]},
+  {title: "Day 10", stops: [{time: "", name: "🧳 Check out and store bags at the hotel (morning)"},
+                            {time: "18:00", name: "Dinner"}, {time: "20:55", name: "✈ Leave for Haneda (HND) by 20:55"}]}]});
+assert.deepEqual([...lines.querySelectorAll(".day")].map(d => [...d.querySelectorAll(".stop")].map(r => r.textContent)),
+                 [["09:00Tokyo Disneyland", "🍽 Lunch and dinner inside the park"],
+                  ["🧳 Check out and store bags at the hotel (morning)", "18:00Dinner", "20:55✈ Leave for Haneda (HND) by 20:55"]]);
+
 // a normal plan keeps its days, PDF link and feedback box; a refused one shows only title, message, notes, choices
 win.eval('CONFIG.API_URL = "https://api.example.test"');
 const lastCard = () => [...doc.querySelectorAll("#chat .card")].pop();
@@ -107,7 +134,8 @@ win.send().then(() => {
                    "no follow-ups after reloading a refused plan");
   re.close();
   assert.deepEqual(errors, []);
-  console.log("PASS: plan card zone headers, food chips, Maps and day-route links, attribution; question choices as chips; " +
+  console.log("PASS: plan card zone headers, food chips, Maps and day-route links, attribution; checks badge and partly-met " +
+              "review note; park, check-out and airport lines; question choices as chips; " +
               "refused plan without days, PDF or feedback; message choices kept after a plan");
   win.close();
 }).catch(e => { console.error(e); process.exit(1); });

@@ -202,25 +202,42 @@ assert JUDGE_CALLS == [1] and REPAIRS == [1], (JUDGE_CALLS, REPAIRS)
 assert best["judge"]["unavailable"] and best["judge"]["status"] == "unavailable" and best["seq"]["days"]
 assert any("review didn't run" in r_ for r_ in best["acceptanceReasons"]), best["acceptanceReasons"]
 
-# ---- Claude on the website: a second correction only when a review score is below 3
+# ---- Claude on the website: a second correction only when a review score is still below 3 and the first correction
+# raised the lowest score (owner approved, final round)
 from acceptance import JUDGE_CRITERIA
 claude = SimpleNamespace(strict_no_retry=True,
                          configuration=SimpleNamespace(selections={"planner": SimpleNamespace(provider="anthropic")}))
-for low, want in ((2, 2), (3, 1)):
+for lows, want in (((1, 2), 2), ((2, 2), 1), ((3, 3), 1), ((2, 1), 1)):
     REPAIRS.clear()
-    A.judge = lambda *a, low=low, **k: {"scores": {c: low for c in JUDGE_CRITERIA}, "rationale": "r", "suggestions": []}
-    A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
-    gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=claude, trip_id="t-claude"))
-    try:
-        while True:
-            next(gen)
-    except StopIteration as stop:
-        best = stop.value
+    A.judge = lambda *a, lows=lows, **k: {"scores": {c: lows[min(len(REPAIRS), 1)] for c in JUDGE_CRITERIA},
+                                         "rationale": "r", "suggestions": []}
+    low = lows
+
+    def drop_one(spec, pool, plan, *a, **k):   # each correction is a new plan (one stop fewer), so it is reviewed again
+        REPAIRS.append(1)
+        plan = json.loads(json.dumps(plan))
+        day = next(d for d in plan["days"] if d.get("placeIds"))
+        day["placeIds"] = day["placeIds"][:-1]
+        return plan
+    A.repair = drop_one
+    JUDGE_LOG = io.StringIO()
+    with contextlib.redirect_stdout(JUDGE_LOG):
+        gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=claude, trip_id="t-claude"))
+        try:
+            while True:
+                next(gen)
+        except StopIteration as stop:
+            best = stop.value
     A.judge, A.repair = saved
     assert len(REPAIRS) == want and best["rounds"] == want, (low, REPAIRS, best["rounds"])
+    # one judge line per round, with the scores and the lowest score
+    logged = [json.loads(l) for l in JUDGE_LOG.getvalue().splitlines() if l.startswith('{"stage": "judge"')]
+    assert [(r["round"], r["minScore"]) for r in logged] == [(n, lows[min(n, 1)]) for n in range(want + 1)], logged
+    assert logged[0]["scores"] == {c: lows[0] for c in JUDGE_CRITERIA}, logged
 assert A._planner_provider(strict) is None, "configuration 19 keeps one correction"
 
-# hard checks still failing: Claude gets a second correction and a "not fully verified" plan; configuration 19 refuses
+# hard checks still failing: Claude gets one correction (the plan is not reviewed again, so the lowest review score
+# is not raised and there is no second one) and a "not fully verified" plan; configuration 19 refuses
 b_, m_, g_ = A._clients()
 class FailVerify:
     def __init__(self, gw): self.gw = gw
@@ -231,7 +248,7 @@ class FailVerify:
         return self.gw.call(tool, args)
 saved_clients = A._clients
 A._clients = lambda: (b_, m_, FailVerify(g_))
-for adapter, want in ((claude, 2), (strict.adapter, 1)):
+for adapter, want in ((claude, 1), (strict.adapter, 1)):
     REPAIRS.clear()
     A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
     gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=adapter, trip_id="t-hard"))
@@ -343,7 +360,7 @@ assert A._daily_spend({"preferences": {"hotel": {"minStars": 4}}}) == A._daily_s
 assert A._daily_spend({"preferences": {"hotel": {"minStars": 3}}, "preferenceScores": {"comfort": 7}}) == 100
 src = pathlib.Path(A.__file__).read_text(encoding="utf-8")
 calls_pp = re.findall(r"prepare_pool\(([^()]*(?:\([^()]*\))?[^()]*)\)", src)
-assert len(calls_pp) == 5 and all(c.replace(" ", "") == "spec,pool,_daily_spend(spec)" for c in calls_pp), calls_pp
+assert len(calls_pp) == 6 and all(c.replace(" ", "") == "spec,pool,_daily_spend(spec)" for c in calls_pp), calls_pp
 five = {**roomy, "preferences": {"hotel": {"minStars": 5}},
         "_fx": {"base": "SGD", "rates": {"SGD": 1}, "timestamp": time.time(), "asOf": "2026-12-01", "provider": "test"}}
 A.normalize_prefs(five)
@@ -573,8 +590,10 @@ def claude_run(lows):
 
 best = claude_run([3, 2])   # the corrected plan scores worse: the first one is kept, and no second correction
 assert REPAIRS == [None] and min(best["judge"]["scores"].values()) == 3, (REPAIRS, best["judge"])
-best = claude_run([2, 1, 1])   # still below 3: the second correction starts from the best plan
-assert REPAIRS == [None, None] and min(best["judge"]["scores"].values()) == 2, (REPAIRS, best["judge"])
+best = claude_run([2, 1, 1])   # the first correction lowered the lowest score: no second one, the first plan is kept
+assert REPAIRS == [None] and min(best["judge"]["scores"].values()) == 2, (REPAIRS, best["judge"])
+best = claude_run([1, 2, 3])   # raised but still below 3: the second correction starts from the best (corrected) plan
+assert REPAIRS == [None, 1] and min(best["judge"]["scores"].values()) == 3, (REPAIRS, best["judge"])
 # the days are ordered at the same time, and results stay in day order
 import threading, time as _time
 class SlowGw:

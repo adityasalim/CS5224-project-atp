@@ -81,7 +81,8 @@ assert A._loyalty_caveats(spec_l, {**seq, "flightOfferId": "f2", "stayId": "b"},
 # ---- plan card: zone headers, food chips, why picked, web publisher, Maps links, day route, attribution
 places = [{"placeId": "osm:1", "name": "Senso-ji", "category": "temple", "lat": 35.7148, "lng": 139.7967, "zone": "Z3",
            "rating": 4.5},
-          {"placeId": "gplace:abc", "name": "Kurasu Kyoto", "category": "cafe", "lat": 35.71, "lng": 139.79, "zone": "Z3",
+          {"placeId": "gplace:abc", "name": "Kurasu Kyoto", "category": "cafe", "cuisine": "coffee shop",   # Google's type
+           "lat": 35.71, "lng": 139.79, "zone": "Z3",
            "rating": 4.7, "reviews": 2807, "priceLevel": "PRICE_LEVEL_MODERATE", "url": "https://maps.google.com/?cid=1",
            "webSource": "https://www.theworlds100bestcoffeeshops.com/kyoto"},
           {"placeId": "gplace:def", "name": "Pizzeria Italiana", "category": "restaurant", "lat": 35.70, "lng": 139.70,

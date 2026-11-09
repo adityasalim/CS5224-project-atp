@@ -500,7 +500,13 @@ function renderItinerary(it) {
     const a = el("span"); a.append("Estimated total "); a.append(el("strong", null, tripMoney(it.totals.total, it.currency || "SGD")));
     const b = el("span"); b.append("Budget "); b.append(el("strong", null, tripMoney(it.totals.budget, it.currency || "SGD")));
     t.append(a, b);
-    if (it.verified !== undefined) t.append(el("span", "badge " + (it.verified ? "ok" : "demo"), it.verified ? "All checks passed" : "See notes"));
+    if (it.verified !== undefined) {
+      // checks passed but the preference review's lowest score is below 4: a neutral badge, not the green one
+      const scores = Object.values((it.judge && it.judge.scores) || {}).map(Number).filter(Number.isFinite);
+      const partly = it.verified && it.judge && it.judge.status === "evaluated" && scores.length && Math.min(...scores) < 4;
+      t.append(el("span", "badge " + (partly ? "partial" : it.verified ? "ok" : "demo"),
+                  partly ? "Checks passed · some preferences partly met" : it.verified ? "All checks passed" : "See notes"));
+    }
     card.append(t);
   }
   const pdf = safeUrl(it.pdfUrl);

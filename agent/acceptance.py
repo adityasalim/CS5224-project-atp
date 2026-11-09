@@ -336,8 +336,7 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
         if judge_scores_pass(judge_res, judge_pass):
             pass
         elif is_valid_judge_result(judge_res):
-            reasons.append(f"The preference review scored this plan below the required {judge_pass} "
-                           f"out of 5 on at least one criterion (lowest score {judge_min(judge_res)}).")
+            reasons.append(f"Some of your preferences are only partly met (lowest review score {judge_min(judge_res)} of 5).")
         else:
             reasons.append("The preference review didn't run for this plan, so its fit to your preferences hasn't "
                            "been double-checked.")

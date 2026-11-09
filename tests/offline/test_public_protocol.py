@@ -43,7 +43,8 @@ class Protocol(unittest.TestCase):
   nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('_repair_request','_planner_provider')]
   captured={}
   ns={'prepare_pool':lambda *a:None,'DAILY_SPEND':100,'_daily_spend':lambda s:100,'is_multi':lambda s:False,'_special_rules':lambda s:'','planning_context':lambda *a:'facts','get_prompt':lambda n:'repairer','json':__import__('json'),'PLANNER_MODEL':'unused','plan_tokens':lambda spec:6000,
-     '_enrich_violations':lambda *a:[],'_deterministic_quality_eval':lambda *a:{'suggestions':[]},'_is_valid_judge_result':lambda r:False}
+     '_enrich_violations':lambda *a:[],'_deterministic_quality_eval':lambda *a:{'suggestions':[]},'_is_valid_judge_result':lambda r:False,
+     '_plan_shape':lambda plan:plan}
   def ask(*args,**kw):captured.update(kw);return {}
   ns['ask_json']=ask
   exec(compile(ast.Module(body=nodes,type_ignores=[]),'<repair>','exec'),ns)
