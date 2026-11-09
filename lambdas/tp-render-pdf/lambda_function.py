@@ -169,12 +169,17 @@ def build_pdf(event, pool, daily_spend):
     def cost_row(label, detail, amount, bold=False, link=None):
         pdf.set_font(_FAMILY, "B" if bold else "", 10.5)
         pdf.cell(40, 6.5, _t(label))
+        detail, room = _t(detail), pdf.w - pdf.r_margin - pdf.get_x() - pdf.get_string_width(_t(amount)) - 4
+        if pdf.get_string_width(detail) > room:   # keep long text clear of the amount
+            while detail and pdf.get_string_width(detail + "...") > room:
+                detail = detail[:-1]
+            detail = detail.rstrip() + "..."
         if link:
             pdf.set_text_color(30, 90, 170)
-            pdf.cell(95, 6.5, _t(detail), link=link)
+            pdf.cell(95, 6.5, detail, link=link)
             pdf.set_text_color(30, 30, 30)
         else:
-            pdf.cell(95, 6.5, _t(detail))
+            pdf.cell(95, 6.5, detail)
         pdf.cell(0, 6.5, _t(amount), align="R", new_x="LMARGIN", new_y="NEXT")
 
     section(f"Costs ({currency})")
@@ -220,8 +225,8 @@ def build_pdf(event, pool, daily_spend):
             pdf.set_text_color(30, 90, 170)
             mins = trip.get("travelMinutes")
             how = f' ({trip.get("travelBy") or "train/bus"}, about {mins} min each way)' if mins else ""
-            pdf.cell(0, 6, _t(f'Day trip to {trip["place"]}{how}, back to the hotel in the evening'),
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.multi_cell(0, 6, _t(f'Day trip to {trip["place"]}{how}, back to the hotel in the evening'),
+                           new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
         note = (narrative.get("dayNotes") or {}).get(d["date"])
         if note:

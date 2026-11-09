@@ -4270,7 +4270,8 @@ def _stop_display(p, spec, zones, s=None):
     diets = {d.replace("_", "-") for d in (spec.get("preferences") or {}).get("dietary") or []}
     why += [t for t in p.get("tags") or [] if t.split(" ")[0] in diets][:1]
     host = re.sub(r"^www\.", "", urlparse(str(p.get("webSource") or "")).netloc.lower())
-    out.update(rating=p.get("rating"), reviews=p.get("reviews"), priceLevel=_PRICE_SIGNS.get(p.get("priceLevel")),
+    out.update(rating=round(float(p["rating"]), 1) if p.get("rating") else None, reviews=p.get("reviews"),
+               priceLevel=_PRICE_SIGNS.get(p.get("priceLevel")),
                why=", ".join(dict.fromkeys(why[:3])) or None,
                webSource=next((v for k, v in WEB_PUBLISHERS.items() if host == k or host.endswith("." + k)), None))
     return {k: v for k, v in out.items() if v is not None}
