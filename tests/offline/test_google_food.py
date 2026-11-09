@@ -106,8 +106,10 @@ k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywo
 assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v7:") for s in STORE), (k["source"], list(STORE))
 fp._overpass = lambda q, deadline: ([], None)
 g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
-assert g["source"] == "google+google" and any(p["category"] == "temple" and p["placeId"].startswith("gplace:") for p in g["places"])
-assert not any(s.startswith("places-v7:") for s in STORE), list(STORE)
+# the temple was already asked from Google (with the review floor), so the chain's Google step does not ask again
+assert g["source"] == "google" and "google skipped: already searched" in g.get("fallbacksTried", []), g
+stored = [json.loads(v["payload"]) for s, v in STORE.items() if s.startswith("places-v7:")]
+assert all(not p["placeId"].startswith("gplace:") for c in stored for p in c["places"]), "Google places are never cached"
 fp._overpass = _overpass
 
 # a web pick (namesCategory) is verified on Google only, one Text Search per name, with the 4.0-star, 50-review and
@@ -164,7 +166,7 @@ fp.requests.post = lambda url, headers=None, json=None, timeout=None: Resp({"pla
 assert fp._google(qc, time.time() + 30)[0][0]["cuisine"] is None
 
 fp._secret_cache = {}   # no key: food goes through the free chain as before
-SIGHTS.clear()
+SIGHTS.clear(); STORE.clear()   # the Kyoto query above is cached now (only its chain places)
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
 assert SIGHTS == [["cafe", "temple"]], SIGHTS
 print("GOOGLE FOOD OK")

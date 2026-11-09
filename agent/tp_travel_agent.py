@@ -1210,6 +1210,8 @@ def normalize_prefs(spec):
     days = p.get("days") if isinstance(p.get("days"), dict) else {}
     num = lambda v, lo, hi: min(max(float(v), lo), hi) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
     stops = flight.get("maxStops")
+    # a model may write "premium economy" or "first class" (as the choices read)
+    cabin = re.sub(r"[\s-]+", "_", str(flight.get("cabin") or "").strip().lower()).removesuffix("_class")
     out = {
         "vibe": p.get("vibe") if p.get("vibe") in ("classic", "balanced", "hidden_gems") else "balanced",
         "dietary": list(dict.fromkeys(d.lower().replace(" ", "_").replace("-", "_") for d in _real_values(p.get("dietary")))),
@@ -1233,8 +1235,7 @@ def normalize_prefs(spec):
                    "alliances": [a for a in ALLIANCES if a.lower() in {x.lower() for x in lst(flight.get("alliances"))}],
                    "bags": "checked" if flight.get("bags") == "checked" else "carry_on",
                    "sortBy": flight.get("sortBy") if flight.get("sortBy") in ("price", "duration", "best") else "price",
-                   "cabin": flight.get("cabin") if flight.get("cabin") in ("economy", "premium_economy", "business",
-                                                                           "first") else "economy"},
+                   "cabin": cabin if cabin in ("economy", "premium_economy", "business", "first") else "economy"},
         "transfer": {"prefer": transfer.get("prefer") if transfer.get("prefer") in ("cheapest", "fastest", "ground",
                                                                                     "flight") else "cheapest",
                      "avoidOvernight": transfer.get("avoidOvernight") is not False},
@@ -1432,7 +1433,7 @@ def gather(spec, usage, metrics):
     yield from gather_specials(spec, pool, calls, sources)
     build_zones(spec, pool)
     used = yield from zone_food(spec, pool, calls, sources)
-    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)
+    yield from web_food_picks(spec, pool, usage, calls, sources, food_cap(spec) - used)
     build_zones(spec, pool)   # the web picks join a zone or are hidden
     counts = {k: len(v) for k, v in pool.items() if k != "zones"}
     print(json.dumps({"stage": "gather", "poolCounts": counts, "target": places_target(spec), "relaxed": relaxed,
@@ -1587,6 +1588,7 @@ G_CUISINE_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining"
 ZONE_FOOD_WORKERS = int(os.environ.get("ZONE_FOOD_WORKERS", "6"))
 SEQUENCE_WORKERS = 6   # days ordered at the same time (one sequence_day call each)
 GOOGLE_FOOD_CAP = 20   # Google food requests per plan: one Nearby Search per zone plus one coffee Text Search per city
+GOOGLE_FOOD_CAP_MAX = 30   # long trips: 2 requests per trip day, at least GOOGLE_FOOD_CAP, at most this (owner, run 6)
 ZONE_FOOD_CATS = {"restaurant", "cafe", "dessert"}
 ZONE_FOOD_WORDS = re.compile(r"caf|coffee|dessert|matcha|\btea\b|bak(?:ery|eries)|pastr", re.I)
 PARK_RE = re.compile(r"disney|universal studios|fuji-q", re.I)
@@ -1720,6 +1722,11 @@ def build_zones(spec, pool):
     return new
 
 
+def food_cap(spec):
+    """Google food requests per plan: 2 per trip day, between GOOGLE_FOOD_CAP and GOOGLE_FOOD_CAP_MAX."""
+    return min(GOOGLE_FOOD_CAP_MAX, max(GOOGLE_FOOD_CAP, 2 * trip_days(spec)))
+
+
 def zone_food(spec, pool, calls, sources):
     """Rated food for the zones with at most GOOGLE_FOOD_CAP Google requests: one "specialty coffee" Text Search per
     city (when cafes are wished), one combined Nearby Search per zone (none inside a theme park), and for wished
@@ -1772,8 +1779,9 @@ def zone_food(spec, pool, calls, sources):
     # priority within the cap (owner order after run 4): the city coffee searches, every zone's food, the city-wide
     # cuisine searches, park cafes, then the area cuisine searches
     jobs = coffee + jobs + [j for j in extras if "id" not in j[0]] + [j for j in extras if "id" in j[0]] + area
-    skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
-    jobs = jobs[:GOOGLE_FOOD_CAP]
+    cap = food_cap(spec)
+    skipped = max(0, len(jobs) - cap)
+    jobs = jobs[:cap]
     used = len(jobs)
     if not jobs:
         return 0
@@ -3015,7 +3023,7 @@ def gather_multi(spec, usage, metrics):
     yield from gather_specials(spec, pool, calls, sources)
     build_zones(spec, pool)
     used = yield from zone_food(spec, pool, calls, sources)
-    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)
+    yield from web_food_picks(spec, pool, usage, calls, sources, food_cap(spec) - used)
     build_zones(spec, pool)   # the web picks join a zone or are hidden
     print(json.dumps({"stage": "gather-multi", "legs": leg_counts, "relaxed": relaxed}))
     metrics.update(toolCalls=calls, fallbackCalls=[], dataSources=sorted(sources), gatherMode="multi-city (code)",
@@ -4232,22 +4240,28 @@ def _flight_args(spec):
     return args
 
 
-def _cheaper_flight_choices(spec, pool, seq, vres, gw):
-    """When the plan is over budget and the traveler chose a cabin above economy or direct only, search once each
-    for the next cabin down (same stops) and for the same cabin with one stop, and offer the cheapest fare of each
-    that costs less than the plan's flight. Worded like the upgrade choices, so the router reads the wish back."""
+def _cheaper_flight_alts(spec, pool, seq, vres):
+    """(the plan's flight, the searches to run) for cheaper-flight choices: only when the plan is over budget and the
+    traveler chose a cabin above economy or direct only; else (None, [])."""
     totals = (vres or {}).get("totals") or {}
     total = totals.get("total", totals.get("totalSGD"))
     f_pref = (spec.get("preferences") or {}).get("flight") or {}
     cabin, stops = str(f_pref.get("cabin") or "economy"), f_pref.get("maxStops")
     cur = next((f for f in pool.get("flights") or [] if f.get("offerId") == seq.get("flightOfferId")), None)
     if total is None or float(total) <= budget_amount(spec) or not cur or known_price(cur) is None:
-        return []
-    alts = ([{"cabin": CABIN_DOWN[cabin], "maxStops": stops}] if cabin in CABIN_DOWN else []) + \
+        return None, []
+    return cur, ([{"cabin": CABIN_DOWN[cabin], "maxStops": stops}] if cabin in CABIN_DOWN else []) + \
         ([{"cabin": cabin, "maxStops": 1}] if stops == 0 else [])
+
+
+def _cheaper_flight_choices(spec, pool, seq, vres, gw):
+    """Search once each for the next cabin down (same stops) and for the same cabin with one stop, and offer the
+    cheapest fare of each that costs less than the plan's flight (see _cheaper_flight_alts for when). Worded like
+    the upgrade choices, so the router reads the wish back."""
+    cur, alts = _cheaper_flight_alts(spec, pool, seq, vres)
     if not alts:
         return []
-    avoid = [str(a).lower() for a in f_pref.get("avoidAirlines") or []]
+    avoid = [str(a).lower() for a in ((spec.get("preferences") or {}).get("flight") or {}).get("avoidAirlines") or []]
 
     def leg_stops(f):   # stops per direction, as maxStops counts them (a 1-stop round trip has 1 each way)
         sl = [s.get("stops") for s in f.get("slices") or [] if isinstance(s.get("stops"), (int, float))]
@@ -4287,11 +4301,15 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
 
 
 def _plan_choices(spec, pool, best):
-    """Upgrade choices when the plan has budget left, else cheaper flights when it is over. They come after the plan
-    is delivered, so any failure only drops the choices (it must never roll back the delivered plan)."""
+    """Upgrade choices when the plan has budget left, else cheaper flights when it is over (a generator: it shows a
+    status line while the flights are searched). They come after the plan is delivered, so any failure only drops
+    the choices (it must never roll back the delivered plan)."""
     try:
-        return _upgrade_choices(spec, pool, best["seq"], best["verify"]) or \
-            _cheaper_flight_choices(spec, pool, best["seq"], best["verify"], _clients()[2])
+        up = _upgrade_choices(spec, pool, best["seq"], best["verify"])
+        if up or not _cheaper_flight_alts(spec, pool, best["seq"], best["verify"])[1]:
+            return up
+        yield ev("status", "Looking for cheaper flights…")
+        return _cheaper_flight_choices(spec, pool, best["seq"], best["verify"], _clients()[2])
     except Exception:  # noqa: BLE001
         print("plan choices failed:", traceback.format_exc())
         return []
@@ -5347,7 +5365,7 @@ def new_plan(state, request, user_id, usage, metrics, t0):
     if spec.get("notFound"):
         msg += f" (I couldn't find {', '.join(spec['notFound'])} on the map; tell me the area and I'll add it.)"
     _remember(state, "assistant", msg)
-    choices = _plan_choices(spec, pool, best)
+    choices = yield from _plan_choices(spec, pool, best)
     yield ev("message", msg, **({"choices": choices} if choices else {}))
     return True
 
@@ -5619,7 +5637,7 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
                 f"the area or full name?"
     msg = f"{note} (This is version {state['version']}; ask for more changes any time.)"
     _remember(state, "assistant", msg)
-    choices = _plan_choices(spec, state["pool"], best)
+    choices = yield from _plan_choices(spec, state["pool"], best)
     yield ev("message", msg, **({"choices": choices} if choices else {}))
 
 

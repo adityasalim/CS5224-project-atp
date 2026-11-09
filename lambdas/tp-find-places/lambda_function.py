@@ -119,6 +119,7 @@ FOOD = {"restaurant", "cafe", "bar", "dessert", "street_food"}
 GOOGLE_FIRST = {"restaurant", "cafe", "dessert"}
 GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS = 4.0, 50
 GOOGLE_SIGHT_MIN_REVIEWS = 200   # sights from Google first: 4.0+ stars and at least this many reviews
+GOOGLE_SIGHTS_MAX = 4            # sight categories per call that go to Google first (owner, run 6); the rest use the chain
 GOOGLE_FOOD_TEXT = {"cafe": "specialty coffee"}   # Google text for a category's generic search text
 FOOD_KEYWORDS = ("restaurant", "eatery", "dining")   # keyword searches that mean "a place to eat"
 ZONE_FOOD_MAX_KM = 2.0   # a food-only call this small around lat/lng is one walkable zone (hard boundary, no cache)
@@ -697,9 +698,9 @@ def _google(q, deadline=None, sights_first=False):
         try:
             r = requests.post("https://places.googleapis.com/v1/places:searchText",
                               headers=headers, json=body, timeout=15)
-        except requests.RequestException as e:
+        except requests.RequestException as e:   # Google unreachable: stop, keeping what came back before
             errs.append(f"google {type(e).__name__}")
-            continue
+            break
         if r.status_code >= 400:   # one failed search keeps the other categories' results
             errs.append(f"google http {r.status_code}: {r.text[:200]}")
             continue
@@ -1009,8 +1010,12 @@ def lambda_handler(event, context):
 
     key = _cache_key({**q, "names": []})
     cached = _cache_get(key)
-    # food and sights come from Google first when there is a key
-    gcats = ([c for c in q["categories"] if c in GOOGLE_FIRST or _is_sight(c)]
+    # food and the first GOOGLE_SIGHTS_MAX sights (in the traveler's interest order) come from Google first when there
+    # is a key; further sights use the free chain
+    asked_order = [str(c).strip().lower() for c in event.get("categories") or []]   # q["categories"] is sorted
+    sights = sorted((c for c in q["categories"] if _is_sight(c) and c not in GOOGLE_FIRST),
+                    key=lambda c: asked_order.index(c) if c in asked_order else len(asked_order))[:GOOGLE_SIGHTS_MAX]
+    gcats = ([c for c in q["categories"] if c in GOOGLE_FIRST or c in sights]
              if _secret("GOOGLE_MAPS_KEY") else [])
     google_wanted = bool(gcats)
     if cached and gcats and "google" in cached.get("source", "").split("+"):

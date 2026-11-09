@@ -471,6 +471,13 @@ Classify the traveller's NEW message:
 - "question": asks about the current plan or the destination and does not ask for a change.
 - "new_trip": wants a separate, additional trip ("also plan a trip to Bali in March") or explicitly a fresh start.
 - "smalltalk": thanks, greetings, or anything else.
+- A choice I offered, repeated back ("Stay at <hotel> (rated <n>), +<price>" or
+  "Fly <airline> in <cabin> nonstop / with <n> stop(s), saves about <price>"),
+  is "modify". The price is information, never a budget change.
+  "Stay at X" -> preferences {{"hotel": {{"name": "X"}}}}; with "in <city>" on a
+  multi-city trip, that city's legs entry gets "hotel": {{"name": "X"}}.
+  "Fly <airline> in <cabin> ..." -> preferences {{"flight": {{"preferredAirlines":
+  ["<airline>"], "cabin": "<cabin>", "maxStops": 0 for nonstop, else <n>}}}}.
 
 For "modify":
 - specChanges: ONLY trip-detail fields that change, using these keys:

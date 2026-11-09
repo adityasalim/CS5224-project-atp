@@ -445,17 +445,36 @@ no_ana = {**bd, "preferences": json.loads(json.dumps(bd["preferences"]))}
 no_ana["preferences"]["flight"]["avoidAirlines"] = ["ana"]
 assert A._cheaper_flight_choices(no_ana, bd_pool, bd_seq, {"totals": {"total": "16100"}}, AltGw()) == [
     "Fly Singapore Airlines in business with 1 stop, saves about SGD 1,920"], "an avoided airline is never offered"
+def drain_ev(gen):
+    evs = []
+    try:
+        while True:
+            evs.append(next(gen))
+    except StopIteration as stop:
+        return stop.value, evs
 class DownGw:
     def call(self, tool, args): raise TimeoutError("timed out")
 clients = A._clients
 A._clients = lambda: (None, None, DownGw())
 out = io.StringIO()
 with contextlib.redirect_stdout(out):
-    assert A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}}) == [], \
+    got, evs = drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}}))
+    assert got == [] and [e.get("message") for e in evs] == ["Looking for cheaper flights…"], \
         "a failed search drops the chips, never the delivered plan"
 assert "TimeoutError" in out.getvalue() and "plan choices failed" not in out.getvalue(), out.getvalue()
 A._clients = lambda: (None, None, AltGw())
-assert len(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}})) == 2
+assert len(drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}}))[0]) == 2
+got, evs = drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "12000"}}}))
+assert got == [] and evs == [], "within the budget: no search and no status line"
+# a model may write the cabin as the choices read it
+for said, cabin in (("premium economy", "premium_economy"), ("Business", "business"), ("first class", "first"),
+                    ("PREMIUM-ECONOMY", "premium_economy")):
+    s_ = {"preferences": {"flight": {"cabin": said}}}
+    A.normalize_prefs(s_)
+    assert s_["preferences"]["flight"]["cabin"] == cabin, (said, s_["preferences"]["flight"])
+# Google food requests: 2 per trip day, between 20 and 30
+assert [A.food_cap({"startDate": "2026-12-15", "endDate": e}) for e in ("2026-12-20", "2026-12-24", "2026-12-26", "2027-01-10")] \
+    == [20, 20, 24, 30]
 A._clients = clients
 # an upgrade never gives up a style wish the plan's hotel meets, nor a worse review for more stars
 st_pool = {"stays": [{"stayId": "ryo", "name": "Machiya Ryokan", "starRating": 4, "reviewScore": 9.3, "priceTotalSGD": 1000,

@@ -113,6 +113,13 @@ CHAIN.clear(); STORE.clear()
 fp.lambda_handler(ev, None)
 assert CHAIN == [["attraction", "cafe", "museum"]], CHAIN
 fp._secret_cache = {"GOOGLE_MAPS_KEY": "test-key"}
+# at most GOOGLE_SIGHTS_MAX (4) sight categories go to Google first, in the order asked; the rest go to the chain
+STORE.clear(); POSTS.clear(); CHAIN.clear()
+many = ["museum", "temple", "shrine", "gallery", "historic", "market", "cafe"]
+fp.lambda_handler({"city": "Tokyo", "categories": many}, None)
+asked = [p["textQuery"] for p in POSTS if p["url"].endswith("searchText")]
+assert set(asked) - {"specialty coffee"} == {"museum", "temple", "shrine", "art gallery"}, asked
+assert any("historic" in c and "market" in c for c in CHAIN), CHAIN
 # the chain's last-resort Google step never asks again, without the floor, for a sight Google already answered
 STORE.clear(); POSTS.clear(); CHAIN.clear()
 saved_overpass, fp._overpass = fp._overpass, lambda q, deadline: (CHAIN.append(q["categories"]) or [], None)

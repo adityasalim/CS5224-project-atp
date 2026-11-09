@@ -497,7 +497,7 @@ list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), g
 assert gw.calls == []
 tree_src = (AGENT / "tp_travel_agent.py").read_text(encoding="utf-8")
 assert tree_src.count("used = yield from zone_food(spec, pool, calls, sources)\n"
-                      "    yield from web_food_picks(spec, pool, usage, calls, sources, GOOGLE_FOOD_CAP - used)") == 2
+                      "    yield from web_food_picks(spec, pool, usage, calls, sources, food_cap(spec) - used)") == 2
 
 # a pick is kept only with an https source on one of the 7 allowed publishers; any other source drops the pick
 gw.calls.clear()
