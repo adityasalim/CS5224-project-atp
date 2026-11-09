@@ -667,7 +667,7 @@ print(f"parallel gather: {len(gather_calls)} searches in {took_a:.2f} s (one aft
 # the hotel workers rank sights on a snapshot of the spec, never on the pins the main thread sets meanwhile; and a
 # worker's raw error (not a GatewayError) fails only its own search
 seen7, real_stays = [], A._city_stays
-A._city_stays = lambda g, s, *a: (seen7.append(s.get("pinned")), real_stays(g, s, *a))[1]
+A._city_stays = lambda g, s, *a: (_time.sleep(0.5), seen7.append(s.get("pinned")), real_stays(g, s, *a))[2]   # late reader
 class BrokenFlight(ParGw):
     def call(self, tool, args):
         if tool == "search_flights":
