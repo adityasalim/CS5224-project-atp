@@ -163,8 +163,11 @@ class ModelAdapter:
                     with (client.beta.messages.stream(**request,betas=betas,fallbacks='default',**({'speed':'fast'} if fast else {}))
                           if opus else client.messages.stream(**request)) as stream:
                         result=stream.get_final_message()
-                except Exception as error:   # the SDK is imported lazily, so match its rate-limit error by name
-                    if not fast or type(error).__name__!='RateLimitError':raise
+                except Exception as error:   # the SDK is imported lazily, so match its errors by name
+                    # fast mode's own rate limit, or fast mode not enabled for this account (beta): retry at normal speed
+                    refused=type(error).__name__ in ('BadRequestError','PermissionDeniedError') and any(
+                        w in str(error).lower() for w in ('speed','fast'))
+                    if not fast or not (type(error).__name__=='RateLimitError' or refused):raise
                     fast=False
                     with client.beta.messages.stream(**request,betas=betas[:1],fallbacks='default') as stream:
                         result=stream.get_final_message()

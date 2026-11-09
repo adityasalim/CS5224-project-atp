@@ -382,6 +382,18 @@ claude.beta.messages.stream = limited
 assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner") == {"ok": True}
 assert [k.get("speed") for k in claude.calls[calls_before:]] == ["fast", None], "retried once at normal speed"
 assert claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01"] and "speed" not in ad_c.records[-1]
+class BadRequestError(Exception): pass
+def no_fast(**kw):
+    if kw.get("speed"):
+        claude.calls.append(kw); raise BadRequestError("speed: fast mode is not available for this organization")
+    return real_stream(**kw)
+claude.beta.messages.stream, calls_before = no_fast, len(claude.calls)
+assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner") == {"ok": True}
+assert [k.get("speed") for k in claude.calls[calls_before:]] == ["fast", None], "fast mode not enabled: normal speed"
+def other_400(**kw):
+    raise BadRequestError("messages: text content blocks must be non-empty")
+claude.beta.messages.stream = other_400
+raises(Exception, lambda: ad_c.generate(role="planner", trip_id="t5", system="s", messages=MSG))   # other 400s are not retried
 claude.beta.messages.stream = real_stream
 ad_c.operation = "correction"
 A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: repair"], "fix", uc, max_tokens=5440, model_role="planner")
