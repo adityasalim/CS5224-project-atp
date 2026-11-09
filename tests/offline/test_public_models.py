@@ -15,7 +15,7 @@ class Public(unittest.TestCase):
   from types import SimpleNamespace
   with patch.dict(os.environ,{'PUBLIC_MODEL_CONFIGURATION':'combo_19'}):
    adapter=public_adapter(ledger_factory=lambda quotes:SimpleNamespace(authorize=lambda *a:None,record=lambda row:row))
-   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer','independent_evaluator']],['claude-opus-5-5','claude-haiku-5-5','claude-sonnet-5-5','claude-sonnet-5-5'])
+   self.assertEqual([adapter.configuration.selections[r].model_id for r in ['planner','executor','reviewer','independent_evaluator']],['claude-opus-5-5','claude-sonnet-5-5','claude-sonnet-5-5','claude-sonnet-5-5'])
    self.assertEqual(adapter.records,[])
  def test_configuration_19_stays_usable_by_switching_the_config_back(self):
   from types import SimpleNamespace

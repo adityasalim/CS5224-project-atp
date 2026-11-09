@@ -11,7 +11,7 @@
   },
   "executor": {
     "provider": "anthropic",
-    "model": "claude-haiku-5-5",
+    "model": "claude-sonnet-5-5",
     "options": {
       "reasoningEffort": "medium"
     }

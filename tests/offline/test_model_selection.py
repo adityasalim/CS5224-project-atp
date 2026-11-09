@@ -67,11 +67,11 @@ def raises(exc, fn, text=None):
 # ====================================================================== part 1: role adapter
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
-# the website roles: Opus 5.5 plans, Haiku 5.5 does the small jobs, Sonnet 5.5 reviews and evaluates, all on the
-# Anthropic API at effort medium; the Opus first draft in fast mode (owner decision, 2026-11-09)
+# the website roles: Opus 5.5 plans and corrects, Sonnet 5.5 does the small jobs, reviews and evaluates, all on the
+# Anthropic API at effort medium; Opus in fast mode (owner decisions, 2026-11-09: no Haiku, fast config)
 assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
     "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium", "speed": "fast"}),
-    "executor": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
+    "executor": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"}),
     "reviewer": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"}),
     "independent_evaluator": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"})}
 print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
@@ -364,7 +364,7 @@ assert c["max_tokens"] == 5440 + model_adapter.THINKING_HEADROOM_TOKENS == price
 assert c["system"][0] == {"type": "text", "text": "POOL", "cache_control": {"type": "ephemeral"}} and "cache_control" not in c["system"][1]
 assert c["messages"] == [{"role": "user", "content": [{"type": "text", "text": "plan"}]}]
 assert ad_c.records[-1]["cacheReadTokens"] == 3000 and ad_c.records[-1]["success"] and SETTLED[-1]["provider"] == "anthropic"
-# the Opus planner opts into the server-side refusal fallback (beta); Haiku has none, so its calls never send it
+# the Opus planner opts into the server-side refusal fallback (beta); the Sonnet roles never send it
 assert c["betas"] == ["server-side-fallback-2026-07-01"] and c["fallbacks"] == "default"
 assert ad_c.records[-1]["transport"] == "anthropic.beta.messages.stream" and ad_c.records[-1]["responseModelId"] == "claude-opus-5-5"
 # fast mode (beta, 2x price) only on the Opus first draft; a fast-mode rate limit falls back to normal speed
@@ -385,11 +385,15 @@ assert claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01"] and "spe
 claude.beta.messages.stream = real_stream
 ad_c.operation = "correction"
 A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: repair"], "fix", uc, max_tokens=5440, model_role="planner")
-assert "speed" not in claude.calls[-1] and claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01"], "corrections at normal speed"
+assert claude.calls[-1]["speed"] == "fast" and "fast-mode-2026-02-01" in claude.calls[-1]["betas"], "corrections in fast mode too"
+ad_c.operation = "review"
+A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: x"], "x", uc, max_tokens=5440, model_role="planner")
+assert "speed" not in claude.calls[-1], "only drafts and corrections use fast mode"
 ad_c.operation = None
 raises(ValueError, lambda: ModelConfiguration.parse(with_("executor", options={"speed": "fast"})), "Opus")
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", uc, temperature=0.0, model_role="executor")
-assert claude.calls[-1]["model"] == "claude-haiku-5-5" and "cache_control" not in claude.calls[-1]["system"][0]
+assert claude.calls[-1]["model"] == "claude-sonnet-5-5" and "cache_control" not in claude.calls[-1]["system"][0]
+assert "speed" not in claude.calls[-1], "Sonnet has no fast mode"
 assert "fallbacks" not in claude.calls[-1] and "temperature" not in claude.calls[-1] and claude.calls[-1]["output_config"] == {"effort": "medium"}
 A.ask_json(A.REVIEWER_MODEL, "sys", "judge", uc, temperature=0.0, model_role="reviewer")
 assert claude.calls[-1]["model"] == "claude-sonnet-5-5" and claude.calls[-1]["output_config"] == {"effort": "medium"}
@@ -417,7 +421,7 @@ ModelAdapter(ad_c.configuration, clients={"anthropic": fb}, budget_authorizer=la
 assert SETTLED[-1]["fallbackUsed"] is True and SETTLED[-1]["responseModelId"] == "claude-opus-4-8"
 assert {("anthropic", "claude-opus-5"), ("anthropic", "claude-opus-4-8")} <= set(QUOTES)
 
-# optional web picks: Haiku with web search names venues; a pool match gets webSource, the rest are looked up by name, unpinned
+# optional web picks: the executor (Sonnet) with web search names venues; a pool match gets webSource, the rest are looked up by name, unpinned
 class FakeGw:
     def __init__(s): s.calls = []
     def call(s, tool, args):
@@ -435,7 +439,7 @@ pool = {"places": [{"placeId": "gplace:w", "name": "Weekenders Coffee", "categor
 list(A.web_food_picks({"destination": "Kyoto", "cuisines": ["Italian"], "activities": ["pour-over coffee"],
                        "preferences": {"notes": "two cafes a day"}}, pool, uc, [], set()))
 tool = claude.calls[-1]["tools"][0]
-assert claude.calls[-1]["model"] == "claude-haiku-5-5" and tool["type"] == "web_search_20250305" and tool["max_uses"] == 3
+assert claude.calls[-1]["model"] == "claude-sonnet-5-5" and tool["type"] == "web_search_20250305" and tool["max_uses"] == 3
 assert "Italian; pour-over coffee; two cafes a day" in claude.calls[-1]["messages"][0]["content"][0]["text"]
 assert "sprudge.com" in tool["allowed_domains"] and "temperature" not in claude.calls[-1]
 by = {p["name"]: p for p in pool["places"]}
@@ -543,7 +547,7 @@ class CityStream:
         text = json.dumps({"picks": [{"name": name, "kind": "cafe" if s.city == "Tokyo" else "restaurant",
                                       "source": "https://sprudge.com/" + s.city}]})
         return SimpleNamespace(content=[searched("https://sprudge.com/" + s.city), SimpleNamespace(type="text", text=text)],
-                               stop_reason="end_turn", model="claude-haiku-5-5",
+                               stop_reason="end_turn", model="claude-sonnet-5-5",
                                usage=SimpleNamespace(input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
                                                      cache_creation_input_tokens=0, server_tool_use=None))
 gate = threading.Barrier(2, timeout=10)
@@ -578,7 +582,7 @@ class MemStore:
 store = MemStore()
 ledger = BudgetLedger(store, cap_usd="50", provider_caps={"anthropic": "50"}, enforce_spending_caps=True,
                       quotes=[PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"]])
-web = FakeAnthropic('{"picks": []}'); web.messages.stream.reply.model = "claude-haiku-5-5"
+web = FakeAnthropic('{"picks": []}'); web.messages.stream.reply.model = "claude-sonnet-5-5"
 web.messages.stream.reply.usage = SimpleNamespace(input_tokens=120000, output_tokens=2500, cache_read_input_tokens=0,
                                                   cache_creation_input_tokens=0, server_tool_use=SimpleNamespace(web_search_requests=3))
 ModelAdapter(ad_c.configuration, clients={"anthropic": web}, budget_authorizer=ledger.authorize, record_sink=ledger.record).generate(

@@ -147,17 +147,17 @@ class ModelAdapter:
                            cacheReadTokens=usage.get('cacheReadInputTokens'),cacheWriteTokens=usage.get('cacheWriteInputTokens'),
                            totalTokens=usage.get('totalTokens'),finishReason=result.get('stopReason'))
             elif selected.provider=='anthropic':
-                # No temperature: Opus, Sonnet and Haiku 5.5 reject sampling settings. The first section (trip and pool) is cached.
+                # No temperature: Opus and Sonnet 5.5 reject sampling settings. The first section (trip and pool) is cached.
                 blocks=[{'type':'text','text':s} for s in sections if s]
                 if len(blocks)>1:blocks[0]['cache_control']={'type':'ephemeral'}
                 request=dict(model=selected.model_id,max_tokens=max_tokens,system=blocks,thinking={'type':'adaptive'},
                         output_config={'effort':selected.options.get('reasoningEffort','medium')},
                         messages=[{'role':m['role'],'content':[{'type':'text','text':b['text']} for b in m['content']]} for m in messages],
                         **({'tools':tools} if tools else {}))   # server tools only (web search)
-                # Opus: a safety-classifier refusal is re-run server side on Anthropic's recommended model (beta; Haiku has none)
+                # Opus: a safety-classifier refusal is re-run server side on Anthropic's recommended model (beta)
                 opus=selected.model_id.startswith('claude-opus')
-                # Fast mode (beta, Opus, 2x price) only for the first draft; its own rate limit falls back to normal speed
-                fast=opus and selected.options.get('speed')=='fast' and getattr(self,'operation',None)=='proposal'
+                # Fast mode (beta, Opus only, 2x price) for the draft and corrections; its own rate limit falls back to normal speed
+                fast=opus and selected.options.get('speed')=='fast' and getattr(self,'operation',None) in ('proposal','correction')
                 betas=['server-side-fallback-2026-07-01']+(['fast-mode-2026-02-01'] if fast else [])
                 try:
                     with (client.beta.messages.stream(**request,betas=betas,fallbacks='default',**({'speed':'fast'} if fast else {}))
