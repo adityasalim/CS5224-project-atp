@@ -53,8 +53,10 @@ PERSONALISE_RULES_MULTI = PERSONALISE_RULES.replace(
     "stays, flights and transfers whose \"matches\"/\"style\" fit within budget")
 
 TIMING_RULES = """- Flight and transfer timing: respect the chosen flight's arrival on day 1 (~2h buffer after landing) and departure
-  on the last day (~3h buffer before departure), plus inter-city transfer arrivals (~1h buffer). Keep arrival,
-  departure and moving days light (0-2 stops, or 0 if landing late / departing early).
+  on the last day (~3h buffer before departure), plus inter-city transfer arrivals (~1h buffer). Each flight lists
+  "usableHours" for its first and last dates and its arrival and departure dates ("none" = no time). A date with 8 or
+  more usable hours is a full day even when the flight lands that morning: plan it like any other day. Keep dates
+  with fewer usable hours, and moving days, light (0-2 stops).
 - Opening hours: respect known "hours" (openSimple); never pick a place closed on that day, and schedule evening-only
   places (opening >= 16:00, bars, nightlife) late in the day, never in the morning. Treat omitted "hours" as unknown;
   never invent operating hours or travel durations.
@@ -238,13 +240,14 @@ Zones (built by the system from walking and taxi times; they take precedence ove
 - A full city day uses one or two zones: a morning zone, then one ride (a pair listed in rideMin) to an afternoon
   zone. Prefer zones within 30 minutes of the chosen stay (hotelMin). Use a zone on a second day only if it still
   has unused sights.
-- Arrival, departure and moving days use 0-2 stops in one zone close to that night's stay.
-- A "park" zone fills a full day on its own (meals are inside the park), never an arrival, departure or moving day.
+- Dates with fewer than 8 usableHours and moving days use 0-2 stops in one zone close to that night's stay.
+- A "park" zone fills a full day on its own (meals are inside the park; the requested cafe stops come from the park
+  zone's cafes), never a date with fewer than 8 usableHours or a moving day.
   A "daytrip" zone is a day-trip town or a far theme park: on that full day use only its places and set "dayTrip"
   to the zone's "dayTrip" value.
 - Every full city day has a lunch and a dinner: on a two-zone day one meal from each zone, on a one-zone day both
   from it. When preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every
-  full city day, from that day's zones. Dessert, tea and bakery stops also come from that day's zones. A zone with
+  full day, park and day-trip days included, from that day's zones. Dessert, tea and bakery stops also come from that day's zones. A zone with
   "food": 0 takes its meals from the day's other zone.
 - The sights of a full city day follow the pace (relaxed 2-3, moderate 3-4, packed 5-6) and come from its zones.
   Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 5 (relaxed), 6 (moderate)
@@ -255,10 +258,11 @@ Zones (built by the system from walking and taxi times; they take precedence ove
 # flag i is true (0 pinned places, 1 named hotel, 2 day trips). Keep exactly these three rules, in this order, and
 # do not add another line that starts with "- ".
 SPECIAL_RULES = """- pinned: places the traveller asked for BY NAME (pool items with "requested"). Every pinned placeId MUST be in
-  the plan, on a full day that fits its city and opening hours. Never drop one to fix another problem.
+  the plan, on a day with enough usable time for it that fits its city and opening hours (a full day only for a
+  theme park). Never drop one to fix another problem.
 - A hotel with matches "requested hotel" or "already booked" is the traveller's own choice: use it.
-- dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (not the arrival,
-  departure or a moving day): set "dayTrip": "<town>" on that day and use only that town's places (2-3 incl. food).
+- dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (8 or more usableHours,
+  not a moving day): set "dayTrip": "<town>" on that day and use only that town's places (2-3 incl. food).
   Never mix day-trip places into other days."""
 
 PLANNER = """ROLE: itinerary planner. Build a day-by-day plan using ONLY IDs from the candidate pool above.
@@ -270,11 +274,11 @@ Rules:
 - Return one entry in "days" for EVERY date from startDate to endDate, in order. Never repeat a placeId.
 - Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
   days with a theme park, Mount Fuji or another major hike or outdoor excursion at most 1-2 other stops, all near it.
-  Put a theme park on a full day, never an arrival, departure or moving day.
+  Put a theme park on a full day (8 or more usableHours), never a moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
   needs; never use supermarkets or convenience stores as food or sightseeing stops. When
-  preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every full day
-  (not theme-park or day-trip days).
+  preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every full day,
+  theme-park and day-trip days included.
 - Diversify categories across the trip and within each day; respect rememberedPreferences unless overridden. Give each
   day a coherent 3-6 word theme.
 <<POOL>>
@@ -300,10 +304,10 @@ Rules:
   the arrival city). Use ONLY placeIds belonging to that day's city. Never repeat a placeId.
 - Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
   days with a theme park, Mount Fuji or another major outdoor excursion at most 1-2 other stops, all near it. Put a
-  theme park on a full day, never an arrival, departure or moving day.
+  theme park on a full day (8 or more usableHours), never a moving day.
 - Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
   needs (never supermarkets). When preferences.food.perDay asks for cafe or coffee stops per day,
-  add that many "cafe" stops on every full city day (not theme-park or day-trip days). Keep at least half of each
+  add that many "cafe" stops on every full day, theme-park and day-trip days included. Keep at least half of each
   city's full days in that city, diversify categories across days and respect rememberedPreferences. Give each day a
   coherent 3-6 word theme.
 <<POOL>>

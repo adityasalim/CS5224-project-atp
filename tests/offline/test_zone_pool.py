@@ -118,3 +118,42 @@ for pid in ("legoland", "everland"):
 diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [{"placeId": "museum"}]}]})
 assert len([i for i in diag["issues"] if i["status"] == "zones"]) == 2, diag["issues"]   # a city day still needs meals and cafes
 print("PARK DAY CHECK OK")
+
+# ---- day trips are looked up near the trip's city, and the trip point is where its places are (not a summit)
+SENT_DT = []
+class DayTripGw:
+    def call(self, tool, args):
+        SENT_DT.append(args)
+        return {"ok": True, "query": {"lat": 35.36, "lng": 138.73}, "places": [   # summit centre, places in the towns
+            {"placeId": "f1", "name": "Chureito Pagoda", "category": "viewpoint", "lat": 35.50, "lng": 138.80},
+            {"placeId": "f2", "name": "Kawaguchi Lake", "category": "nature", "lat": 35.51, "lng": 138.76},
+            {"placeId": "f3", "name": "Oishi Park", "category": "park", "lat": 35.52, "lng": 138.75}]}
+tokyo = [{"placeId": f"t{i}", "name": f"Sight {i}", "category": "temple", "lat": 35.66 + 0.01 * i, "lng": 139.70 + 0.01 * i}
+         for i in range(5)]
+spec_d = {"destination": "Tokyo", "startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "interests": [],
+          "dayTrips": [{"place": "Mount Fuji"}], "mustInclude": []}
+pool_d = {"places": [dict(p) for p in tokyo], "stays": [], "flights": []}
+saved_clients, A._clients = A._clients, lambda: (None, None, DayTripGw())
+list(A.gather_specials(spec_d, pool_d, [], set(), only={"dayTrips"}))
+A._clients = saved_clients
+args = SENT_DT[0]
+assert args["near"] == {"lat": 35.68, "lng": 139.72} and args["maxKm"] == 450 and args["radiusKm"] == 18, args
+assert (spec_d["dayTrips"][0]["lat"], spec_d["dayTrips"][0]["lng"]) == (35.51, 138.76), spec_d["dayTrips"][0]
+
+# ---- each flight shows its usable hours on the trip's edge dates, and "best" weighs time at the destination
+jal = {"offerId": "jal", "priceTotalSGD": 7994, "matches": ["nonstop"], "slices": [
+    {"from": "SIN", "to": "HND", "departAt": "2026-12-15T22:25:00", "arriveAt": "2026-12-16T05:55:00", "stops": 0, "durationMinutes": 450},
+    {"from": "HND", "to": "SIN", "departAt": "2026-12-20T10:50:00", "arriveAt": "2026-12-20T17:25:00", "stops": 0, "durationMinutes": 455}]}
+aax = {"offerId": "aax", "priceTotalSGD": 3440, "slices": [
+    {"from": "SIN", "to": "HND", "departAt": "2026-12-15T12:10:00", "arriveAt": "2026-12-15T22:40:00", "stops": 1, "durationMinutes": 570},
+    {"from": "HND", "to": "SIN", "departAt": "2026-12-20T23:55:00", "arriveAt": "2026-12-21T09:20:00", "stops": 1, "durationMinutes": 625}]}
+spec_f = {"destination": "Tokyo", "startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2,
+          "preferences": {"flight": {"sortBy": "best"}}}
+shown = {f["id"]: f["usableHours"] for f in json.loads(A.compact_pool({"flights": [jal, aax], "stays": [], "places": []},
+                                                                      spec_f))["flights"]}
+assert shown == {"jal": {"2026-12-15": "none", "2026-12-16": "09:00-21:00", "2026-12-20": "none"},
+                 "aax": {"2026-12-15": "none", "2026-12-20": "09:00-20:55"}}, shown
+assert [f["offerId"] for f in A._order_flights([jal, aax], spec_f)] == ["aax", "jal"], "a day more on the ground"
+assert [f["offerId"] for f in A._order_flights([jal, aax], {**spec_f, "preferences": {"flight": {}}})] == ["jal", "aax"], \
+    "outside \"best\", a nonstop match still ranks first, as before"
+print("DAY TRIPS AND FLIGHT TIME OK")

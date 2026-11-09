@@ -32,6 +32,7 @@ import json
 import math
 import os
 import re
+import statistics
 import time
 import traceback
 import uuid
@@ -1715,10 +1716,13 @@ def zone_food(spec, pool, calls, sources):
     multi = is_multi(spec)
     wished = [c for c in preference_search_categories(spec) if c in ZONE_FOOD_CATS]
     price = ((spec.get("preferences") or {}).get("food") or {}).get("priceLevel")   # meal price level 1-4, else 0
-    jobs = []
+    jobs, extras = [], []
     for z in pool.get("zones") or []:
         if z["kind"] == "park" or (z["kind"] == "daytrip" and PARK_RE.search(z["dayTrip"])):
-            continue   # no food search inside a theme park
+            if "cafe" in wished:   # meals are inside the park, but the requested coffee stops come from around it
+                extras.append((z, with_prefs("find_places", spec, {"lat": z["lat"], "lng": z["lng"], "categories": ["cafe"],
+                                                                 "maxPerCategory": 4, "foodRadiusKm": ZONE_FOOD_KM})))
+            continue
         cats = [c for c in wished if not (z["kind"] == "daytrip" and c == "dessert")]
         jobs.append((z, with_prefs("find_places", spec, {
             "lat": z["lat"], "lng": z["lng"], "categories": cats, "maxPerCategory": 4,
@@ -1734,9 +1738,27 @@ def zone_food(spec, pool, calls, sources):
             args = with_prefs("find_places", spec, {**c, "categories": ["cafe"], "maxPerCategory": 20,
                                                     "foodRadiusKm": round(reach, 1)})
             coffee.append(({"leg": li}, {**args, "dietary": [], "cuisine": ""}))
-    jobs = coffee + jobs   # the city-wide coffee searches first, then the zones in order, up to the cap
-    skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
-    jobs = jobs[:GOOGLE_FOOD_CAP]
+        # one city-wide Text Search per requested cuisine, so the zones can offer them (they join the nearest zone)
+        wanted = [c for c in str(pref_args("find_places", spec).get("cuisine") or "").split("|") if c][:5]
+        if wanted and zs:
+            c = {"lat": round(sum(z["lat"] for z in zs) / len(zs), 5), "lng": round(sum(z["lng"] for z in zs) / len(zs), 5)}
+            reach = max(3.0, max(_km(c, z) for z in zs) + ZONE_ATTACH_KM)
+            extras.append(({"leg": li, "units": len(wanted)}, with_prefs("find_places", spec, {
+                **c, "categories": ["restaurant"], "cuisine": "|".join(wanted), "maxPerCategory": min(20, 4 * len(wanted)),
+                "foodRadiusKm": round(reach, 1)})))
+    # priority within the cap: the city coffee searches, every zone's food, the cuisine searches, then park cafes
+    jobs = coffee + jobs + [j for j in extras if "id" not in j[0]] + [j for j in extras if "id" in j[0]]
+    kept, used = [], 0
+    for z, args in jobs:   # a cuisine job is one Google Text Search per cuisine, cut to the requests left
+        left = GOOGLE_FOOD_CAP - used
+        if left <= 0:
+            continue
+        if z.get("units", 1) > left:
+            args = {**args, "cuisine": "|".join(args["cuisine"].split("|")[:left]), "maxPerCategory": 4 * left}
+            z = {**z, "units": left}
+        kept.append((z, args))
+        used += z.get("units", 1)
+    skipped, jobs = len(jobs) - len(kept), kept
     if not jobs:
         return 0
     yield ev("status", f"Finding rated food in {sum(1 for z, _ in jobs if 'id' in z)} walkable areas…")
@@ -1764,9 +1786,9 @@ def zone_food(spec, pool, calls, sources):
             pool["places"].append({**p, **tag, **where})
             found += 1
     build_zones(spec, pool)   # the city-wide cafes join a zone or are hidden
-    print(json.dumps({"stage": "zone-food", "zones": len(pool["zones"]), "calls": len(jobs), "skippedOverCap": skipped,
-                      "found": found}))
-    return len(jobs)
+    print(json.dumps({"stage": "zone-food", "zones": len(pool["zones"]), "calls": len(jobs), "googleRequests": used,
+                      "skippedOverCap": skipped, "found": found}))
+    return used
 
 
 def _zone_places(pool, spec, leg=None):
@@ -1863,12 +1885,22 @@ def gather_specials(spec, pool, calls, sources, only=None):
                       - {"restaurant"})[:3] or ["attraction"]
         for t in spec["dayTrips"]:
             yield ev("status", f"Finding things to do on a day trip to {t['place']}…")
-            r = call({"city": t["place"], "categories": cats, "radiusKm": 5, "maxPerCategory": 4})   # food: zone_food
+            # geocode near the trip's city (a bare "Fuji" matched Antipolo, Philippines), wide enough to reach the
+            # base towns around a landmark (Kawaguchiko is ~13 km from Fuji's summit)
+            home = [p_ for p_ in pool["places"] if not p_.get("dayTrip") and p_.get("lat") is not None
+                    and (not multi or t.get("fromCity") in (None, "", p_.get("city")))]
+            near = ({"near": {"lat": statistics.median(p_["lat"] for p_ in home),
+                              "lng": statistics.median(p_["lng"] for p_ in home)}, "maxKm": DAY_TRIP_MAX_KM} if home else {})
+            r = call({"city": t["place"], "categories": cats, "radiusKm": DAY_TRIP_RADIUS_KM, "maxPerCategory": 4,
+                      **near})   # food: zone_food
             if not r.get("ok") or not r.get("places"):
                 t["notFound"] = True
                 continue
             q = r.get("query") or {}
-            if q.get("lat") is not None:
+            spots = [p_ for p_ in r["places"] if p_.get("lat") is not None]
+            if spots:   # the trip's point is where its places are (the town, not a summit)
+                t.update(lat=statistics.median(p_["lat"] for p_ in spots), lng=statistics.median(p_["lng"] for p_ in spots))
+            elif q.get("lat") is not None:
                 t.update(lat=q["lat"], lng=q["lng"])
             li = leg_of(t.get("fromCity")) if multi else None
             if multi and li is None:   # nearest city of the route
@@ -1978,7 +2010,20 @@ def web_food_picks(spec, pool, usage, calls, sources, google_left=GOOGLE_FOOD_CA
             sources.add("web_search+find_places:names")
 
 
-def _c_flight(f):
+def _usable_hours(f, spec):
+    """The flight's local planning window on its arrival and departure dates ("none" = no time), so the planner
+    knows a 05:55 landing still leaves a full day."""
+    slices, prefs, days = f.get("slices") or [{}], spec.get("preferences") or {}, {}
+    edges = {spec["startDate"], spec.get("endDate", ""), str(slices[0].get("arriveAt") or "")[:10],
+             str(slices[-1].get("departAt") or "")[:10]}
+    for day in sorted(d for d in edges if len(d) == 10 and spec["startDate"] <= d <= spec.get("endDate", "~")):
+        a, b = _flight_day_window(spec, {"flights": [f]}, {"flightOfferId": f.get("offerId")}, day,
+                                  _hm(prefs.get("dayStart") or "09:00"), _hm(prefs.get("dayEnd") or "21:00"))
+        days[day] = f"{_fmt(a)}-{_fmt(b)}" if b > a else "none"
+    return days
+
+
+def _c_flight(f, spec=None):
     if "price" in f:
         price_fields = {"price": f["price"]}
     elif f.get("priceTotalSGD") is not None:
@@ -1990,6 +2035,8 @@ def _c_flight(f):
                      f"stops {s.get('stops', 0)}" for s in f.get("slices", [])]}
     for k in ("matches", "filterNote"):
         if f.get(k): item[k] = f[k]
+    if spec and spec.get("startDate"):
+        item["usableHours"] = _usable_hours(f, spec)
     return item
 
 
@@ -2480,6 +2527,17 @@ def _flight_duration_minutes(f):
     return None
 
 
+def _flight_ground_minutes(f):
+    """Minutes between the outbound arrival and the return departure (time at the destination), else None."""
+    slices = f.get("slices") or []
+    try:
+        a = datetime.fromisoformat(str(slices[0]["arriveAt"])[:16])
+        b = datetime.fromisoformat(str(slices[-1]["departAt"])[:16])
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+    return int((b - a).total_seconds() // 60) if len(slices) > 1 and b > a else None
+
+
 def _flight_total_stops(f):
     """Extract known total stops from a flight offer without inventing missing values."""
     slices = f.get("slices") or []
@@ -2586,7 +2644,8 @@ def _order_flights(flights, spec=None):
         pref_score = (
             (2 if cabin_match else 0)
             + timing_score
-            + len([m for m in matches if "airline" not in m])   # a preferred airline counts only through loyal()
+            # a preferred airline counts only through loyal(); with "best", nonstop counts through its stops term
+            + len([m for m in matches if "airline" not in m and not (sort_by == "best" and m == "nonstop")])
             - (2 if f.get("filterNote") else 0)
         )
 
@@ -2604,7 +2663,9 @@ def _order_flights(flights, spec=None):
         if sort_by == "duration":
             metric_key = (has_dur, -d_val, has_price, -p_val, has_stops, -s_val)
         elif sort_by == "best":
-            combined = (p_val if has_price else 5000.0) + (d_val * 0.5 if has_dur else 500.0) + (s_val * 120.0 if has_stops else 240.0)
+            ground = _flight_ground_minutes(f) or 0   # time at the destination counts like time saved in the air
+            combined = ((p_val if has_price else 5000.0) + (d_val * 0.5 if has_dur else 500.0)
+                        + (s_val * 120.0 if has_stops else 240.0) - ground * 0.5)
             metric_key = (-round(combined, 2), has_price, -p_val, has_dur, -d_val, has_stops, -s_val)
         else:
             metric_key = (has_price, -p_val, has_dur, -d_val, has_stops, -s_val)
@@ -2818,7 +2879,7 @@ def compact_pool(pool, spec=None):
     else:
         assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
-    flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
+    flights = [_c_flight(f, spec) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
     raw_stays = _spread_stays(ordered_stays, 12)
     stays = [_c_stay(s_) for s_ in raw_stays]
@@ -2965,7 +3026,7 @@ def compact_pool_multi(spec, pool):
     else:
         assign_zones(pool.get("places") or [])
     ordered_flights = _order_flights(pool["flights"], spec=spec)
-    flights = [_c_flight(f) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
+    flights = [_c_flight(f, spec) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     cities = []
     floors = []
     views = []
@@ -3983,6 +4044,8 @@ def sequence(spec, pool, plan):
 
 
 DAY_TRIP_MIN_KM = 25   # closer than this is just another part of the city
+DAY_TRIP_MAX_KM = 450  # the verifier's day-trip distance limit; a farther geocode is a wrong match
+DAY_TRIP_RADIUS_KM = 18
 
 
 def _day_trip_for(spec, pool, d, ids, stay):
