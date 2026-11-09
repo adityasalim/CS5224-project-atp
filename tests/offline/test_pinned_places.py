@@ -28,9 +28,10 @@ for label, ev in [("category requested", event), ("pinned list", dict(event, pin
     assert park["visitMinutes"] == 480 and 60 <= park["travelMinutesFromPrev"] <= 70, park
     assert len(r["unscheduled"]) == 1 and r["unscheduled"][0]["placeId"] in cafes, r["unscheduled"]
 
-# An explicit empty pinned list turns the category fallback off: the most stops win again (three cafes).
+# An explicit empty pinned list turns the category fallback off; the park still opens the day (run 8: a theme park
+# day starts with the park, above the most stops), so one of the cafes after it is dropped.
 r = seq.lambda_handler(dict(event, pinned=[]), None)
-assert [u["placeId"] for u in r["unscheduled"]] == ["t:tdl"], r
+assert r["stops"][0]["placeId"] == "t:tdl" and [u["placeId"] for u in r["unscheduled"]] == ["t:cafe2"], r
 
 # Verifier: a mustVisit place missing from the itinerary is named, not shown as its raw ID.
 spec = {"startDate": "2026-12-11", "endDate": "2026-12-11", "pax": 2, "budgetSGD": 9000, "mustVisit": ["t:tdl"]}
