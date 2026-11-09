@@ -582,7 +582,7 @@ def _amazon_location(q, deadline):
             break
         radius = min(radius_km, 50) * 1000
         try:
-            r = client.search_text(QueryText=text, MaxResults=min(q["maxPerCategory"] + 4, 20),
+            r = client.search_text(QueryText=text, MaxResults=min(q["maxPerCategory"] + 4, 20), Language="en",
                                    Filter={"Circle": {"Center": [q["lng"], q["lat"]], "Radius": int(radius)}})
         except Exception as e:  # noqa: BLE001
             errors.append(f"{cat}: {type(e).__name__}: {str(e)[:120]}")
@@ -735,8 +735,8 @@ def _named(q, deadline):
                          description=f"Sample entry for the requested place {name}.")
         if hit is None and not web and deadline - time.time() > 3:
             try:
-                r = boto3.client("geo-places", config=_GEO_CFG).search_text(
-                    QueryText=name, MaxResults=3, BiasPosition=[q["lng"], q["lat"]])
+                r = boto3.client("geo-places", config=_GEO_CFG).search_text(   # English names, so the planner and
+                    QueryText=name, MaxResults=3, BiasPosition=[q["lng"], q["lat"]], Language="en")   # day rules read them
                 for it in r.get("ResultItems", []):
                     pos = it.get("Position")
                     if pos and it.get("Title") and _km(q["lat"], q["lng"], pos[1], pos[0]) <= NAMED_MAX_KM:

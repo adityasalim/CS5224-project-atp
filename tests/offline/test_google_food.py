@@ -124,14 +124,19 @@ fp.requests.post = by_name
 GEO = []
 class Geo:
     def geocode(s, **k): return {"ResultItems": [{"Position": [135.7681, 35.0116]}]}
-    def search_text(s, **k): GEO.append(k["QueryText"]); return {"ResultItems": []}
+    def search_text(s, **k): GEO.append((k["QueryText"], k.get("Language"))); return {"ResultItems": []}
 saved_client, fp.boto3.client = fp.boto3.client, lambda name, **k: Geo()
 r = fp.lambda_handler({"city": "Kyoto", "names": list(LOOKUP), "namesCategory": "cafe"}, None)
 assert [p["placeId"] for p in r["places"]] == ["gplace:good"] and r["notFound"] == ["New Cafe", "Low Rated", "Closed Bistro"], r
 assert r["places"][0]["reviews"] == 1200 and r["places"][0]["priceLevel"] == "PRICE_LEVEL_MODERATE" and r["places"][0]["category"] == "cafe"
 assert len(POSTS) == 4 and all(p["maxResultCount"] == 1 and "places.userRatingCount" in p["mask"] for p in POSTS) and GEO == [], (POSTS, GEO)
 fp.lambda_handler({"city": "Kyoto", "names": ["Good Roaster"]}, None)
-assert GEO == ["Good Roaster"], GEO
+assert GEO == [("Good Roaster", "en")], "English names, so day rules and the plan card can read them"
+fresh = load("tp-find-places")   # the category search, which this file otherwise replaces with a stub
+GEO.clear()
+q_en, _ = fresh._validate({"city": "Kyoto", "categories": ["temple"]})
+fresh._amazon_location(q_en, time.time() + 30)
+assert GEO and all(lang == "en" for _, lang in GEO), GEO
 fp.boto3.client = saved_client
 
 fp._secret_cache = {}   # no key: food goes through the free chain as before
