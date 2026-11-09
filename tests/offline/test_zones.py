@@ -256,7 +256,10 @@ assert all(set(a["categories"]) == ({"restaurant", "cafe", "dessert"} if a["food
 assert all(p.get("zone") is not None for p in z_pool["places"]), "the city-wide cafes join a zone or are hidden"
 SENT.clear()
 big_spec, big_pool = copy.deepcopy(spec), copy.deepcopy(pool)
-big_pool["zones"] = [dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(30)]
+# copies of one Tokyo zone, 0.33 km apart (identical searches run once, so each copy needs its own centre)
+walks_at = lambda n, leg=0: [dict(zones[2], id=f"Z{100 + 50 * leg + i}", kind="walk", leg=leg, lat=round(zones[2]["lat"] + 0.003 * i, 5))
+                             for i in range(n)]
+big_pool["zones"] = walks_at(30)
 assert drain(Z["zone_food"](big_spec, big_pool, [], set())) == 24 and drain(Z["zone_food"](spec, {"places": []}, [], set())) == 0
 assert len(SENT) == 24, f"hard cap of 24 Google requests for a 12-day plan, sent {len(SENT)}"
 SENT.clear()
@@ -264,7 +267,7 @@ long_spec = dict(copy.deepcopy(spec), endDate="2027-01-10")
 assert drain(Z["zone_food"](long_spec, copy.deepcopy(big_pool), [], set())) == 30 == len(SENT), "never more than 30"
 # three Tokyo walk zones: one coffee search, three zone searches, one area cuisine search per zone (only the wished
 # cuisines, 2 km) and one city-wide search per cuisine
-few = lambda n: dict(copy.deepcopy(pool), zones=[dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(n)])
+few = lambda n: dict(copy.deepcopy(pool), zones=walks_at(n))
 two = copy.deepcopy(spec)
 two["cuisines"] = ["Italian", "Indian"]
 for s_, cuisine, n_city in ((spec, "italian", 1), (two, "italian|indian", 2)):
@@ -316,6 +319,75 @@ callers = {f.name for f in top.values() if isinstance(f, ast.FunctionDef)
            for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "zone_food"}
 assert callers == {"gather", "gather_multi"}, f"chat changes reuse the session pool (0 requests); zone_food in {callers}"
 print("Google food requests for the 12-day owner trip: 24 (17 coffee and zones, 2 cuisines, 3 park cafes, 2 area; cap 24)")
+
+# run 7: the city-wide cuisine searches come before the zone searches in the cap (a 6-day trip, cap 20, 25 zones:
+# 1 coffee + 2 cuisines + 17 zones; before, 1 coffee + 19 zones and no cuisine)
+is_coffee = lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["cafe"]
+is_cuisine = lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]
+is_zone = lambda a: a["foodRadiusKm"] <= 2 and not area_job(a) and a["categories"] != ["cafe"]
+counts = lambda: [sum(f(a) for _, a in SENT) for f in (is_coffee, is_cuisine, is_zone, area_job)]
+SENT.clear()
+assert drain(Z["zone_food"](dict(copy.deepcopy(two), endDate="2026-12-06"), few(25), [], set())) == 20 == len(SENT)
+assert counts() == [1, 2, 17, 0], counts()
+# a city visited twice (Tokyo 4, Kyoto 3, Tokyo 2 nights; 5 cuisines and coffee; cap 20): one coffee and one search
+# per cuisine per city, the cities' zones take turns, and the second Tokyo leg's zones (the same 4 places) are not
+# searched again; every place found serves both Tokyo legs
+rep = copy.deepcopy(spec)
+rep.update(startDate="2026-12-01", endDate="2026-12-10", cuisines=["Italian", "Indian", "Thai", "French", "Sushi"])
+rep["legs"] = [{"city": "Tokyo", "nights": 4, "checkIn": "2026-12-01", "checkOut": "2026-12-05"},
+               {"city": "Kyoto", "nights": 3, "checkIn": "2026-12-05", "checkOut": "2026-12-08"},
+               {"city": "Tokyo", "nights": 2, "checkIn": "2026-12-08", "checkOut": "2026-12-10"}]
+kyoto_z = [dict(z) for z in zones if z["leg"] == 1 and z["kind"] in ("walk", "solo")]
+assert len(kyoto_z) >= 4, kyoto_z
+rep_pool = dict(copy.deepcopy(pool), zones=walks_at(8) + kyoto_z + walks_at(4, leg=2))
+SENT.clear()
+assert drain(Z["zone_food"](rep, rep_pool, [], set())) == 20 == len(SENT), len(SENT)
+assert counts() == [2, 10, 8, 0], counts()
+assert sorted(a["cuisine"] for _, a in SENT if is_cuisine(a)) == sorted(2 * ["italian", "indian", "thai", "french", "sushi"])
+zone_lats = [a["lat"] for _, a in SENT if is_zone(a)]
+assert sum(lat < 35.3 for lat in zone_lats) == 4, "Kyoto gets 4 of the 8 zone searches"
+tokyo_coffee = next(a for _, a in SENT if is_coffee(a) and a["lat"] > 35.3)
+cid = f"g:{tokyo_coffee['lat']:.4f}:{tokyo_coffee['lng']:.4f}:cafe"
+assert sorted(p["leg"] for p in rep_pool["places"] if p["placeId"] == cid) == [0, 2], "the city's coffee serves both legs"
+z0 = rep_pool["zones"][0]
+rid = f"g:{z0['lat']:.4f}:{z0['lng']:.4f}:restaurant"
+assert sorted((p["leg"], p["zone"]) for p in rep_pool["places"] if p["placeId"] == rid) == [(0, "Z100"), (2, "Z200")]
+print("Google food for Tokyo 4, Kyoto 3, Tokyo 2 nights (cap 20): 2 coffee, 10 cuisines, 8 zones (4 Kyoto), 0 area")
+
+# run 7: a wished cuisine the pool has but the plan does not becomes a correction naming the nearest candidates
+n_spec, n_pool = copy.deepcopy(spec), copy.deepcopy(pool)
+n_spec["cuisines"] = ["Italian", "Middle Eastern"]
+zw = next(z for z in n_pool["zones"] if z["leg"] == 0 and z["kind"] == "walk")
+la, ln = offset(zw["lat"], zw["lng"], 0.3, 0)
+la2, ln2 = offset(zw["lat"], zw["lng"], 0.9, 0.4)
+other = next(z for z in n_pool["zones"] if z["leg"] == 0 and z["kind"] == "walk" and km(z, zw) > 3)
+meal = lambda pid, name, cuisine, at, zone, leg=0: {"placeId": pid, "name": name, "category": "restaurant", "cuisine": cuisine,
+                                                    "rating": 4.5, "reviews": 400, "lat": at[0], "lng": at[1], "zone": zone,
+                                                    "leg": leg, "city": ("Tokyo", "Kyoto")[leg]}
+n_pool["places"] += [meal("it1", "Trattoria", "italian", (la, ln), zw["id"]),
+                     meal("me1", "Al Bayt", "middle_eastern", (la, ln), zw["id"]),
+                     meal("me2", "Ishq", "middle_eastern", (la2, ln2), zw["id"]),
+                     meal("me3", "Far Falafel", "middle_eastern", (other["lat"], other["lng"]), other["id"]),
+                     meal("me4", "Hidden Mezze", "middle_eastern", offset(zw["lat"], zw["lng"], 0.1, 0), ""),
+                     meal("me5", "Kyoto Mezze", "middle_eastern", (34.995, 135.785), "Z99", leg=1)]
+n_plan = {"days": [{"date": "2026-12-03", "placeIds": zw["sights"][:2] + ["it1"]},
+                   {"date": "2026-12-04", "placeIds": other["sights"][:2]}]}
+n_eval = A["_deterministic_quality_eval"](n_spec, n_pool, n_plan)
+hints = [i["message"] for i in n_eval["issues"] if i["status"] == "missing_cuisine"]
+assert len(hints) == 1 and hints[0].startswith(
+    f"Priority 4 [day 2026-12-03]: no Middle Eastern meal is planned; swap a lunch or dinner on 2026-12-03 for "
+    f"me1 (Al Bayt, zone {zw['id']}, ") and f" or me2 (Ishq, zone {zw['id']}, " in hints[0] \
+    and hints[0].endswith(" km from the day's stops) to satisfy the wished cuisine Middle Eastern.") \
+    and "me3" not in hints[0] and "me4" not in hints[0] and "me5" not in hints[0], hints
+assert hints[0] in n_eval["suggestions"] and n_eval["unverified_gaps"] >= 1
+n_plan["days"][1]["placeIds"].append("me3")
+assert not [i for i in A["_deterministic_quality_eval"](n_spec, n_pool, n_plan)["issues"] if i["status"] == "missing_cuisine"], \
+    "a planned Middle Eastern meal anywhere: no hint"
+n_pool["places"] = [p for p in n_pool["places"] if p.get("cuisine") != "middle_eastern"]
+n_plan["days"][1]["placeIds"].pop()
+assert not [i for i in A["_deterministic_quality_eval"](n_spec, n_pool, n_plan)["issues"] if i["status"] == "missing_cuisine"], \
+    "no Middle Eastern place in the pool: no hint"
+print("cuisine hint:", hints[0])
 
 # the rules the planner sees agree with the verifier's stop cap
 sys.path.insert(0, str(REPO / "agent"))
@@ -422,7 +494,7 @@ r = sd.lambda_handler({"date": "2027-03-10", "start": z_hotel, "lunch": False, "
                                                                      "close": "18:00"}} for s_ in z_stops]}, None)
 assert [o["placeId"] for o in r["stops"]] == ["a1", "a2", "b1", "b2"], r["stops"]
 seq_src = ast.get_source_segment(SOURCE, top["sequence"])
-assert '"zones": {i: zone_of[i] for i in ordered_ids if i in zone_of}' in seq_src, "the agent passes each stop's zone"
+assert '"zones": {i: zone_of[(li, i)] for i in ordered_ids if (li, i) in zone_of}' in seq_src, "the agent passes each stop's zone (of the day's leg)"
 print("sequence_day groups by zone: two zones 2 km apart stay contiguous", by_zone)
 
 # ---------------------------------------------------------------- verifier: more than one ride between stops

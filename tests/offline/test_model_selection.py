@@ -493,8 +493,9 @@ gw.calls.clear()
 list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), google_left=2))
 assert [(c_["namesCategory"], c_["names"]) for c_ in gw.calls] == [("cafe", ["Arabica Kyoto Higashiyama", "Kurasu Kyoto Station"])], gw.calls
 gw.calls.clear()
-list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), google_left=0))
-assert gw.calls == []
+web_before = len(claude.calls)
+assert list(A.web_food_picks({"destination": "Kyoto"}, {"places": []}, uc, [], set(), google_left=0)) == []
+assert gw.calls == [] and len(claude.calls) == web_before, "no Google request left: no web search model call (run 7)"
 tree_src = (AGENT / "tp_travel_agent.py").read_text(encoding="utf-8")
 assert tree_src.count("used = yield from zone_food(spec, pool, calls, sources)\n"
                       "    yield from web_food_picks(spec, pool, usage, calls, sources, food_cap(spec) - used)") == 2

@@ -168,6 +168,7 @@ assert A.normalize_legs(multi) == [] and multi["legs"][1]["hotel"] == {"area": "
 A.normalize_prefs(multi)
 class RecGw:
     calls = []
+    def tools(self): return []
     def call(self, tool, args):
         self.calls.append((tool, args))
         return {"ok": True, "places": [], "stays": [], "offers": [], "options": []}
@@ -175,7 +176,7 @@ gw_rec, saved_clients = RecGw(), A._clients
 A._clients = lambda: (None, None, gw_rec)
 list(A.gather_multi(multi, A.Usage(), {}))
 A._clients = saved_clients
-assert [a["city"] for t, a in gw_rec.calls if t == "search_stays"][:2] == ["Shinjuku, Tokyo", "Gion, Kyoto"], gw_rec.calls
+assert sorted(a["city"] for t, a in gw_rec.calls if t == "search_stays") == ["Gion, Kyoto", "Shinjuku, Tokyo"], gw_rec.calls
 
 # ---- a reviewer timeout in strict mode: the plan is delivered with the review unavailable, and the judge is
 # not called again for the corrected plan
@@ -566,4 +567,109 @@ n = len(SlowGw.calls)
 assert n >= 2 and took < 0.3 * n * 0.7, (n, took)
 assert [d["stops"][0]["name"] for d in seq_out["days"] if d["stops"] and "name" in d["stops"][0]] == sorted(SlowGw.calls)
 assert [u["date"] for u in late if u["placeId"] == "late"] == sorted(SlowGw.calls), "unscheduled stays in day order"
+
+# ---- run 7: one narrow interest no longer makes a city's only sights (theme_park asked Kyoto for 10 theme parks)
+cats7 = A.preference_search_categories({"interests": ["theme_park"]})
+assert cats7[:6] == ["theme_park", "attraction", "temple", "shrine", "museum", "historic"], cats7
+assert A.preference_search_categories({})[:5] == list(A.DEFAULT_SIGHTS), "no interests: the default sight mix"
+cats7 = A.preference_search_categories({"interests": ["museum", "garden"], "preferenceScores": {"nature": 9}})
+assert cats7[:8] == ["museum", "garden", "park", "nature", "attraction", "temple", "shrine", "historic"], cats7
+
+# ---- run 7: the hotels are searched around the in-town sights: no theme parks, nothing beyond 15 km of the centre
+kyoto_c = {"lat": 35.0116, "lng": 135.7681}
+temples = [{"placeId": f"t{i}", "name": f"Temple {i}", "category": "temple", "rating": 4.5, "reviews": 900,
+            "lat": 35.0116 + 0.004 * i, "lng": 135.7681 + 0.003 * i} for i in range(4)]
+parks7 = [{"placeId": f"tp{i}", "name": f"Park {i}", "category": "theme_park", "rating": 4.9, "reviews": 50000,
+           "lat": 34.95 + 0.001 * i, "lng": 135.69} for i in range(10)]
+far7 = [{"placeId": f"far{i}", "name": f"Far {i}", "category": "museum", "rating": 4.9, "reviews": 50000,
+         "lat": 34.70 + 0.001 * i, "lng": 135.50} for i in range(10)]   # Osaka, ~40 km
+f7 = A._hotel_focus({}, temples + parks7 + far7, kyoto_c)
+assert A._km(f7, kyoto_c) < 1.5, f7
+assert A._km(A._sights_focus({}, temples + parks7 + far7), kyoto_c) > 8, "the old median was pulled out of town"
+assert A._hotel_focus({}, temples[:2] + parks7, kyoto_c) is None, "too few in-town sights: search around the city centre"
+
+# ---- run 7: the independent searches run at the same time; the pool is merged in city order, not completion order
+import random as _random, threading as _threading
+class ParGw:
+    def __init__(self, seed):
+        self.rnd, self.lock, self.live, self.peak, self.log = _random.Random(seed), _threading.Lock(), [0], [0], []
+        self.waits = []
+        self.food_at = []   # when the first zone food search (after every gather search) came in (shared by copies)
+    def tools(self): return []
+    def call(self, tool, args):
+        with self.lock:
+            self.live[0] += 1
+            self.peak[0] = max(self.peak[0], self.live[0])
+            wait_s = self.rnd.uniform(0.05, 0.25)
+            if not (tool == "find_places" and args.get("lat") is not None):
+                self.waits.append(wait_s)   # a gather search (not zone food)
+            self.log.append((tool, json.loads(json.dumps(args))))
+            if tool == "find_places" and args.get("lat") is not None and not self.food_at:
+                self.food_at.append(_time.time())
+        _time.sleep(wait_s)
+        with self.lock:
+            self.live[0] -= 1
+        city = str(args.get("city") or "")
+        base = {"Tokyo": (35.68, 139.76), "Kyoto": (35.01, 135.77), "Osaka": (34.69, 135.50)}.get(city.split(", ")[-1], (35.5, 138.8))
+        if tool == "search_flights":
+            return {"ok": True, "source": "fake", "offers": [{"offerId": "f1"}]}
+        if tool == "search_transfers":
+            return {"ok": True, "source": "fake", "options": [{"transferId": f"x-{args['date']}"}]}
+        if tool == "search_stays":
+            return {"ok": True, "source": "fake", "stays": [{"stayId": f"{city}-{i}"} for i in range(9)]}
+        if args.get("names"):
+            return {"ok": True, "source": "fake", "places": [{"placeId": "pin-sky", "name": "Skytree", "requested": n,
+                                                             "lat": 35.71, "lng": 139.81} for n in args["names"]]}
+        return {"ok": True, "source": "fake", "query": {"lat": base[0], "lng": base[1]}, "places": [
+            {"placeId": f"{city}-{c}-{i}", "name": f"{city} {c} {i}", "category": c, "rating": 4.5, "reviews": 500,
+             "lat": base[0] + 0.004 * i, "lng": base[1] + 0.003 * i} for c in args["categories"][:3] for i in range(4)]}
+spec7 = {"originAirport": "SIN", "startDate": "2026-12-01", "endDate": "2026-12-10", "pax": 2, "flightType": "round",
+         "interests": ["theme_park"], "mustInclude": [{"name": "Skytree", "city": "Tokyo"}],
+         "dayTrips": [{"place": "Kawaguchiko", "fromCity": "Tokyo"}],
+         "legs": [{"city": "Tokyo", "airport": "HND", "nights": 4}, {"city": "Kyoto", "airport": "KIX", "nights": 3},
+                  {"city": "Osaka", "airport": "KIX", "nights": 2}]}
+A.normalize_legs(spec7)
+A.normalize_prefs(spec7)
+runs7 = []
+for seed in (1, 2):
+    gw7, s7 = ParGw(seed), json.loads(json.dumps(spec7))
+    A._clients = lambda: (None, None, gw7)
+    m7, t0 = {}, _time.time()
+    with contextlib.redirect_stdout(io.StringIO()):
+        pool7, evs7 = drain_ev(A.gather_multi(s7, A.Usage(), m7))
+    runs7.append((pool7, m7, gw7.food_at[0] - t0, gw7, evs7, s7))
+A._clients = saved_clients
+(p_a, m_a, took_a, gw_a, evs_a, s_a), (p_b, m_b, _, gw_b, _, _) = runs7
+assert gw_a.peak[0] >= 6, f"flight, 3 cities and 2 transfers in flight together, peak {gw_a.peak[0]}"
+gather_calls = [t for t, a in gw_a.log if not (t == "find_places" and a.get("lat") is not None)]   # not zone food
+assert len(gather_calls) == 1 + 3 + 3 + 2 + 1 + 1 and took_a < 0.5 * sum(gw_a.waits), (len(gather_calls), took_a)
+strip = lambda p: json.dumps({k: v for k, v in p.items() if k != "zones"}, sort_keys=True)
+assert strip(p_a) == strip(p_b) and m_a["toolCalls"] == m_b["toolCalls"], "the pool and calls never depend on thread timing"
+assert [x.get("leg") for x in p_a["stays"]] == sorted(x.get("leg") for x in p_a["stays"]) and \
+    [t["transferId"] for t in p_a["transfers"]] == ["x-2026-12-05", "x-2026-12-08"], "merged in leg and hop order"
+trip_args = next(a for t, a in gw_a.log if a.get("city") == "Kawaguchiko")
+assert trip_args.get("near") and abs(trip_args["near"]["lat"] - 35.69) < 0.05, "the day trip waited for Tokyo's sights"
+assert s_a["pinned"] == [{"name": "Skytree", "placeId": "pin-sky", "city": "Tokyo"}] and \
+    any(p["placeId"] == "pin-sky" and p["leg"] == 0 for p in p_a["places"]), "the named place joined Tokyo"
+stays7 = [a for t, a in gw_a.log if t == "search_stays"]
+assert all(a.get("lat") is not None for a in stays7), "every city's hotels around its sights"
+msgs7 = [e.get("message") for e in evs_a]
+assert msgs7[:5] == ["Searching flights SIN → Tokyo, home from Osaka…", "Searching places and hotels in Tokyo (4 nights)…",
+                     "Searching places and hotels in Kyoto (3 nights)…", "Searching places and hotels in Osaka (2 nights)…",
+                     "Finding ways to get from Tokyo to Kyoto on 2026-12-05…"], msgs7
+assert "Finding things to do on a day trip to Kawaguchiko…" in msgs7
+print(f"parallel gather: {len(gather_calls)} searches in {took_a:.2f} s (one after another {sum(gw_a.waits):.2f} s), peak {gw_a.peak[0]}")
+
+# ---- run 7: the choices a delivered plan offers are logged
+A._upgrade_choices = lambda *a, **k: ["Upgrade to a 5-star hotel"]
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    got, _ = drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "1"}}}))
+assert got == ["Upgrade to a 5-star hotel"] and \
+    {"stage": "choices", "choices": got} in [json.loads(l) for l in out.getvalue().splitlines() if l.startswith("{")], out.getvalue()
+A._upgrade_choices = real_up
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "12000"}}}))
+assert '"stage": "choices"' not in out.getvalue(), "no choices, no log line"
 print("PERSONALISATION OK")
