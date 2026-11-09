@@ -475,7 +475,9 @@ Classify the traveller's NEW message:
   "Fly <airline> in <cabin> nonstop / with <n> stop(s), saves about <price>"),
   is "modify". The price is information, never a budget change.
   "Stay at X" -> preferences {{"hotel": {{"name": "X"}}}}; with "in <city>" on a
-  multi-city trip, that city's legs entry gets "hotel": {{"name": "X"}}.
+  multi-city trip, that city's legs entry gets "hotel": {{"name": "X"}};
+  with "for <d1>-<d2> <Mon>", the legs entry whose checkIn-checkOut
+  are those dates gets "hotel": {{"name": "X"}}.
   "Fly <airline> in <cabin> ..." -> preferences {{"flight": {{"preferredAirlines":
   ["<airline>"], "cabin": "<cabin>", "maxStops": 0 for nonstop, else <n>}}}}.
 
