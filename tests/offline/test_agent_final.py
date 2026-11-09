@@ -570,6 +570,8 @@ assert quiet(A._hide_brand_repeats, {**specb, "pinned": []}, b2, plan_b) == ["ic
 assert [p["zone"] for p in b2["places"] if p["placeId"] == "sna"] == ["", ""], "every per-leg copy is hidden"
 assert all(p["zone"] == "Z1" for p in b2["places"] if p["placeId"] not in ("ichb", "ma", "sna"))
 assert quiet(A._hide_brand_repeats, specb, {"places": copy.deepcopy(bpool["places"])}) == [], "zoned pools only"
+# a pinned branch stays even when the plan already uses another branch of its brand (not only because it ranks first)
+assert "ichb" not in quiet(A._hide_brand_repeats, specb, copy.deepcopy(bpool), {"days": [{"placeIds": ["ich"]}]})
 # the planner never sees the hidden repeat (it is not a zone member)
 assert "sna" not in [p["placeId"] for p in A._zone_places(b2, specb)]
 print("BRANDS OK")
