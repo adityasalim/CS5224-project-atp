@@ -106,14 +106,19 @@ assert [t["place"] for t in A.normalize_special({"dayTrips": [{"place": "Nara", 
 assert len(A.normalize_special({"dayTrips": ["Nara", "Kobe", "Uji", "Otsu", {"place": "USJ", "park": True}]})["dayTrips"]) == 4
 print("PARK DAY TRIP LIMIT OK")
 
-# ---- the zone day check skips park days by park zone or theme_park category, not only by name
+# ---- the zone day check knows park days by park zone or theme_park category, not only by name
 mk = lambda pid, cat, zone: {"placeId": pid, "name": pid.title(), "category": cat, "lat": 35.0, "lng": 139.0, "zone": zone,
                              "rating": 4.5}
 z_pool = {"zones": [{"id": "Z1", "kind": "walk"}, {"id": "Z9", "kind": "park"}],
           "places": [mk("legoland", "requested", "Z9"), mk("everland", "theme_park", "Z1"), mk("museum", "museum", "Z1")]}
 z_spec = {"startDate": "2026-12-01", "endDate": "2026-12-09", "preferences": {"food": {"perDay": 1}}}
-for pid in ("legoland", "everland"):
+z_pool["places"].append(mk("park_cafe", "cafe", "Z9"))
+for pid in ("legoland", "everland"):   # a park day needs no meals or zone shape, only the requested cafes
     diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [{"placeId": pid}]}]})
+    assert [i["message"] for i in diag["issues"] if i["status"] == "zones"] == [
+        "2026-12-03 needs 1 cafe stops near that day's park or town."], (pid, diag["issues"])
+    diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [
+        {"placeId": pid}, {"placeId": "park_cafe"}]}]})
     assert not [i for i in diag["issues"] if i["status"] == "zones"], (pid, diag["issues"])
 diag = A._deterministic_quality_eval(z_spec, z_pool, {"days": [{"date": "2026-12-03", "stops": [{"placeId": "museum"}]}]})
 assert len([i for i in diag["issues"] if i["status"] == "zones"]) == 2, diag["issues"]   # a city day still needs meals and cafes
@@ -137,8 +142,21 @@ saved_clients, A._clients = A._clients, lambda: (None, None, DayTripGw())
 list(A.gather_specials(spec_d, pool_d, [], set(), only={"dayTrips"}))
 A._clients = saved_clients
 args = SENT_DT[0]
-assert args["near"] == {"lat": 35.68, "lng": 139.72} and args["maxKm"] == 450 and args["radiusKm"] == 18, args
+assert args["near"] == {"lat": 35.68, "lng": 139.72} and args["maxKm"] == 200 and args["radiusKm"] == 18, args
 assert (spec_d["dayTrips"][0]["lat"], spec_d["dayTrips"][0]["lng"]) == (35.51, 138.76), spec_d["dayTrips"][0]
+# multi-city: the centre is the trip's own city (matched like leg_of), and an unknown city sends no centre
+hiro = [{"placeId": f"h{i}", "name": f"H {i}", "category": "temple", "lat": 34.39, "lng": 132.45, "leg": 1, "city": "Hiroshima"}
+        for i in range(3)]
+for from_city, want in (("hiroshima", {"lat": 34.39, "lng": 132.45}), ("", None)):
+    SENT_DT.clear()
+    spec_m = {"legs": [{"city": "Tokyo", "nights": 3}, {"city": "Hiroshima", "nights": 2}], "startDate": "2026-12-15",
+              "endDate": "2026-12-20", "pax": 2, "interests": [], "mustInclude": [],
+              "dayTrips": [{"place": "Miyajima", "fromCity": from_city}]}
+    pool_m = {"places": [dict(p, leg=0, city="Tokyo") for p in tokyo] * 3 + hiro, "stays": [], "flights": []}
+    A._clients = lambda: (None, None, DayTripGw())
+    list(A.gather_specials(spec_m, pool_m, [], set(), only={"dayTrips"}))
+    A._clients = saved_clients
+    assert SENT_DT[0].get("near") == want, (from_city, SENT_DT[0])
 
 # ---- each flight shows its usable hours on the trip's edge dates, and "best" weighs time at the destination
 jal = {"offerId": "jal", "priceTotalSGD": 7994, "matches": ["nonstop"], "slices": [
@@ -153,7 +171,13 @@ shown = {f["id"]: f["usableHours"] for f in json.loads(A.compact_pool({"flights"
                                                                       spec_f))["flights"]}
 assert shown == {"jal": {"2026-12-15": "none", "2026-12-16": "09:00-21:00", "2026-12-20": "none"},
                  "aax": {"2026-12-15": "none", "2026-12-20": "09:00-20:55"}}, shown
-assert [f["offerId"] for f in A._order_flights([jal, aax], spec_f)] == ["aax", "jal"], "a day more on the ground"
+assert [f["offerId"] for f in A._order_flights([jal, aax], spec_f)] == ["aax", "jal"]
+same_price = [{**jal, "priceTotalSGD": 5000}, {**aax, "priceTotalSGD": 5100, "slices": [
+    {**aax["slices"][0], "stops": 0, "durationMinutes": 450}, {**aax["slices"][1], "stops": 0, "durationMinutes": 455}]}]
+assert [f["offerId"] for f in A._order_flights(same_price, spec_f)] == ["aax", "jal"], "a day more on the ground"
+no_times = {"offerId": "nt", "priceTotalSGD": 4000, "slices": [{"stops": 0}, {"stops": 0}]}
+assert [f["offerId"] for f in A._order_flights([no_times, same_price[0]], spec_f)] == ["nt", "jal"],     "unknown times are neutral, not a whole stay lost"
+assert A._usable_hours(no_times, spec_f) == {}, "no invented full days when times are unknown"
 assert [f["offerId"] for f in A._order_flights([jal, aax], {**spec_f, "preferences": {"flight": {}}})] == ["jal", "aax"], \
     "outside \"best\", a nonstop match still ranks first, as before"
 print("DAY TRIPS AND FLIGHT TIME OK")

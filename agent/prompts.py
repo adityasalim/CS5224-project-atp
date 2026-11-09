@@ -262,7 +262,8 @@ SPECIAL_RULES = """- pinned: places the traveller asked for BY NAME (pool items 
   theme park). Never drop one to fix another problem.
 - A hotel with matches "requested hotel" or "already booked" is the traveller's own choice: use it.
 - dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (8 or more usableHours,
-  not a moving day): set "dayTrip": "<town>" on that day and use only that town's places (2-3 incl. food).
+  never the trip's first or last date or a moving day): set "dayTrip": "<town>" on that day and use only that
+  town's places (2-3 sights, plus lunch, dinner and the requested cafes).
   Never mix day-trip places into other days."""
 
 PLANNER = """ROLE: itinerary planner. Build a day-by-day plan using ONLY IDs from the candidate pool above.
@@ -419,7 +420,8 @@ Score each criterion as an integer from 1 (poor) to 5 (excellent):
   classic = "well-known"), and budget-aware hotel comfort. Score 2 or lower for any confirmed conflict, supermarket used
   as a food stop, or missing high-priority (8-10) experience.
 - theme: coherent daily themes, logical geographic grouping, and meaningful alignment with traveller interests.
-- pacing: matches requested pace/intensity, light arrival/departure/transfer days, realistic hike/activity density, and
+- pacing: matches requested pace/intensity, light days with little time after landing or before departure, light
+  transfer days, realistic hike/activity density, and
   no evening-only stops scheduled in the morning.
 - variety: diverse categories and dining across days without repetitive attractions or filler stops.
 

@@ -1743,22 +1743,15 @@ def zone_food(spec, pool, calls, sources):
         if wanted and zs:
             c = {"lat": round(sum(z["lat"] for z in zs) / len(zs), 5), "lng": round(sum(z["lng"] for z in zs) / len(zs), 5)}
             reach = max(3.0, max(_km(c, z) for z in zs) + ZONE_ATTACH_KM)
-            extras.append(({"leg": li, "units": len(wanted)}, with_prefs("find_places", spec, {
-                **c, "categories": ["restaurant"], "cuisine": "|".join(wanted), "maxPerCategory": min(20, 4 * len(wanted)),
-                "foodRadiusKm": round(reach, 1)})))
+            for cuisine in wanted:   # one job each: a combined call keeps only the best-rated cuisine
+                extras.append(({"leg": li, "cuisine": cuisine}, with_prefs("find_places", spec, {
+                    **c, "categories": ["restaurant"], "cuisine": cuisine, "maxPerCategory": 4,
+                    "foodRadiusKm": round(reach, 1)})))
     # priority within the cap: the city coffee searches, every zone's food, the cuisine searches, then park cafes
     jobs = coffee + jobs + [j for j in extras if "id" not in j[0]] + [j for j in extras if "id" in j[0]]
-    kept, used = [], 0
-    for z, args in jobs:   # a cuisine job is one Google Text Search per cuisine, cut to the requests left
-        left = GOOGLE_FOOD_CAP - used
-        if left <= 0:
-            continue
-        if z.get("units", 1) > left:
-            args = {**args, "cuisine": "|".join(args["cuisine"].split("|")[:left]), "maxPerCategory": 4 * left}
-            z = {**z, "units": left}
-        kept.append((z, args))
-        used += z.get("units", 1)
-    skipped, jobs = len(jobs) - len(kept), kept
+    skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
+    jobs = jobs[:GOOGLE_FOOD_CAP]
+    used = len(jobs)
     if not jobs:
         return 0
     yield ev("status", f"Finding rated food in {sum(1 for z, _ in jobs if 'id' in z)} walkable areas…")
@@ -1887,10 +1880,11 @@ def gather_specials(spec, pool, calls, sources, only=None):
             yield ev("status", f"Finding things to do on a day trip to {t['place']}…")
             # geocode near the trip's city (a bare "Fuji" matched Antipolo, Philippines), wide enough to reach the
             # base towns around a landmark (Kawaguchiko is ~13 km from Fuji's summit)
+            li_t = leg_of(t.get("fromCity")) if multi else 0   # no centre for an unknown city on a route
             home = [p_ for p_ in pool["places"] if not p_.get("dayTrip") and p_.get("lat") is not None
-                    and (not multi or t.get("fromCity") in (None, "", p_.get("city")))]
+                    and (not multi or (li_t is not None and p_.get("leg") == li_t))]
             near = ({"near": {"lat": statistics.median(p_["lat"] for p_ in home),
-                              "lng": statistics.median(p_["lng"] for p_ in home)}, "maxKm": DAY_TRIP_MAX_KM} if home else {})
+                              "lng": statistics.median(p_["lng"] for p_ in home)}, "maxKm": DAY_TRIP_NEAR_KM} if home else {})
             r = call({"city": t["place"], "categories": cats, "radiusKm": DAY_TRIP_RADIUS_KM, "maxPerCategory": 4,
                       **near})   # food: zone_food
             if not r.get("ok") or not r.get("places"):
@@ -2014,6 +2008,8 @@ def _usable_hours(f, spec):
     """The flight's local planning window on its arrival and departure dates ("none" = no time), so the planner
     knows a 05:55 landing still leaves a full day."""
     slices, prefs, days = f.get("slices") or [{}], spec.get("preferences") or {}, {}
+    if not slices[0].get("arriveAt") and not slices[-1].get("departAt"):
+        return days   # times unknown: no window rather than an invented full day
     edges = {spec["startDate"], spec.get("endDate", ""), str(slices[0].get("arriveAt") or "")[:10],
              str(slices[-1].get("departAt") or "")[:10]}
     for day in sorted(d for d in edges if len(d) == 10 and spec["startDate"] <= d <= spec.get("endDate", "~")):
@@ -2593,6 +2589,8 @@ def _order_flights(flights, spec=None):
     ret_after = _hm(f_pref["returnDepartAfter"]) if _HHMM.match(str(f_pref.get("returnDepartAfter") or "")) else None
     ret_before = _hm(f_pref["returnDepartBefore"]) if _HHMM.match(str(f_pref.get("returnDepartBefore") or "")) else None
     sort_by = _flight_sort(f_pref, spec)
+    known_ground = [g for g in map(_flight_ground_minutes, flights) if g is not None]
+    neutral_ground = sum(known_ground) / len(known_ground) if known_ground else 0   # unknown times: no penalty
     is_oneway = isinstance(spec, dict) and spec.get("flightType") == "oneway"
 
     def flight_key(f):
@@ -2663,7 +2661,8 @@ def _order_flights(flights, spec=None):
         if sort_by == "duration":
             metric_key = (has_dur, -d_val, has_price, -p_val, has_stops, -s_val)
         elif sort_by == "best":
-            ground = _flight_ground_minutes(f) or 0   # time at the destination counts like time saved in the air
+            ground = _flight_ground_minutes(f)   # time at the destination counts like time saved in the air
+            ground = neutral_ground if ground is None else ground
             combined = ((p_val if has_price else 5000.0) + (d_val * 0.5 if has_dur else 500.0)
                         + (s_val * 120.0 if has_stops else 240.0) - ground * 0.5)
             metric_key = (-round(combined, 2), has_price, -p_val, has_dur, -d_val, has_stops, -s_val)
@@ -3475,13 +3474,18 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
     for d in days if pool.get("zones") else []:
         st = [by_id[i] for i in ([s.get("placeId") for s in d.get("stops") or [] if isinstance(s, dict)]
                                  or d.get("placeIds") or []) if i in by_id]
-        if not st or d.get("dayTrip") or d.get("date") in edge or any(
-                p.get("zone") in parkz or p.get("category") == "theme_park" or PARK_RE.search(p.get("name") or "")
-                for p in st):
+        if not st or d.get("date") in edge:
+            continue
+        cafes = sum(p.get("category") == "cafe" for p in st)
+        if d.get("dayTrip") or any(p.get("zone") in parkz or p.get("category") == "theme_park"
+                                   or PARK_RE.search(p.get("name") or "") for p in st):
+            if cafes < want_cafes:   # park and day-trip days: meals may be inside, but the requested cafes count
+                msg = f"{d['date']} needs {want_cafes} cafe stops near that day's park or town."
+                issues.append({"priority": 6, "day": d.get("date"), "status": "zones", "message": msg})
+                suggestions.append(msg)
             continue
         zs = sorted({p["zone"] for p in st if p.get("zone") and not _is_food_place(p)})
         meals = sum(p.get("category") in ("restaurant", "street_food") for p in st)
-        cafes = sum(p.get("category") == "cafe" for p in st)
         for bad, msg in ((len(zs) > 2, f"{d['date']} uses zones {', '.join(zs)}: keep the day to one or two zones "
                                        f"joined by one ride listed in rideMin."),
                          (meals < 2, f"{d['date']} needs a lunch and a dinner from that day's zones."),
@@ -4044,7 +4048,7 @@ def sequence(spec, pool, plan):
 
 
 DAY_TRIP_MIN_KM = 25   # closer than this is just another part of the city
-DAY_TRIP_MAX_KM = 450  # the verifier's day-trip distance limit; a farther geocode is a wrong match
+DAY_TRIP_NEAR_KM = 200  # the verifier's 210 min one-way limit is about 195 km: a farther geocode is a wrong match
 DAY_TRIP_RADIUS_KM = 18
 
 
