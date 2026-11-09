@@ -534,6 +534,14 @@ for router_legs in ([{"checkIn": "2026-12-18", "checkOut": "2026-12-20", "hotel"
     gen.close()
 assert A._hotel_only_legs(old_legs, [{"city": "Kyoto", "nights": 5, "hotel": {"name": "X"}}]) is None, "nights changed"
 assert A._hotel_only_legs(old_legs, [{"city": "Osaka", "hotel": {"name": "X"}}]) is None, "a new city"
+assert A._hotel_only_legs(old_legs, [{"city": "Tokyo"}, {"city": "Kyoto", "hotel": {"name": "X"}}]) is not None, \
+    "the full list, in order"
+three = old_legs + [{"city": "Osaka", "nights": 2, "checkIn": "2026-12-20", "checkOut": "2026-12-22"}]
+assert A._hotel_only_legs(three, [{"city": "Tokyo"}, {"city": "Kyoto", "hotel": {"name": "X"}}]) is None, \
+    "dropping a city with a hotel wish is a route change"
+assert A._hotel_only_legs(old_legs, [{"city": "Kyoto"}, {"city": "Tokyo", "hotel": {"name": "X"}}]) is None, "reordered"
+assert A._hotel_only_legs(old_legs, [{"city": "Kyoto", "checkIn": "2026-12-19", "checkOut": "2026-12-21",
+                                      "hotel": {"name": "X"}}]) is None, "moved dates"
 A._clients = clients
 # the router reads a chip named by its stay dates (approved wording)
 import prompts as _prompts

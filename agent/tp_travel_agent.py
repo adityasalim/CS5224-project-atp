@@ -2479,9 +2479,9 @@ def _accessibility_status(p, access_reqs):
 
 # Coffee chains (as whole words in a lower-case name, or their Japanese names): ranked below roasters and specialty
 # cafes when the traveler wished specialty coffee or pour-over.
-CHAIN_CAFES = re.compile(r"(?<![a-z])(starbucks|doutor|tully['’]?s|excelsior|komeda|pronto|veloce|st\.? ?marc|saint marc|"
+CHAIN_CAFES = re.compile(r"(?<![a-z])(starbucks|doutor|tully['’]?s|excelsior|komeda|pronto|veloce|st\.? ?marc|saint ?marc|"
                          r"beck['’]?s)(?![a-z])|スターバックス|ドトール|タリーズ|エクセルシオール|コメダ|プロント|ベローチェ|サンマルク")
-SPECIALTY_COFFEE = re.compile(r"\broast(?:er|ers|ery|eries|ing)\b|焙煎|specialty coffee")
+SPECIALTY_COFFEE = re.compile(r"(?<![a-z])roast(?:er|ers|ery|eries|ing)(?![a-z])|焙煎|ロースタ|specialty coffee")
 
 
 def _place_score(p, spec=None):
@@ -5709,20 +5709,23 @@ def _hotel_only_legs(old_legs, new_legs):
     else None."""
     if not old_legs or not new_legs or len(new_legs) > len(old_legs):
         return None
-    out, hotel = [dict(o) for o in old_legs], False
-    for n in new_legs:
-        if not isinstance(n, dict):
+    partial = len(new_legs) < len(old_legs)   # a shorter list names only the stays that get a hotel; anything
+    out, hotel, used = [dict(o) for o in old_legs], False, set()   # else there rewrites the route (normal path)
+    for k, n in enumerate(new_legs):
+        if not isinstance(n, dict) or (partial and not (isinstance(n.get("hotel"), dict) and n["hotel"].get("name"))):
             return None
         hits = [i for i, o in enumerate(old_legs) if n.get("checkIn") and n.get("checkIn") == o.get("checkIn")
                 and n.get("checkOut", o.get("checkOut")) == o.get("checkOut")]
         if not hits and n.get("city"):
             hits = [i for i, o in enumerate(old_legs)
                     if str(o.get("city")).strip().lower() == str(n.get("city")).strip().lower()]
-        if len(hits) != 1:
+        if len(hits) != 1 or hits[0] in used or (not partial and hits[0] != k):   # a full list keeps its order
             return None
+        used.add(hits[0])
         o = old_legs[hits[0]]
         if (n.get("city") and str(n["city"]).strip().lower() != str(o.get("city")).strip().lower()) or \
-                (n.get("nights") not in (None, o.get("nights"))):
+                (n.get("nights") not in (None, o.get("nights"))) or \
+                any(n.get(d) not in (None, o.get(d)) for d in ("checkIn", "checkOut")):   # moved dates: normal path
             return None
         if isinstance(n.get("hotel"), dict) and n["hotel"].get("name"):
             out[hits[0]]["hotel"], hotel = n["hotel"], True
