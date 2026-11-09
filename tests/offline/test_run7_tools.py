@@ -57,14 +57,14 @@ RT = {"origin": "SIN", "destination": "HND", "departDate": "2026-12-15", "return
 r = fl.lambda_handler(RT, None)
 searches = [c for c in CALLS if not c.get("departure_token")]
 lookups = [c for c in CALLS if c.get("departure_token")]
-assert [c.get("stops") for c in searches] == [None, 1], searches   # the normal search, then ONE nonstop-only search
+assert sorted(c.get("stops") or 0 for c in searches) == [0, 1], searches   # the normal search and ONE nonstop-only search
 assert len(CALLS) == 5, len(CALLS)   # 2 searches + SERPAPI_RETURN_LOOKUPS (3) return lookups
 assert [c["departure_token"] for c in lookups] == ["sq", "cx", "late"], [c["departure_token"] for c in lookups]
 assert lookups[0]["stops"] == 1 and "stops" not in lookups[1], "a lookup keeps the params of the search that found it"
 nonstop = [o for o in r["offers"] if o["maxStops"] == 0]
 assert nonstop and nonstop[0]["slices"][0]["flightNumbers"] == ["SQ638"] and nonstop[0]["cabin"] == "premium_economy", r["offers"]
 assert all(o["cabin"] != "mixed" for o in r["offers"]), "the mixed-cabin outbound is never priced"
-assert fl._cache_key({}).startswith("flights-v6:")
+assert fl._cache_key({}).startswith("flights-v7:")
 # the warm call is served from the cache with no SerpApi call
 n = len(CALLS)
 assert fl.lambda_handler({**RT, "maxStops": 0}, None)["source"] == "google_flights-cache" and len(CALLS) == n
@@ -109,7 +109,7 @@ assert len(CALLS) == 2 and {o["maxStops"] for o in r["offers"]} == {0, 1}, (len(
 CALLS.clear()
 fl.lambda_handler({**RT, "returnDate": None, "departDate": "2026-12-22", "cabin": "economy"}, None)
 assert len(CALLS) == 1, CALLS
-# the nonstop search hangs: one short attempt (8 s, no retry), and the return lookups still answer
+# the nonstop search times out: one attempt (min(30 s, REQUEST_TIMEOUT_S 20), no retry), the return lookups still answer
 CALLS.clear()
 BASE["best_flights"], NS["best_flights"] = [ONESTOP], [NONSTOP]
 waits = []
@@ -120,7 +120,7 @@ def slow_nonstop(url, params, timeout):
     return fake_get(url, params, timeout)
 fl.requests.get = slow_nonstop
 r = fl.lambda_handler({**RT, "departDate": "2026-12-10"}, None)
-assert r["ok"] and waits == [8], (waits, r.get("message"))
+assert r["ok"] and waits == [20], (waits, r.get("message"))
 # a nonstop outbound whose only returns connect: its lookup (stops=1) finds nothing, so it asks again without stops
 CALLS.clear()
 BASE["best_flights"], NS["best_flights"] = [ONESTOP], [NONSTOP]

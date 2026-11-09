@@ -749,6 +749,8 @@ def _google(q, deadline=None, sights_first=False):
                               fame_known=False, cuisine=_g_cuisine(p, cat)))
             out[-1].update(reviews=p.get("userRatingCount"), priceLevel=p.get("priceLevel"),
                            **({"searchedAs": cat} if real != cat else {}))
+            if p.get("primaryType") == "coffee_roastery":
+                out[-1]["tags"].append("roaster")
     if errs:
         print("google searches failed:", "; ".join(errs))
     return (out, None) if out or not errs else (None, errs[0])
@@ -799,6 +801,8 @@ def _google_zone(q, deadline):
                    url=p.get("googleMapsUri"), rating=rating, fame_known=False,
                    cuisine=_g_cuisine(p, cat) or (kind.replace("_restaurant", "").replace("_", " ")
                                                   if kind not in ("", "restaurant") else None))
+        if kind == "coffee_roastery":
+            g["tags"].append("roaster")
         g.update(reviews=n, priceLevel=p.get("priceLevel"), matches=_matches(g, q["prefs"]))
         scored.append(((n * rating + 150 * 4.2) / (n + 150), g))   # Bayesian: 4.6 with 900 reviews before 4.9 with 60
     want = q.get("priceLevel")

@@ -161,10 +161,20 @@ def _default_visit(p):
             return 240
         if any(w in kw for w in ("climb", "boulder")):
             return 150
-    if p.get("category") in ("requested", "attraction", "theme_park") and any(
-            w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q")):
-        return 480   # a big theme park takes the whole day (Google can list it as an attraction or a theme park)
+    if _full_day_park(p):
+        return 480
     return DEFAULT_VISIT.get(p.get("category"), 60)
+
+
+def _full_day_park(p):
+    """A big theme park that takes the whole day (Google can list it as an attraction or a theme park)."""
+    return p.get("category") in ("requested", "attraction", "theme_park") and any(
+        w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q"))
+
+
+def _opens_day(p):
+    """A theme park (category theme_park, or a full-day park listed as an attraction) opens its day."""
+    return p.get("category") == "theme_park" or _full_day_park(p)
 
 
 def _resolve(event):
@@ -237,7 +247,7 @@ def _zone_groups(stops):
 
 
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
-             max_stops=0, min_free=0, first=None):
+             max_stops=0, min_free=0, first=None, park_first=False):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
     opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
     11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted.
@@ -245,7 +255,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
     In walk mode the day starts in the walkable group farthest from the hotel and finishes a group before it takes a
     ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN. A group is a zone
     when the stops carry zone ids, else a chain of walks of MAX_WALK_MINUTES or less. first (a group id) starts the
-    day in that group instead."""
+    day in that group instead. park_first starts the day with a theme park (_opens_day) when one fits."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
@@ -283,15 +293,18 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
     while remaining:
         if max_stops and len(out) >= max_stops:
             break
-        if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
-            far = first if first is not None else max(
-                {group[i] for i in remaining}, key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
-            here = [i for i in remaining if group[i] == far]
-        else:
-            here = [i for i in remaining if group and group[i] == group[cur]]
-        best = pick(here) if here else None
-        if best is None or best[5] - best[4] > LOCK_MAX_WAIT_MIN:   # nothing in this walkable group fits now
-            best = pick(remaining)
+        parks = [i for i in remaining if park_first and not out and _opens_day(stops[i - 1])]
+        best = pick(parks) if parks else None   # the park opens the day, the other stops come after it
+        if best is None:
+            if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
+                far = first if first is not None else max(
+                    {group[i] for i in remaining}, key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
+                here = [i for i in remaining if group[i] == far]
+            else:
+                here = [i for i in remaining if group and group[i] == group[cur]]
+            best = pick(here) if here else None
+            if best is None or best[5] - best[4] > LOCK_MAX_WAIT_MIN:   # nothing in this walkable group fits now
+                best = pick(remaining)
         if best is None:
             break
         _, i, travel, how, arrive, begin, end = best
@@ -344,9 +357,10 @@ def lambda_handler(event, context):
     lunch = bool(event.get("lunch", True))
     max_stops = int(event.get("maxStops") or 0)
     min_free = int(event.get("minFreeMinutes") or 0)
-    # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one; keep the
-    # one that fits the most pinned places, then the most stops, then never goes back to a zone it left, then starts
-    # in the farther zone, then has the least waiting.
+    # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one (on a day
+    # with a theme park each of these also with the park first); keep the one that fits the most pinned
+    # places, then opens with the park, then the most stops, then never goes back to a zone it left, then starts in the
+    # farther zone, then has the least waiting.
     pinned = ({x for x in event["pinned"] if isinstance(x, str)} if isinstance(event.get("pinned"), list)
               else {s["placeId"] for s in stops if s.get("category") == "requested"})
     firsts = [None] + (sorted(set(_zone_groups(stops)[1:])) if mode == "walk" and any(s.get("zone") for s in stops)
@@ -357,11 +371,13 @@ def lambda_handler(event, context):
         z = [zone_of[x["placeId"]] for x in o[0]]
         runs = [a for k, a in enumerate(z) if k == 0 or a != z[k - 1]]
         return len(runs) - len(set(runs))
+    parks = {s["placeId"] for s in stops if _opens_day(s)}
     options = [(f, schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
-                            max_stops=max_stops, min_free=min_free, first=f))
-               for lf in (False, True) for f in firsts]
+                            max_stops=max_stops, min_free=min_free, first=f, park_first=pf))
+               for pf in ((False, True) if parks else (False,)) for lf in (False, True) for f in firsts]
     ordered, unscheduled, back, free = max(options, key=lambda fo: (
-        sum(x["placeId"] in pinned for x in fo[1][0]), len(fo[1][0]), -returns(fo[1]), fo[0] is None,
+        sum(x["placeId"] in pinned for x in fo[1][0]), bool(fo[1][0]) and fo[1][0][0]["placeId"] in parks,
+        len(fo[1][0]), -returns(fo[1]), fo[0] is None,
         -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
     return {"ok": True, "date": event.get("date"), "start": start, "stops": ordered,
             "returnToStartMinutes": back, "freeTimeMinutes": free, "unscheduled": unscheduled,

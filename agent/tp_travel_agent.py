@@ -1934,11 +1934,17 @@ def zone_food(spec, pool, calls, sources):
         results = list(ex.map(run, [a for _, a in jobs]))
     have = {(p["placeId"], p.get("leg") or 0) for p in pool["places"]}
     found = 0
-    for (targets, _), r in sorted(zip(jobs, results), key=lambda x: "id" not in x[0][0][0]):   # zones first, then the rest
+    city_coffee = [a for _, a in coffee]
+    for (targets, args), r in sorted(zip(jobs, results), key=lambda x: "id" not in x[0][0][0]):   # zones first, then the rest
         calls.append("find_places")
         if not r.get("ok"):
             continue
         sources.add(f"find_places:{r.get('source')}")
+        if args in city_coffee:   # the city-wide "specialty coffee" search: every copy of its cafes is tagged so
+            ids = {p["placeId"] for p in r.get("places") or []}
+            for p in pool["places"] + (r.get("places") or []):
+                if p["placeId"] in ids and "specialty coffee" not in (p.get("tags") or []):
+                    p["tags"] = [*(p.get("tags") or []), "specialty coffee"]
         for p in r.get("places") or []:
             for z in targets:
                 if (p["placeId"], z["leg"]) in have:
@@ -2471,6 +2477,11 @@ def _accessibility_status(p, access_reqs):
     return "verified" if has_pos else "unknown"
 
 
+# Coffee chains, as their names read with spaces and punctuation removed: ranked below roasters and specialty cafes
+# when the traveler wished specialty coffee or pour-over.
+CHAIN_CAFES = ("starbucks", "doutor", "tullys", "excelsior", "komeda", "pronto", "veloce", "stmarc", "saintmarc", "becks")
+
+
 def _place_score(p, spec=None):
     """Deterministic preference-weighted candidate relevance score using existing pool metadata."""
     if p.get("requested") or p.get("dayTrip"):
@@ -2546,6 +2557,14 @@ def _place_score(p, spec=None):
         if cat in ("cafe", "dessert") or any(
                 w in meta_text for w in ("cafe", "coffee", "dessert", "bakery", "matcha", "patisserie", "sweets")):
             score += 9.0
+
+    # 3b. Specialty coffee or pour-over wished: roasters and specialty cafes above the coffee chains (kept, ranked lower)
+    coffee = (spec.get("preferences") or {}).get("food") or {}
+    if cat == "cafe" and (coffee.get("coffee") or coffee.get("coffeeStyle") == "pour_over"):
+        if any(c in re.sub(r"[\W_]", "", name_l) for c in CHAIN_CAFES):
+            score -= 8.0
+        elif re.search(r"roast|焙煎|specialty coffee", f"{name_l} {meta_text}"):
+            score += 4.0
 
     # 4. Explicit activity relevance (distinguishing verified trails/activities from generic parks and retail)
     if wants_hiking:
@@ -4389,7 +4408,8 @@ def _upgrade_choices(spec, pool, seq, vres):
     rev = lambda x: float(x.get("reviewScore") or x.get("review") or 0)
     stars = lambda x: float(x.get("starRating") or x.get("stars") or 0)
     out = []
-    for st in _stays_of(seq, pool):
+    stays = _stays_of(seq, pool)
+    for st in stays:
         cur = known_price(st)
         # the wishes the plan's hotel meets; never offer one losing them (a requested hotel's "requested hotel" match
         # is on no other hotel, so it gets no upgrade)
@@ -4403,6 +4423,10 @@ def _upgrade_choices(spec, pool, seq, vres):
         if better:
             x = max(better, key=lambda x: (rev(x), stars(x), -known_price(x), str(x.get("stayId"))))
             where = f" in {st['city']}" if is_multi(spec) and st.get("city") else ""
+            if where and sum(s_.get("city") == st["city"] for s_ in stays) > 1:   # a city with two stays: their dates
+                a, b = date.fromisoformat(st["checkIn"]), date.fromisoformat(st["checkOut"])
+                where = f" for {a.day}-{b.day} {b:%b}" if (a.year, a.month) == (b.year, b.month) else \
+                    f" for {a.day} {a:%b}-{b.day} {b:%b}"
             rating = f"rated {rev(x):g}" if rev(x) else f"{stars(x):g} stars"
             out.append(f"Stay at {x['name']}{where} ({rating}), +{money_text(spec, known_price(x) - cur)}")
     f_pref = (spec.get("preferences") or {}).get("flight") or {}

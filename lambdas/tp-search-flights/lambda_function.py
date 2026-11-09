@@ -6,7 +6,7 @@ Providers, in order (the "source" field says which one answered):
   1. SerpApi Google Flights (real airlines, times and prices as shown on Google Flights; no booking -
      each offer has a bookingUrl to Google Flights). Needs SERPAPI_KEY in the secret.
      SerpApi searches per call: one-way 1; round trip or open-jaw 1 + SERPAPI_RETURN_LOOKUPS (default 1 + 3 = 4).
-     Above economy one more, nonstop-only search is added (one-way 2, round trip default 5, at most 6). A failed
+     Above economy one more, nonstop-only search runs beside the main one (one-way 2, round trip default 5, at most 6). A failed
      request is retried once. Results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
   2. Duffel (test mode returns the fake "Duffel Airways"; live mode returns bookable fares). Needs DUFFEL_TOKEN.
   3. MOCK_MODE=true, or no keys at all: built-in sample data.
@@ -33,6 +33,7 @@ import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -211,7 +212,7 @@ def _apply_prefs(offers, q):
     return offers
 
 def _cache_key(q):
-    return "flights-v6:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v7:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -255,8 +256,13 @@ _DEADLINE = None
 REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "20"))   # one HTTP request, at most
 
 
-NONSTOP_WAIT_S = 8        # the optional nonstop-only search: one attempt of at most this long
-NONSTOP_MIN_LEFT_S = 25   # and only when this much of the time budget is left for it and the return lookups
+# The optional nonstop-only search runs at the same time as the main search: one attempt of at most NONSTOP_WAIT_S
+# (and REQUEST_TIMEOUT_S), started only when NONSTOP_MIN_LEFT_S of the budget is left. Once the main search is back
+# it is waited for only while NONSTOP_LOOKUP_RESERVE_S stays left for the return lookups. With the 35 s budget and
+# REQUEST_TIMEOUT_S 20 a hung nonstop search is given up 20 s in, leaving the lookups 15 s.
+NONSTOP_WAIT_S = 30
+NONSTOP_MIN_LEFT_S = 25
+NONSTOP_LOOKUP_RESERVE_S = 15
 
 
 def _time_left():
@@ -403,18 +409,27 @@ def _call_serpapi(q, key):
         params = {**base, "type": 3, "multi_city_json": json.dumps([
             {"departure_id": q["origin"], "arrival_id": q["destination"], "date": q["departDate"]},
             {"departure_id": q["returnFrom"], "arrival_id": q["origin"], "date": q["returnDate"]}])}
+    ns_job = None
+    if q["cabin"] != "economy" and _time_left() >= NONSTOP_MIN_LEFT_S:
+        # above economy the cheapest fares are often 1-stop or mixed-cabin bundles: one more search, nonstop only
+        # (SerpApi stops=1), so a nonstop is in the list when one is sold. It runs beside the main search; the pool is
+        # not waited for on shutdown, so a hung request is left behind and its answer unused.
+        ns_params = {**params, "stops": 1}
+        pool = ThreadPoolExecutor(max_workers=1)
+        ns_job = pool.submit(_serp_get, ns_params, NONSTOP_WAIT_S, 1)
+        pool.shutdown(wait=False)
     data, error = _serp_get(params)
     if error:
         return None, error
     url = (data.get("search_metadata") or {}).get("google_flights_url")
     first = (data.get("best_flights") or []) + (data.get("other_flights") or [])
     nonstop_params = {}   # id(option) -> the params of the nonstop-only search that found it (for its return lookup)
-    if q["cabin"] != "economy" and _time_left() >= NONSTOP_MIN_LEFT_S:
-        # above economy the cheapest fares are often 1-stop or mixed-cabin bundles: one more search, nonstop only
-        # (SerpApi stops=1), so a nonstop is in the list when one is sold. Options the first search has are kept from it.
-        ns_params = {**params, "stops": 1}
-        # optional: one short attempt, so a slow SerpApi never leaves the return lookups without time
-        ns, ns_err = _serp_get(ns_params, cap=NONSTOP_WAIT_S, attempts=1)
+    if ns_job:
+        try:   # wait only while the return lookups keep their reserve
+            ns, ns_err = ns_job.result(timeout=max(_time_left() - NONSTOP_LOOKUP_RESERVE_S, 0))
+        except FutureTimeout:
+            ns, ns_err = None, _err("upstream_timeout", "the nonstop search was still running when the return "
+                                                        "lookups needed the time", "serpapi")
         if ns_err:
             print("nonstop search failed:", ns_err)
         else:
