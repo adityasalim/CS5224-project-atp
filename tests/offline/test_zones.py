@@ -439,7 +439,7 @@ assert {p["name"]: p["category"] for p in r["places"]} == {"solid": "restaurant"
                                                            "bun": "dessert"}
 solid = next(p for p in r["places"] if p["name"] == "solid")
 assert solid["cuisine"] == "ramen" and solid["reviews"] == 900
-assert not any(k.startswith("places-v5:") for k in STORE), "zone answers are never cached"
+assert not any(k.startswith("places-v6:") for k in STORE), "zone answers are never cached"
 POSTS.clear()
 fp.lambda_handler({**ev, "categories": ["restaurant"], "cuisine": "", "dietary": []}, None)
 assert sorted(POSTS[0]["includedPrimaryTypes"]) == ["restaurant"], POSTS[0]["includedPrimaryTypes"]

@@ -42,7 +42,7 @@ food = [p for p in r["places"] if p["category"] in ("cafe", "restaurant")]
 assert food and {p["name"] for p in food} == {"Good Roaster"}, "few reviews and closed venues are dropped"
 assert food[0]["reviews"] == 1200 and food[0]["rating"] == 4.7 and food[0]["priceLevel"] == "PRICE_LEVEL_MODERATE"
 assert "Google Maps" in r["attribution"]
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v5:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v6:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/1"}, "Google places are not cached"
 
 # warm call: the cached sights come back without Overpass, the food is asked from Google again
@@ -60,7 +60,7 @@ assert warm < cold / 2
 STORE.clear(); SIGHTS.clear()
 fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestException("down"))
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
-assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v5:") for k in STORE), (SIGHTS, list(STORE))
+assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v6:") for k in STORE), (SIGHTS, list(STORE))
 
 # warm call while Google is down: one Google attempt, then the chain finds the food
 fp.requests.post = fake_post
@@ -102,11 +102,11 @@ fp._amazon_location = _amazon_location
 STORE.clear()
 fp.requests.post = fake_post
 k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywords": ["pour-over coffee"]}, None)
-assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v5:") for s in STORE), (k["source"], list(STORE))
+assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v6:") for s in STORE), (k["source"], list(STORE))
 fp._overpass = lambda q, deadline: ([], None)
 g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
 assert g["source"] == "google+google" and any(p["category"] == "temple" and p["placeId"].startswith("gplace:") for p in g["places"])
-assert not any(s.startswith("places-v5:") for s in STORE), list(STORE)
+assert not any(s.startswith("places-v6:") for s in STORE), list(STORE)
 fp._overpass = _overpass
 
 # a web pick (namesCategory) is verified on Google only, one Text Search per name, with the 4.0-star, 50-review and

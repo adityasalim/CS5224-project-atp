@@ -326,7 +326,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places-v5:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v6:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
