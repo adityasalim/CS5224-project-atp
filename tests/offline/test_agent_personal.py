@@ -622,7 +622,8 @@ class ParGw:
                                                              "lat": 35.71, "lng": 139.81} for n in args["names"]]}
         return {"ok": True, "source": "fake", "query": {"lat": base[0], "lng": base[1]}, "places": [
             {"placeId": f"{city}-{c}-{i}", "name": f"{city} {c} {i}", "category": c, "rating": 4.5, "reviews": 500,
-             "lat": base[0] + 0.004 * i, "lng": base[1] + 0.003 * i} for c in args["categories"][:3] for i in range(4)]}
+             "lat": base[0] + 0.004 * i + (0.08 if c == "theme_park" else 0), "lng": base[1] + 0.003 * i}   # parks 9 km out
+            for c in args["categories"][:3] for i in range(4)]}
 spec7 = {"originAirport": "SIN", "startDate": "2026-12-01", "endDate": "2026-12-10", "pax": 2, "flightType": "round",
          "interests": ["theme_park"], "mustInclude": [{"name": "Skytree", "city": "Tokyo"}],
          "dayTrips": [{"place": "Kawaguchiko", "fromCity": "Tokyo"}],
@@ -653,6 +654,10 @@ assert s_a["pinned"] == [{"name": "Skytree", "placeId": "pin-sky", "city": "Toky
     any(p["placeId"] == "pin-sky" and p["leg"] == 0 for p in p_a["places"]), "the named place joined Tokyo"
 stays7 = [a for t, a in gw_a.log if t == "search_stays"]
 assert all(a.get("lat") is not None for a in stays7), "every city's hotels around its sights"
+tokyo7 = [p for p in p_a["places"] if p["placeId"].startswith("Tokyo-")]
+want7 = A._hotel_focus(s_a, tokyo7, {"lat": 35.68, "lng": 139.76})
+assert next((a["lat"], a["lng"]) for a in stays7 if a["city"] == "Tokyo") == (want7["lat"], want7["lng"]) and \
+    want7 != A._sights_focus(s_a, tokyo7), "the Tokyo hotels are searched around its in-town sights, not its theme parks"
 msgs7 = [e.get("message") for e in evs_a]
 assert msgs7[:5] == ["Searching flights SIN → Tokyo, home from Osaka…", "Searching places and hotels in Tokyo (4 nights)…",
                      "Searching places and hotels in Kyoto (3 nights)…", "Searching places and hotels in Osaka (2 nights)…",
