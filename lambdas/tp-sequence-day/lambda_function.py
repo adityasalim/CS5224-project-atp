@@ -65,6 +65,7 @@ FOOD_KEYWORDS = ("restaurant", "eatery", "dining")
 LUNCH_FLOOR = 11 * 60 + 30
 LUNCH_LATEST = 14 * 60 + 30   # a first meal that cannot start by then is the dinner
 DINNER_FLOOR = 17 * 60 + 30
+PARK_STOP_GAP_MIN = 15   # a full-day park leaves this much travel time per other planned stop after it
 PARK_HOURS = (9 * 60, 21 * 60)   # a full-day park's opening hours when the pool has none
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
@@ -307,7 +308,9 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             visit = s["visitMinutes"]
             if s.get("toClose"):   # a full-day park: from arrival to closing, home by the day's end, free time kept
                 close = next(c for o, c in sorted(s["hours"]["intervals"]) if o <= begin and begin + visit <= c)
-                last = day_end - back
+                # the day's other planned stops (cafes near the park, a dinner) keep their time after the park
+                rest = sum(stops[j - 1]["visitMinutes"] + PARK_STOP_GAP_MIN for j in remaining if j != i)
+                last = day_end - back - rest
                 if min_free:
                     last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back)
                 visit = max(visit, min(close, last) - begin)

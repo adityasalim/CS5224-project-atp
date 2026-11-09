@@ -27,13 +27,15 @@ for label, ev in [("category requested", event), ("pinned list", dict(event, pin
     park = next(s for s in r["stops"] if s["placeId"] == "t:tdl") if "t:tdl" in ids else None
     print(label, ids, "unscheduled:", [u["placeId"] for u in r["unscheduled"]])
     assert r["ok"] and park, r
-    assert 60 <= park["travelMinutesFromPrev"] <= 70 and park["departAt"] == "19:58", park   # 21:00 - 62 min home
-    assert sorted(u["placeId"] for u in r["unscheduled"]) == cafes, r["unscheduled"]
+    # the park leaves its 3 cafes 60 min each after it (45 min visit + 15 min to get there), so it ends at 18:02
+    # (21:00 - 62 min home - 180 min); two cafes fit after it and the farthest one is dropped
+    assert 60 <= park["travelMinutesFromPrev"] <= 70 and park["departAt"] == "18:02", park
+    assert len(r["unscheduled"]) == 1 and r["unscheduled"][0]["placeId"] in cafes, r["unscheduled"]
 
 # An explicit empty pinned list turns the category fallback off; the park still opens the day (run 8: a theme park
-# day starts with the park, above the most stops), so the cafes after it are dropped.
+# day starts with the park, above the most stops), with the cafes that fit after it.
 r = seq.lambda_handler(dict(event, pinned=[]), None)
-assert r["stops"][0]["placeId"] == "t:tdl" and sorted(u["placeId"] for u in r["unscheduled"]) == cafes, r
+assert r["stops"][0]["placeId"] == "t:tdl" and len(r["unscheduled"]) == 1, r
 
 # Verifier: a mustVisit place missing from the itinerary is named, not shown as its raw ID.
 spec = {"startDate": "2026-12-11", "endDate": "2026-12-11", "pax": 2, "budgetSGD": 9000, "mustVisit": ["t:tdl"]}

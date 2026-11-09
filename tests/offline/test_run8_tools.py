@@ -120,24 +120,24 @@ def day(*stops_, **kw):
 r = day(GAZEBO, GONDOLIER, SEA)
 names = [s["name"] for s in r["stops"]]
 assert names[0] == "Tokyo DisneySea", names
-# owner-approved (final tools round): a full-day park runs from arrival to closing (21:00 here), home by dayEnd (a
-# 15 min walk), so the cafes after it no longer fit and are unscheduled, as stops that do not fit always are
-assert r["stops"][0]["arriveAt"] <= "09:30" and r["stops"][0]["departAt"] == "20:45", r["stops"][0]
-assert names == ["Tokyo DisneySea"] and {u["name"] for u in r["unscheduled"]} == {"The Gazebo", "Gondolier Snacks"}, r
+# owner-approved (final tools round): a full-day park runs from arrival towards closing, leaving the day's other
+# planned stops their time after it (45 min each plus 15 min to get there), so both cafes still fit
+assert r["stops"][0]["arriveAt"] <= "09:30" and r["stops"][0]["departAt"] == "18:45", r["stops"][0]
+assert names == ["Tokyo DisneySea", "The Gazebo", "Gondolier Snacks"] and not r["unscheduled"], r
 # a theme_park category park opens the day too, with its own visit time
 FUJI = stop("q", "Fuji-Q Highland", "theme_park", 35.4875, 138.7801)
 r = sd.lambda_handler({"date": "2026-12-16", "start": {"id": "inn", "lat": 35.4980, "lng": 138.7680},
                        "stops": [stop("c", "Cafe", "cafe", 35.4880, 138.7800), FUJI], "dayStart": "09:00",
                        "dayEnd": "21:00"}, None)
-assert [s["name"] for s in r["stops"]] == ["Fuji-Q Highland"] and r["stops"][0]["visitMinutes"] > 480, r
+assert [s["name"] for s in r["stops"]] == ["Fuji-Q Highland", "Cafe"] and r["stops"][0]["visitMinutes"] > 480, r
 # a visitMinutes of its own keeps the park's length, so the cafe after it fits again
 r = sd.lambda_handler({"date": "2026-12-16", "start": {"id": "inn", "lat": 35.4980, "lng": 138.7680},
                        "stops": [stop("c", "Cafe", "cafe", 35.4880, 138.7800), {**FUJI, "visitMinutes": 480}],
                        "dayStart": "09:00", "dayEnd": "21:00"}, None)
 assert [s["name"] for s in r["stops"]] == ["Fuji-Q Highland", "Cafe"] and r["stops"][0]["visitMinutes"] == 480, r
-# an earlier dayEnd ends the park visit earlier (home by 18:45); the stops after it are dropped
+# an earlier dayEnd (18:45): the park keeps its 8 h minimum, one cafe still fits after it, the other is dropped
 r = day(GAZEBO, GONDOLIER, SEA, dayEnd="18:45")
-assert [s["departAt"] for s in r["stops"]] == ["18:30"] and len(r["unscheduled"]) == 2, r
+assert [s["departAt"] for s in r["stops"]] == ["17:15", "18:01"] and len(r["unscheduled"]) == 1, r
 # pinned first still wins: a pinned breakfast cafe that closes at 10:00 keeps its morning slot before the park
 BREAKFAST = stop("bk", "Breakfast Cafe", "cafe", 35.6300, 139.8820, {"open": "08:00", "close": "10:00"})
 r = day(BREAKFAST, SEA, pinned=["bk"])
