@@ -1576,6 +1576,7 @@ def assign_zones(places, radius_km=ZONE_RADIUS_KM):
 # ---- planner-guided walkable zones (built once per plan; the planner sees only zone members, see ZONE_RULES)
 ZONE_R_KM, ZONE_SPARSE_R_KM, ZONE_ATTACH_KM = 1.2, 1.6, 1.2   # 1.2 km seed radius: members <= 2.4 km apart, 42 min on foot
 ZONE_FOOD_KM, ZONE_FOOD_WIDE_KM, RIDE_MAX_MIN = 1.2, 2.0, 30
+CUISINE_ATTACH_KM = 3.0   # a place of a city-wide cuisine search joins a zone this far away (attachKm)
 ZONE_FOOD_WORKERS = int(os.environ.get("ZONE_FOOD_WORKERS", "6"))
 SEQUENCE_WORKERS = 6   # days ordered at the same time (one sequence_day call each)
 GOOGLE_FOOD_CAP = 20   # Google food requests per plan: one Nearby Search per zone plus one coffee Text Search per city
@@ -1624,8 +1625,8 @@ def build_zones(spec, pool):
     from the city's sights; each day trip is one zone. On the first build of a city the top clamp(5 x nights, 10, 50)
     sights are clustered at ZONE_R_KM (ZONE_SPARSE_R_KM when too few zones have 2 sights) and the best
     2 x cityDays + 2 zones are kept, plus every zone with a pinned member. Other places join the nearest zone within
-    ZONE_ATTACH_KM; on later builds a farther sight becomes a solo zone. Returns the new zone ids; a second call on an
-    unchanged pool returns [] and changes nothing."""
+    their attachKm (ZONE_ATTACH_KM by default); on later builds a farther sight becomes a solo zone. Returns the new
+    zone ids; a second call on an unchanged pool returns [] and changes nothing."""
     zones = pool.setdefault("zones", [])
     multi = is_multi(spec)
     cities = [l["city"] for l in spec["legs"]] if multi else [spec["destination"]]
@@ -1696,7 +1697,7 @@ def build_zones(spec, pool):
                           and z["dayTrip"].lower() == str(p["dayTrip"]).lower()), None)
             else:
                 z = min(walkable, key=lambda z: (_km(z, p), z["id"]), default=None)
-                z = z if z and _km(z, p) <= ZONE_ATTACH_KM else None
+                z = z if z and _km(z, p) <= p.get("attachKm", ZONE_ATTACH_KM) else None
             if z:
                 p["zone"] = z["id"]
                 if not food(p):
@@ -1714,16 +1715,19 @@ def build_zones(spec, pool):
 
 def zone_food(spec, pool, calls, sources):
     """Rated food for the zones with at most GOOGLE_FOOD_CAP Google requests: one "specialty coffee" Text Search per
-    city (when cafes are wished) and one combined Nearby Search per zone, none inside a theme park. Returns the number
+    city (when cafes are wished), one combined Nearby Search per zone (none inside a theme park), and for wished
+    cuisines one cuisine-only search per walk zone plus one city-wide Text Search per cuisine. Returns the number
     of requests, so the web picks get only what is left of the cap. The calls run on
     ZONE_FOOD_WORKERS threads, each with its own copy of the warm Gateway (its own request id, the same token and
     session). Results merge in zone order and the first zone to find a place keeps it, so the pool does not depend
-    on thread timing; the city-wide cafes then join the nearest zone within ZONE_ATTACH_KM."""
+    on thread timing; the city-wide cafes then join the nearest zone within ZONE_ATTACH_KM, the area cuisine places
+    within ZONE_FOOD_WIDE_KM and the city-wide cuisine places within CUISINE_ATTACH_KM."""
     _, _, gw = _clients()
     multi = is_multi(spec)
     wished = [c for c in preference_search_categories(spec) if c in ZONE_FOOD_CATS]
     price = ((spec.get("preferences") or {}).get("food") or {}).get("priceLevel")   # meal price level 1-4, else 0
-    jobs, extras = [], []
+    jobs, extras, area = [], [], []
+    wanted = [c for c in str(pref_args("find_places", spec).get("cuisine") or "").split("|") if c][:5]
     for z in pool.get("zones") or []:
         if z["kind"] == "park" or (z["kind"] == "daytrip" and PARK_RE.search(z["dayTrip"])):
             if "cafe" in wished:   # meals are inside the park, but the requested coffee stops come from around it
@@ -1735,6 +1739,10 @@ def zone_food(spec, pool, calls, sources):
             "lat": z["lat"], "lng": z["lng"], "categories": cats, "maxPerCategory": 4,
             "foodRadiusKm": ZONE_FOOD_WIDE_KM if z["kind"] == "daytrip" else ZONE_FOOD_KM,
             **({"priceLevel": price} if price else {})})))
+        if wanted and z["kind"] in ("walk", "solo"):   # only the wished cuisines around the zone (cuisineOnly)
+            area.append(({"leg": z["leg"], "attachKm": ZONE_FOOD_WIDE_KM}, with_prefs("find_places", spec, {
+                "lat": z["lat"], "lng": z["lng"], "categories": ["restaurant"], "cuisine": "|".join(wanted),
+                "cuisineOnly": True, "maxPerCategory": 4, "foodRadiusKm": ZONE_FOOD_WIDE_KM})))
     coffee = []
     for li in range(len(spec["legs"]) if multi else 1):
         zs = [z for z in pool.get("zones") or [] if z["leg"] == li and z["kind"] in ("walk", "solo")]
@@ -1746,16 +1754,16 @@ def zone_food(spec, pool, calls, sources):
                                                     "foodRadiusKm": round(reach, 1)})
             coffee.append(({"leg": li}, {**args, "dietary": [], "cuisine": ""}))
         # one city-wide Text Search per requested cuisine, so the zones can offer them (they join the nearest zone)
-        wanted = [c for c in str(pref_args("find_places", spec).get("cuisine") or "").split("|") if c][:5]
         if wanted and zs:
             c = {"lat": round(sum(z["lat"] for z in zs) / len(zs), 5), "lng": round(sum(z["lng"] for z in zs) / len(zs), 5)}
-            reach = max(3.0, max(_km(c, z) for z in zs) + ZONE_ATTACH_KM)
+            reach = max(3.0, max(_km(c, z) for z in zs) + CUISINE_ATTACH_KM)
             for cuisine in wanted:   # one job each: a combined call keeps only the best-rated cuisine
-                extras.append(({"leg": li, "cuisine": cuisine}, with_prefs("find_places", spec, {
-                    **c, "categories": ["restaurant"], "cuisine": cuisine, "maxPerCategory": 4,
-                    "foodRadiusKm": round(reach, 1)})))
-    # priority within the cap: the city coffee searches, every zone's food, the cuisine searches, then park cafes
-    jobs = coffee + jobs + [j for j in extras if "id" not in j[0]] + [j for j in extras if "id" in j[0]]
+                extras.append(({"leg": li, "cuisine": cuisine, "attachKm": CUISINE_ATTACH_KM},
+                               with_prefs("find_places", spec, {**c, "categories": ["restaurant"], "cuisine": cuisine,
+                                                                "maxPerCategory": 4, "foodRadiusKm": round(reach, 1)})))
+    # priority within the cap: the city coffee searches, every zone's food, park cafes, the area cuisine searches,
+    # then the city-wide cuisine searches
+    jobs = coffee + jobs + [j for j in extras if "id" in j[0]] + area + [j for j in extras if "id" not in j[0]]
     skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
     jobs = jobs[:GOOGLE_FOOD_CAP]
     used = len(jobs)
@@ -1781,7 +1789,8 @@ def zone_food(spec, pool, calls, sources):
             if p["placeId"] in have:
                 continue
             have.add(p["placeId"])
-            tag = {"zone": z["id"], **({"dayTrip": z["dayTrip"]} if z["kind"] == "daytrip" else {})} if "id" in z else {}
+            tag = ({"zone": z["id"], **({"dayTrip": z["dayTrip"]} if z["kind"] == "daytrip" else {})} if "id" in z
+                   else {"attachKm": z["attachKm"]} if "attachKm" in z else {})
             where = {"city": spec["legs"][z["leg"]]["city"], "leg": z["leg"]} if multi else {}
             pool["places"].append({**p, **tag, **where})
             found += 1
@@ -1881,8 +1890,10 @@ def gather_specials(spec, pool, calls, sources, only=None):
                           for p_ in found]
         spec["notFound"] = [m["name"] for m in spec["mustInclude"] if m["name"] not in hits]
     if spec.get("dayTrips") and (only is None or "dayTrips" in only):
-        cats = sorted({c for c in spec.get("interests", []) if c in PLACE_CATEGORIES and c not in OUTDOOR}
-                      - {"restaurant"})[:3] or ["attraction"]
+        # the views and nature a day trip is usually for, plus the traveler's interests (at most 4 categories)
+        own = sorted({c for c in spec.get("interests", []) if c in PLACE_CATEGORIES and c not in OUTDOOR}
+                     - {"restaurant", "viewpoint"}) or ["attraction"]
+        cats = ["viewpoint", "nature"] + own[:2]
         for t in spec["dayTrips"]:
             yield ev("status", f"Finding things to do on a day trip to {t['place']}…")
             # geocode near the trip's city (a bare "Fuji" matched Antipolo, Philippines), wide enough to reach the
@@ -1894,10 +1905,11 @@ def gather_specials(spec, pool, calls, sources, only=None):
             if home:   # the trip's city; for an unknown city on a route, the route, wide enough to reach every city
                 c = {"lat": statistics.median(p_["lat"] for p_ in home), "lng": statistics.median(p_["lng"] for p_ in home)}
                 reach = min(1500, DAY_TRIP_NEAR_KM + (max(_km(c, p_) for p_ in home) if multi and li_t is None else 0))
-                near = {"near": c, "maxKm": round(reach)}
+                near = {"near": c, "maxKm": round(reach), "minKm": DAY_TRIP_MIN_KM}   # not a namesake in the city
             r = call({"city": t["place"], "categories": cats, "radiusKm": DAY_TRIP_RADIUS_KM, "maxPerCategory": 4,
                       **near})   # food: zone_food
             if not r.get("ok") or not r.get("places"):
+                print(f"day trip {t['place']} not found:", r.get("error") or r.get("message") or "no places")
                 t["notFound"] = True
                 continue
             q = r.get("query") or {}
@@ -2523,7 +2535,7 @@ def _order_places(places, n=None, spec=None):
 
 def _flight_duration_minutes(f):
     """Extract known total duration in minutes from a flight offer without inventing missing values."""
-    for k in ("durationMinutes", "totalDurationMinutes", "duration"):
+    for k in ("durationMinutes", "totalDurationMinutes", "totalMinutes", "duration"):
         v = f.get(k)
         if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
             return int(v)
@@ -2783,16 +2795,6 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
                      if (x.get("reviewScore") or x.get("review"))]            # NEW
     mean_review = sum(known_reviews) / len(known_reviews) if known_reviews else 7.5   # NEW
 
-    feasible_good_prices = sorted(
-        _price(s_) for s_ in stays
-        if _price(s_) is not None
-        and (rem_stay_budget is None or (rem_stay_budget > 0 and _price(s_) <= rem_stay_budget))
-        and (float(s_.get("reviewScore") or s_.get("review") or 0) >= 7.8
-             or float(s_.get("starRating") or s_.get("stars") or 0) >= 3)
-    )
-    ref_price = (feasible_good_prices[len(feasible_good_prices) // 2]
-                 if feasible_good_prices else (rem_stay_budget if rem_stay_budget and rem_stay_budget > 0 else 0.0))
-
     def stay_key(s_):
         matches = [str(m).lower() for m in (s_.get("matches") or [])]
         name_l = str(s_.get("name") or "").lower()
@@ -2838,8 +2840,6 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
                 qual -= ratio * cost_weight
                 if not feasible:
                     qual -= 150.0 + (ratio - 1.0) * 100.0
-                elif ref_price > 0 and price > ref_price * 1.45:
-                    qual -= ((price - ref_price * 1.45) / max(1.0, ref_price)) * 35.0
         return (feasible, round(qual, 4), -(price if price is not None else float("inf")), str(s_.get("stayId") or ""))
 
     ordered = sorted(stays, key=stay_key, reverse=True)
@@ -2890,7 +2890,7 @@ def compact_pool(pool, spec=None):
     ordered_flights = _order_flights(pool["flights"], spec=spec)
     flights = [_c_flight(f, spec) for f in ordered_flights[:MAX_FLIGHTS_SHOWN]]
     ordered_stays = _order_stays(pool["stays"], spec=spec, flights=ordered_flights)
-    raw_stays = _spread_stays(ordered_stays, 12)
+    raw_stays = _spread_stays(ordered_stays, 30)   # every hotel (up to 30): the verifier enforces the budget
     stays = [_c_stay(s_) for s_ in raw_stays]
     days = trip_days(spec) if spec else 20
     target = places_target(spec) if spec else 60            # 2.5 x the stops the planner needs
@@ -3051,7 +3051,7 @@ def compact_pool_multi(spec, pool):
         other_stays = sum(v for k, v in min_by_leg.items() if k != i) + min_transfers
         leg_stays = _order_stays([s_ for s_ in pool["stays"] if s_.get("leg") == i],
                                  spec=spec, flights=ordered_flights, other_cost=other_stays)
-        raw = _spread_stays(leg_stays, 8)
+        raw = _spread_stays(leg_stays, 15)
         stays = [_c_stay(s_) for s_ in raw]
         leg_places = [p for p in pool["places"] if p.get("leg") == i]
         leg_zones = [z for z in pool.get("zones") or [] if z["leg"] == i]
@@ -3095,17 +3095,32 @@ def compact_pool_multi(spec, pool):
 
 
 # ====================================================================== 3/7 propose + repair
-def _bookable(spec):
+def _daily_spend(spec):
+    """The daily-spend estimate in SGD per traveler: twice DAILY_SPEND when the trip asks for fine dining, a 4-5 star
+    hotel or a comfort score of 8 or more, else DAILY_SPEND."""
+    cuisines = " ".join(str(c) for c in list(spec.get("cuisines") or []) + [spec.get("cuisine") or ""])
+    stars = ((spec.get("preferences") or {}).get("hotel") or {}).get("minStars") or 0
+    comfort = (spec.get("preferenceScores") or {}).get("comfort") or 0
+    fine = re.search(r"fine[\s_-]*dining", cuisines, re.I) or float(stars) >= 4 or float(comfort) >= 8
+    return DAILY_SPEND * 2 if fine else DAILY_SPEND
+
+
+def _bookable(spec, daily=None):
     s, e = date.fromisoformat(spec["startDate"]), date.fromisoformat(spec["endDate"])
-    return round(budget_amount(spec) - trip_daily(spec, DAILY_SPEND) * spec["pax"] * ((e - s).days + 1))
+    daily = trip_daily(spec, DAILY_SPEND) if daily is None else daily
+    return round(budget_amount(spec) - daily * spec["pax"] * ((e - s).days + 1))
 
 
 def _budget_room(spec):
     """True when the bookable budget leaves at least ROOMY_NIGHT_SHARE x the daily-spend estimate per traveler per
-    night (about SGD 500): then hotels weigh comfort higher and flights rank by price and travel time, not price alone."""
+    night (about SGD 500): then hotels weigh comfort higher and flights rank by price and travel time, not price alone.
+    Both use the base estimate (DAILY_SPEND), so the larger one of a comfortable trip does not end the room."""
     try:
-        nights, daily = max(1, trip_days(spec) - 1), trip_daily(spec, DAILY_SPEND)
-        return daily > 0 and _bookable(spec) >= ROOMY_NIGHT_SHARE * daily * spec["pax"] * nights
+        nights = max(1, trip_days(spec) - 1)
+        daily = trip_daily(spec, DAILY_SPEND)
+        if "budget" in spec:   # dailySpend holds _daily_spend(spec) in the trip currency (prepare_pool)
+            daily *= DAILY_SPEND / _daily_spend(spec)
+        return daily > 0 and _bookable(spec, daily) >= ROOMY_NIGHT_SHARE * daily * spec["pax"] * nights
     except (KeyError, TypeError, ValueError):
         return False
 
@@ -3191,7 +3206,7 @@ def propose(spec, pool, usage):
 
 
 def _propose_request(spec, pool, usage):
-    prepare_pool(spec, pool, DAILY_SPEND)
+    prepare_pool(spec, pool, _daily_spend(spec))
     multi = is_multi(spec)
     special = (_special_rules(spec) + _planning_guidance(spec, pool)).strip()
     role = get_prompt("PLANNER_MULTI" if multi else "PLANNER").format(special=special)
@@ -3627,7 +3642,7 @@ def repair(spec, pool, plan, verify_res, judge_res, unscheduled, usage, change=N
 
 
 def _repair_request(spec, pool, plan, verify_res, judge_res, unscheduled, usage, change=None):
-    prepare_pool(spec, pool, DAILY_SPEND)
+    prepare_pool(spec, pool, _daily_spend(spec))
     violations = _enrich_violations(spec, pool, plan, verify_res, unscheduled)
     diag = _deterministic_quality_eval(spec, pool, plan)
     det_suggestions = diag["suggestions"]
@@ -4139,6 +4154,52 @@ def _loyalty_caveats(spec, seq, pool):
         matches = [f for f in pool["flights"] if _loyal_flight(f, spec) and known_price(f)]
         out.append(line(f"{' or '.join(wanted)} flight", chosen, chosen.get("airline") or "the cheapest flight", matches))
     return [x for x in out if x]
+
+
+def _upgrade_choices(spec, pool, seq, vres):
+    """At most 3 upgrades priced from pool offers that each keep the verified total within the budget: per hotel the
+    best-reviewed hotel of its leg that has a better review or more stars, then the cheapest nonstop or
+    matching-cabin flight. Worded as the wish the router understands (a named hotel; an airline and nonstop)."""
+    totals = (vres or {}).get("totals") or {}
+    total = totals.get("total", totals.get("totalSGD"))
+    if total is None:
+        return []
+    room = budget_amount(spec) - float(total)
+    rev = lambda x: float(x.get("reviewScore") or x.get("review") or 0)
+    stars = lambda x: float(x.get("starRating") or x.get("stars") or 0)
+    out = []
+    for st in _stays_of(seq, pool):
+        cur = known_price(st)
+        if cur is None or st.get("booked"):
+            continue
+        better = [x for x in pool["stays"] if x.get("leg") == st.get("leg") and x.get("stayId") != st.get("stayId")
+                  and x.get("name") and known_price(x) is not None and 0 < known_price(x) - cur <= room
+                  and (rev(x) > rev(st) or stars(x) > stars(st))]
+        if better:
+            x = max(better, key=lambda x: (rev(x), stars(x), -known_price(x), str(x.get("stayId"))))
+            where = f" in {st['city']}" if is_multi(spec) and st.get("city") else ""
+            rating = f"rated {rev(x):g}" if rev(x) else f"{stars(x):g} stars"
+            out.append(f"Stay at {x['name']}{where} ({rating}), +{money_text(spec, known_price(x) - cur)}")
+    f_pref = (spec.get("preferences") or {}).get("flight") or {}
+    cabin = str(f_pref.get("cabin") or "economy")
+    avoid = [str(a).lower() for a in f_pref.get("avoidAirlines") or []]
+    cur_f = next((f for f in pool.get("flights") or [] if f.get("offerId") == seq.get("flightOfferId")), None)
+    if cur_f and known_price(cur_f) is not None:
+        def gains(f):   # what the offer adds over the plan's flight; None when it loses either
+            nonstop, in_cabin = _flight_total_stops(f) == 0, cabin != "economy" and f.get("cabin") == cabin
+            was_nonstop, was_cabin = _flight_total_stops(cur_f) == 0, cabin != "economy" and cur_f.get("cabin") == cabin
+            if (was_nonstop and not nonstop) or (was_cabin and not in_cabin):
+                return None
+            return [w for w, ok in (("nonstop", nonstop and not was_nonstop),
+                                    ("in " + cabin.replace("_", " "), in_cabin and not was_cabin)) if ok] or None
+        better = [f for f in pool["flights"] if f.get("airline") and known_price(f) is not None
+                  and 0 < known_price(f) - known_price(cur_f) <= room and gains(f)
+                  and not any(a in str(f["airline"]).lower() for a in avoid)]
+        if better:
+            f = min(better, key=lambda f: (-len(gains(f)), known_price(f), str(f.get("offerId"))))
+            extra = money_text(spec, known_price(f) - known_price(cur_f))
+            out.append(f"Fly {f['airline']} {' '.join(gains(f))}, +{extra}")
+    return out[:3]
 
 
 def _route_text(spec):
@@ -4757,7 +4818,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     # Claude on the website: a second correction when the hard checks fail or a review score is below 3, and the
     # best-ranked plan is kept
     claude = _planner_provider(usage) == "anthropic"
-    prepare_pool(spec, pool, DAILY_SPEND)
+    prepare_pool(spec, pool, _daily_spend(spec))
     tspec = trip_spec_for_tools(spec)
     best, rounds = None, 0
     seen_plans = set()
@@ -4953,7 +5014,7 @@ def deliver(state, best, usage, metrics, user_id, t0):
     package_result=None
     if os.environ.get('PACKAGE_RECOMMENDATIONS_ENABLED','false').lower()=='true':
         # Always reread eligibility, including after budget, cuisine or dietary follow-ups.
-        prepare_pool(spec,pool,DAILY_SPEND)
+        prepare_pool(spec,pool,_daily_spend(spec))
         mode=spec.get('packageMode','compare')
         if mode!='custom_only':
             pool['agencyPackages'],metrics['packageSearchStatus']=gather_packages(spec,gw)
@@ -5170,7 +5231,7 @@ def new_plan(state, request, user_id, usage, metrics, t0):
     if os.environ.get("REQUIRE_LIVE_DATA", "false").lower() == "true" and any(
             "mock" in source.lower() for source in metrics.get("dataSources", [])):
         raise ValueError("Live-data mode rejected sample search results; no plan generated")
-    prepare_pool(spec, pool, DAILY_SPEND)
+    prepare_pool(spec, pool, _daily_spend(spec))
     if os.environ.get("AGENCY_PACKAGE_SEARCH_ENABLED", "false").lower() == "true":
         pool["agencyPackages"], metrics["packageSearchStatus"] = gather_packages(spec, _clients()[2])
         metrics["packageCandidateCount"] = len(pool["agencyPackages"])
@@ -5191,7 +5252,8 @@ def new_plan(state, request, user_id, usage, metrics, t0):
     if spec.get("notFound"):
         msg += f" (I couldn't find {', '.join(spec['notFound'])} on the map; tell me the area and I'll add it.)"
     _remember(state, "assistant", msg)
-    yield ev("message", msg)
+    choices = _upgrade_choices(spec, pool, best["seq"], best["verify"])
+    yield ev("message", msg, **({"choices": choices} if choices else {}))
     return True
 
 
@@ -5469,7 +5531,8 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
                 f"the area or full name?"
     msg = f"{note} (This is version {state['version']}; ask for more changes any time.)"
     _remember(state, "assistant", msg)
-    yield ev("message", msg)
+    choices = _upgrade_choices(spec, state["pool"], best["seq"], best["verify"])
+    yield ev("message", msg, **({"choices": choices} if choices else {}))
 
 
 def answer(state, question, usage):

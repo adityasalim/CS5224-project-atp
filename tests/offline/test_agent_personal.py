@@ -115,13 +115,15 @@ def _spy_improve(spec, pool, plan, full_request, usage, change=None):
     return (yield from _improve(spec, pool, plan, full_request, usage, change=change))
 A.improve = _spy_improve
 
-its = []
+its, MSGS = [], []
 for prompt in ["Anniversary in Tokyo 10-15 Dec 2026 for two, SGD 6000. We're vegetarian, hate tourist traps, love a lie-in, want a nice ryokan in Asakusa and only direct flights after 10am.",
                "my wife now uses a wheelchair, please adjust"]:
     LOG.clear()
     for e in A.invoke({"prompt": prompt}, Ctx()):
         if e["type"] == "itinerary": its.append(e["itinerary"])
-        elif e["type"] != "status": print("  ", e["type"], "|", e.get("message"))
+        elif e["type"] != "status":
+            print("  ", e["type"], "|", e.get("message"), "|", e.get("choices"))
+            MSGS.append(e)
     print("steps:", LOG)
 p = SEEN["pool"]
 print("flights in pool:", [(f["airline"], f["legs"][0][:40], f.get("matches")) for f in p["flights"]])
@@ -137,6 +139,8 @@ assert first_stop >= "10:00", "dayStart not applied"
 assert SEEN.get("repair_wheelchair", 0) > 0, "wheelchair places not found after the change"
 assert "hidden gem" in SEEN["judge"] or "local pick" in SEEN["judge"]
 print("versions:", [i["version"] for i in its])
+# both delivered plans end with a priced upgrade the budget allows (SGD 4,395 + 700 of 6,000)
+assert [m.get("choices") for m in MSGS if m["type"] == "message"] == [["Stay at Sample Skyline Hotel (rated 9), +SGD 700.00"]] * 2, MSGS
 A.improve = _improve
 
 # ---- form cuisines reach the tools (6 kept); coffee, desserts and per-day cafes are in test_ui_preferences
@@ -299,9 +303,9 @@ _, notes_ = classify_acceptance(miss, None, {"issues": []}, [{"placeId": "aloc:x
 assert notes_ == ["Tokyo Disneyland didn't fit into this plan. Ask me to swap it in for another day."], notes_
 
 # ---- spare budget: firm star wish, hotels by rating and flights by price and travel time when the budget has room
-def prefs_for(amount):
+def prefs_for(amount):   # a 5-star wish: prepare_pool sets the doubled daily estimate, the room uses the base one
     s = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2,
-         "budget": {"amount": str(amount), "currency": "SGD"}, "dailySpend": {"amount": "100", "currency": "SGD"},
+         "budget": {"amount": str(amount), "currency": "SGD"}, "dailySpend": {"amount": "200", "currency": "SGD"},
          "preferences": {"hotel": {"minStars": 5}, "flight": {"cabin": "premium_economy"}}}
     A.normalize_prefs(s)
     return A.pref_args("search_stays", s), A.pref_args("search_flights", s)
@@ -327,6 +331,73 @@ s0 = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"
       "preferences": {}}
 A.normalize_prefs(s0)
 assert not A.pref_args("search_stays", s0).get("minKeep"), A.pref_args("search_stays", s0)
+
+# ---- the daily-spend estimate doubles for fine dining, a 4-5 star hotel or a comfort score of 8 or more
+assert A._daily_spend({}) == A._daily_spend(s0) == A.DAILY_SPEND == 100
+assert A._daily_spend({"cuisines": ["Italian", "Fine dining"]}) == A._daily_spend({"cuisine": "fine_dining"}) == 200
+assert A._daily_spend({"preferences": {"hotel": {"minStars": 4}}}) == A._daily_spend({"preferenceScores": {"comfort": 8}}) == 200
+assert A._daily_spend({"preferences": {"hotel": {"minStars": 3}}, "preferenceScores": {"comfort": 7}}) == 100
+src = pathlib.Path(A.__file__).read_text(encoding="utf-8")
+calls_pp = re.findall(r"prepare_pool\(([^()]*(?:\([^()]*\))?[^()]*)\)", src)
+assert len(calls_pp) == 5 and all(c.replace(" ", "") == "spec,pool,_daily_spend(spec)" for c in calls_pp), calls_pp
+five = {**roomy, "preferences": {"hotel": {"minStars": 5}},
+        "_fx": {"base": "SGD", "rates": {"SGD": 1}, "timestamp": time.time(), "asOf": "2026-12-01", "provider": "test"}}
+A.normalize_prefs(five)
+A.prepare_pool(five, {"flights": [], "stays": [], "transfers": []}, A._daily_spend(five))
+assert float(five["dailySpend"]["amount"]) == 200 and A._bookable(five) == 12995 - 200 * 2 * 6, five["dailySpend"]
+assert A._budget_room(five) and A._budget_room({**five, "budget": {"amount": "6200", "currency": "SGD"}}), \
+    "the room uses the base estimate, as before"
+assert not A._budget_room({**five, "budget": {"amount": "6199", "currency": "SGD"}})
+
+# ---- every hotel reaches the planner (up to 30); no penalty above the median price, the budget still counts
+spec_h = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"amount": "12995", "currency": "SGD"},
+          "dailySpend": {"amount": "200", "currency": "SGD"}, "preferences": {"hotel": {"minStars": 5}}}
+cheap = [{"stayId": f"c{i}", "name": f"Cheap {i}", "starRating": 4, "reviewScore": 8.4, "priceTotalSGD": 1000 + i}
+         for i in range(34)]
+lux = {"stayId": "lux", "name": "Imperial", "starRating": 5, "reviewScore": 9.6, "priceTotalSGD": 4000}
+over = {"stayId": "over", "name": "Too dear", "starRating": 5, "reviewScore": 9.8, "priceTotalSGD": 20000}
+ranked = [x["stayId"] for x in A._order_stays(cheap + [over, lux], spec_h)]
+assert ranked[0] == "lux" and ranked[-1] == "over", "a dearer, better hotel ranks first; one over the budget last"
+shown = json.loads(A.compact_pool({"flights": [], "stays": cheap + [over, lux], "places": []}, spec_h))["stays"]
+assert len(shown) == 30 and shown[0]["id"] == "lux", len(shown)
+assert len(json.loads(A.compact_pool({"flights": [], "stays": cheap[:26], "places": []}, spec_h))["stays"]) == 26
+spec_m2 = {**spec_h, "destination": "Tokyo", "legs": [
+    {"city": "Tokyo", "airport": "HND", "nights": 3, "checkIn": "2026-12-15", "checkOut": "2026-12-18"},
+    {"city": "Kyoto", "airport": "KIX", "nights": 2, "checkIn": "2026-12-18", "checkOut": "2026-12-20"}]}
+legs_shown = json.loads(A.compact_pool_multi(spec_m2, {"flights": [], "places": [], "transfers": [], "stays":
+                        [{**x, "leg": i % 2, "city": ("Tokyo", "Kyoto")[i % 2]} for i, x in enumerate(cheap)]}))["cities"]
+assert [len(c["stays"]) for c in legs_shown] == [15, 15], [len(c["stays"]) for c in legs_shown]
+assert A.MAX_FLIGHTS_SHOWN == 15
+
+# ---- flights: totalMinutes is a duration; a "mixed" cabin does not match a premium economy wish
+assert A._flight_duration_minutes({"totalMinutes": 845}) == 845 and A._flight_duration_minutes({}) is None
+pe = {**spec_h, "preferences": {"flight": {"cabin": "premium_economy"}}}
+A.normalize_prefs(pe)
+offers = [{"offerId": "mix", "airline": "X", "cabin": "mixed", "priceTotalSGD": 1500, "totalMinutes": 800, "stops": 0},
+          {"offerId": "pey", "airline": "Y", "cabin": "premium_economy", "priceTotalSGD": 2500, "totalMinutes": 800, "stops": 0}]
+assert [f["offerId"] for f in A._order_flights(offers, pe)] == ["pey", "mix"], "mixed is not the requested cabin"
+
+# ---- upgrade choices: priced from the pool, each one keeps the total within the budget, at most 3
+up_pool = {"stays": [{"stayId": "hil", "name": "Hilton Tokyo Hotel", "starRating": 5, "reviewScore": 8.6, "priceTotalSGD": 2549.71},
+                     {"stayId": "imp", "name": "Imperial Hotel, Tokyo", "starRating": 5, "reviewScore": 9.6, "priceTotalSGD": 3563.36},
+                     {"stayId": "fs", "name": "Four Seasons", "starRating": 5, "reviewScore": 9.7, "priceTotalSGD": 8052},
+                     {"stayId": "low", "name": "Cheaper Inn", "starRating": 3, "reviewScore": 7.9, "priceTotalSGD": 900}],
+           "flights": [{"offerId": "aax", "airline": "AirAsia X", "priceTotalSGD": 3440, "stops": 2},
+                       {"offerId": "jal", "airline": "JAL", "priceTotalSGD": 7994, "stops": 0},
+                       {"offerId": "sq", "airline": "Singapore Airlines", "priceTotalSGD": 9000, "stops": 0}]}
+seq_up = {"stayId": "hil", "flightOfferId": "aax", "days": []}
+assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "8389.71"}}) == [
+    "Stay at Imperial Hotel, Tokyo (rated 9.6), +SGD 1,013.65", "Fly JAL nonstop, +SGD 4,554.00"]
+assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "11500"}}) == [
+    "Stay at Imperial Hotel, Tokyo (rated 9.6), +SGD 1,013.65"], "nothing that ends over the budget"
+assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "12990"}}) == []
+assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {}}) == []
+cab = {"stays": [], "flights": [{"offerId": "m0", "airline": "A", "cabin": "mixed", "priceTotalSGD": 1000, "stops": 0},
+                                {"offerId": "m1", "airline": "B", "cabin": "mixed", "priceTotalSGD": 1100, "stops": 0},
+                                {"offerId": "p1", "airline": "C", "cabin": "premium_economy", "priceTotalSGD": 1200, "stops": 1},
+                                {"offerId": "p0", "airline": "D", "cabin": "premium_economy", "priceTotalSGD": 1300, "stops": 0}]}
+assert A._upgrade_choices(pe, cab, {"stayId": None, "flightOfferId": "m0"}, {"totals": {"total": "5000"}}) == [
+    "Fly D in premium economy, +SGD 300.00"], "a cabin upgrade never loses the nonstop flight"
 
 
 def claude_run(lows):

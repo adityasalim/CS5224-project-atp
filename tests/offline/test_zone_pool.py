@@ -147,6 +147,23 @@ list(A.gather_specials(spec_d, pool_d, [], set(), only={"dayTrips"}))
 A._clients = saved_clients
 args = SENT_DT[0]
 assert args["near"] == {"lat": 35.68, "lng": 139.72} and args["maxKm"] == 200 and args["radiusKm"] == 18, args
+assert args["minKm"] == 25 and args["categories"] == ["viewpoint", "nature", "attraction"], args   # no namesake in the city
+SENT_DT.clear()
+A._clients = lambda: (None, None, DayTripGw())
+list(A.gather_specials({**spec_d, "interests": ["temple", "museum", "viewpoint", "hiking", "shrine"],
+                        "dayTrips": [{"place": "Nikko"}]}, {"places": [dict(p) for p in tokyo]}, [], set(), only={"dayTrips"}))
+A._clients = saved_clients
+assert SENT_DT[0]["categories"] == ["viewpoint", "nature", "museum", "shrine"], SENT_DT[0]   # at most 4 categories
+import contextlib, io
+class NoTripGw:
+    def call(self, tool, args):
+        return {"ok": False, "error": "NAMESAKE_IN_CITY", "message": "Fuji is 3 km from the city"}
+A._clients = lambda: (None, None, NoTripGw())
+spec_x = {**spec_d, "dayTrips": [{"place": "Fuji"}]}
+with contextlib.redirect_stdout(io.StringIO()) as out:
+    list(A.gather_specials(spec_x, {"places": [dict(p) for p in tokyo]}, [], set(), only={"dayTrips"}))
+A._clients = saved_clients
+assert spec_x["dayTrips"][0]["notFound"] and "day trip Fuji not found: NAMESAKE_IN_CITY" in out.getvalue(), out.getvalue()
 assert (spec_d["dayTrips"][0]["lat"], spec_d["dayTrips"][0]["lng"]) == (35.51, 138.76), spec_d["dayTrips"][0]
 # multi-city: the centre is the trip's own city (matched like leg_of); an unknown city gets the route, wide enough
 hiro = [{"placeId": f"h{i}", "name": f"H {i}", "category": "temple", "lat": 34.39, "lng": 132.45, "leg": 1, "city": "Hiroshima"}

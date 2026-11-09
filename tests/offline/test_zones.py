@@ -232,18 +232,20 @@ def drain(gen):
         except StopIteration as stop:
             return stop.value
 used = drain(Z["zone_food"](z_spec, z_pool, [], set()))
+area_job = lambda a: bool(a.get("cuisineOnly"))
 park_cafe = [a for _, a in SENT if a["foodRadiusKm"] <= 2 and a["categories"] == ["cafe"]]
-nearby = [a for _, a in SENT if a["foodRadiusKm"] <= 2 and a not in park_cafe]
+nearby = [a for _, a in SENT if a["foodRadiusKm"] <= 2 and a not in park_cafe and not area_job(a)]
 city_coffee = [a for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["cafe"]]
 city_cuisine = [a for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]]
 assert len(city_coffee) == 2 and all(not a["dietary"] for a in city_coffee), city_coffee
-assert len(city_cuisine) == 2 and all(a["cuisine"] == "italian" and a["maxPerCategory"] == 4 for a in city_cuisine),     "one city-wide search per requested cuisine, per city"
 fed = {(round(a["lat"], 5), round(a["lng"], 5)) for a in nearby}
 assert all(((z["lat"], z["lng"]) in fed) == (z["kind"] in ("walk", "solo") or z.get("dayTrip") == "Kawaguchiko")
            for z in zones), "every zone but the parks gets one food search"
 parks = [z for z in zones if z["kind"] == "park" or (z["kind"] == "daytrip" and z.get("dayTrip") != "Kawaguchiko")]
-# 2 coffee + 15 zones + 2 cuisines leave 1 request for the 3 parks (the cap holds; zones and cuisines come first)
-assert len(parks) == 3 and len(park_cafe) == 1 and (round(park_cafe[0]["lat"], 5), round(park_cafe[0]["lng"], 5))     == (parks[0]["lat"], parks[0]["lng"]), "theme parks get a cafe search with the requests left"
+# 2 coffee + 15 zones + 3 park cafes fill the cap of 20: the cuisine searches come after the park cafes
+assert len(parks) == 3 and sorted((round(a["lat"], 5), round(a["lng"], 5)) for a in park_cafe) \
+    == sorted((z["lat"], z["lng"]) for z in parks), "every theme park gets a cafe search before the cuisine searches"
+assert not city_cuisine and not any(area_job(a) for _, a in SENT), "no request left for the cuisine searches"
 assert len(SENT) == used == 20, (len(SENT), used)
 assert all(set(a["categories"]) == ({"restaurant", "cafe", "dessert"} if a["foodRadiusKm"] == 1.2 else {"restaurant", "cafe"})
            for a in nearby), "walk zones ask for every wished food kind, day trips skip desserts"
@@ -253,23 +255,53 @@ big_spec, big_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 big_pool["zones"] = [dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(30)]
 assert drain(Z["zone_food"](big_spec, big_pool, [], set())) == 20 and drain(Z["zone_food"](spec, {"places": []}, [], set())) == 0
 assert len(SENT) == 20, f"hard cap of 20 Google requests per plan, sent {len(SENT)}"
-SENT.clear()
+# three Tokyo walk zones: one coffee search, three zone searches, one area cuisine search per zone (only the wished
+# cuisines, 2 km) and one city-wide search per cuisine
+few = lambda n: dict(copy.deepcopy(pool), zones=[dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(n)])
 two = copy.deepcopy(spec)
 two["cuisines"] = ["Italian", "Indian"]
-drain(Z["zone_food"](two, copy.deepcopy(pool), [], set()))
-cuisine_jobs = [a["cuisine"] for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]]
-assert sorted(cuisine_jobs) == ["indian", "italian", "italian"] and len(SENT) == 20, (cuisine_jobs, len(SENT))   # one each, capped
+for s_, cuisine, n_city in ((spec, "italian", 1), (two, "italian|indian", 2)):
+    SENT.clear()
+    assert drain(Z["zone_food"](copy.deepcopy(s_), few(3), [], set())) == 1 + 3 + 3 + n_city == len(SENT), len(SENT)
+    area = [a for _, a in SENT if area_job(a)]
+    assert len(area) == 3 and all(a["categories"] == ["restaurant"] and a["cuisine"] == cuisine and a["maxPerCategory"] == 4
+                                  and a["foodRadiusKm"] == 2.0 for a in area), area
+    city = [a["cuisine"] for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]]
+    assert sorted(city) == sorted(cuisine.split("|")) and not any(a["foodRadiusKm"] > 2 and area_job(a) for _, a in SENT), city
+# priority: 1 coffee + 9 zones + 3 park cafes leave 7 requests for the 9 area searches and none for the city-wide ones
+SENT.clear()
+mid = few(9)
+mid["zones"] += [z for z in zones if z in parks]
+assert drain(Z["zone_food"](copy.deepcopy(two), mid, [], set())) == 20
+assert [sum(f(a) for _, a in SENT) for f in (lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["cafe"], area_job,
+        lambda a: a["foodRadiusKm"] <= 2 and a["categories"] == ["cafe"],
+        lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"])] == [1, 7, 3, 0], SENT
+# a city-wide cuisine place joins a zone up to 3 km away (its attachKm), any other place only within 1.2 km
+a_spec, a_pool = copy.deepcopy(spec), copy.deepcopy(pool)
+walks = [z for z in a_pool["zones"] if z["leg"] == 0 and z["kind"] in ("walk", "solo")]
+gap = lambda ll: min(km(z, {"lat": ll[0], "lng": ll[1]}) for z in walks)
+spots = [offset(z["lat"], z["lng"], d * math.cos(math.radians(b)), d * math.sin(math.radians(b)))
+         for z in walks for d in (2.5, 4.0) for b in range(0, 360, 30)]
+near_ll = next(ll for ll in spots if 2.0 < gap(ll) < 2.8)
+far_ll = next(ll for ll in spots if gap(ll) > 3.3)
+far = [{"placeId": f"g:far{i}", "name": "far", "category": "restaurant", "rating": 4.6, "leg": 0, "city": "Tokyo",
+        "lat": ll[0], "lng": ll[1], **k}
+       for i, (ll, k) in enumerate(((near_ll, {"attachKm": 3.0}), (near_ll, {}), (far_ll, {"attachKm": 3.0})))]
+a_pool["places"] += far
+build_zones(a_spec, a_pool)
+assert far[0]["zone"] and far[1]["zone"] == "" and far[2]["zone"] == "", [f["zone"] for f in far]
 # a meal price level goes to the zone searches only, and adds no request
 assert not any("priceLevel" in a for a in nearby)
 SENT.clear()
 p_spec = copy.deepcopy(spec)
 p_spec["preferences"]["food"]["priceLevel"] = 2
-assert drain(Z["zone_food"](p_spec, copy.deepcopy(pool), [], set())) == 20 == len(SENT)
-assert all((a.get("priceLevel") == 2) == (a["foodRadiusKm"] <= 2 and "restaurant" in a["categories"]) for _, a in SENT), SENT
+assert drain(Z["zone_food"](p_spec, few(3), [], set())) == 8 == len(SENT)
+assert all((a.get("priceLevel") == 2) == (a["foodRadiusKm"] <= 2 and "restaurant" in a["categories"] and not area_job(a))
+           for _, a in SENT), SENT
 callers = {f.name for f in top.values() if isinstance(f, ast.FunctionDef)
            for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "zone_food"}
 assert callers == {"gather", "gather_multi"}, f"chat changes reuse the session pool (0 requests); zone_food in {callers}"
-print("Google food requests for the owner trip: 20 (17 coffee and zones, 2 cuisines, 1 park cafe; cap 20)")
+print("Google food requests for the owner trip: 20 (2 coffee, 15 zones, 3 park cafes; cap 20)")
 
 # the rules the planner sees agree with the verifier's stop cap
 sys.path.insert(0, str(REPO / "agent"))
