@@ -5,7 +5,7 @@ prices in SGD.
 Providers, in order (the "source" field says which one answered):
   1. SerpApi Google Flights (real airlines, times and prices as shown on Google Flights; no booking -
      each offer has a bookingUrl to Google Flights). Needs SERPAPI_KEY in the secret.
-     A round trip or open-jaw search uses 1 + SERPAPI_RETURN_LOOKUPS SerpApi searches (default 1 + 2 = 3);
+     A round trip or open-jaw search uses 1 + SERPAPI_RETURN_LOOKUPS SerpApi searches (default 1 + 3 = 4);
      results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
   2. Duffel (test mode returns the fake "Duffel Airways"; live mode returns bookable fares). Needs DUFFEL_TOKEN.
   3. MOCK_MODE=true, or no keys at all: built-in sample data.
@@ -13,7 +13,8 @@ Providers, in order (the "source" field says which one answered):
 Environment variables:
   SECRET_ARN   ARN of the Secrets Manager secret holding {"SERPAPI_KEY": "...", "DUFFEL_TOKEN": "..."}
                (either key may be missing)
-  SERPAPI_RETURN_LOOKUPS  optional, default 2 (0-4): outbound options whose return flights are looked up
+  SERPAPI_RETURN_LOOKUPS  optional, default 3 (0-4): outbound options whose return flights are looked up (the
+               cheapest, then the ones with the most different departure and arrival times)
   CACHE_TABLE  DynamoDB cache table name (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = return built-in sample data, no API call (default "true")
   CACHE_TTL_SECONDS  optional, default 21600 (6 hours)
@@ -30,7 +31,7 @@ import json
 import os
 import re
 import time
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 import boto3
@@ -41,6 +42,7 @@ SERPAPI_URL = "https://serpapi.com/search"
 SERPAPI_CLASS = {"economy": 1, "premium_economy": 2, "business": 3, "first": 4}
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "15"))
 RETURNS_PER_LOOKUP = int(os.environ.get("SERPAPI_RETURNS_PER_LOOKUP", "8"))   # kept from each return lookup, no extra calls
+SPREAD_POOL = 10   # the cheapest outbound options that the return lookups are spread across
 CABINS = {"economy", "premium_economy", "business", "first"}
 
 # Approximate conversion rates to SGD, fixed for reproducibility. Update and re-date when needed.
@@ -141,6 +143,18 @@ def _minutes(iso):
     return d * 1440 + h * 60 + mi
 
 
+def _ground_hours(o):
+    """Usable hours at the destination: return departure minus outbound arrival (local times), 0 when unknown."""
+    sl = o.get("slices") or []
+    if len(sl) < 2 or not sl[0].get("arriveAt") or not sl[-1].get("departAt"):
+        return 0
+    try:
+        arrive, leave = (datetime.fromisoformat(str(x)[:19]) for x in (sl[0]["arriveAt"], sl[-1]["departAt"]))
+    except ValueError:
+        return 0
+    return max((leave - arrive).total_seconds() / 3600, 0)
+
+
 def _apply_prefs(offers, q):
     """Filter and order offers by the traveller's flight preferences. A filter that would remove every offer is
     relaxed and noted, so the planner always gets options. Each offer gets 'matches' and 'totalMinutes'."""
@@ -185,8 +199,8 @@ def _apply_prefs(offers, q):
     pref = lambda o: -int("preferred airline" in o["matches"])
     if q["sortBy"] == "duration":
         key = lambda o: (pref(o), o["totalMinutes"] or 10 ** 6, price(o))
-    elif q["sortBy"] == "best":   # cheap and short: each hour of travel counts as SGD 40 per traveller
-        key = lambda o: (pref(o), price(o) + (o["totalMinutes"] or 0) / 60 * 40 * q["pax"])
+    elif q["sortBy"] == "best":   # cheap, short and long on the ground: each hour counts as SGD 40 per traveller
+        key = lambda o: (pref(o), price(o) + ((o["totalMinutes"] or 0) / 60 - _ground_hours(o)) * 40 * q["pax"])
     else:
         key = lambda o: (pref(o), price(o))
     offers = sorted(offers, key=key)
@@ -332,6 +346,17 @@ def _serp_offer(legs, price, url):
             "provider": "google_flights"}
 
 
+def _time_gap(a, b):
+    """Minutes between two SerpApi options' first departures plus between their last arrivals (0 when unknown)."""
+    def at(o, i, end):
+        try:
+            return datetime.fromisoformat(((o.get("flights") or [])[i].get(end) or {}).get("time") or "")
+        except (IndexError, ValueError):
+            return None
+    gaps = [(at(a, i, end), at(b, i, end)) for i, end in ((0, "departure_airport"), (-1, "arrival_airport"))]
+    return sum(abs((x - y).total_seconds()) / 60 for x, y in gaps if x and y)
+
+
 def _call_serpapi(q, key):
     """Google Flights via SerpApi, prices directly in SGD for all travellers. Round trips and open-jaw trips need
     a second search per outbound option to get the return flights and the combined price."""
@@ -356,16 +381,13 @@ def _call_serpapi(q, key):
     if not q["returnDate"]:
         offers = [_serp_offer([o], o["price"], url) for o in first[:40]]
         return [o for o in offers if o], None
-    lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "2")), 0), 4)
-    # look up returns for the cheapest outbound and, if different, the best-ranked one
-    shortest = min((o for o in first if o.get("departure_token")),
-                   key=lambda o: o.get("total_duration") or 10 ** 6, default=None)
-    picks = []
-    for o in ([first[0], shortest] + list(data.get("best_flights") or []) + first[1:]) if first else []:
-        if o and o.get("departure_token") and o not in picks:
-            picks.append(o)
-        if len(picks) >= lookups:
-            break
+    lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "3")), 0), 4)
+    # look up returns for the cheapest outbound, then each time for the one (of the cheapest SPREAD_POOL) whose
+    # departure and arrival times are furthest from those already picked, so the trips differ in time on the ground
+    cands = [o for o in first if o.get("departure_token")][:SPREAD_POOL]
+    picks = cands[:1] if lookups else []
+    while len(picks) < min(lookups, len(cands)):
+        picks.append(max((o for o in cands if o not in picks), key=lambda o: min(_time_gap(o, p) for p in picks)))
     offers = []
     for out in picks:
         if offers and _time_left() < 8:   # enough round trips already; don't risk the timeout

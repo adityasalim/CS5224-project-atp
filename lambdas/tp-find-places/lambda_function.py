@@ -24,6 +24,7 @@ Input event:
   {"city": "Tokyo", "categories": ["temple", "museum", "restaurant", "climbing", "hiking"],
    "keywords": ["bouldering gym", "day hike"], "radiusKm": 6, "cuisine": "japanese", "maxPerCategory": 20}
   ("lat" and "lng" can be given instead of "city".)
+  - near: {"lat", "lng"} biases the city geocode to that point; only a match within maxKm (default 450) is taken.
   - categories: fixed place types (see CATEGORY_TAGS). Unknown words are treated as keywords.
   - keywords: free-text activities (up to 8) for anything else; searched with Amazon Location / Google text
     search and returned with category "activity" and "activity": <keyword>.
@@ -135,6 +136,7 @@ DIET_TAG = {"vegetarian": "diet:vegetarian", "vegan": "diet:vegan", "halal": "di
             "gluten_free": "diet:gluten_free"}
 OUTDOOR = {"climbing", "hiking", "nature", "onsen", "beach"}
 CITY_MAX_KM, OUTDOOR_MAX_KM = 15, 50
+NEAR_MAX_KM = 450                # a city geocoded with "near" must lie within maxKm (default) of that point
 DIET_SEARCH_MAX_M = 15000        # the wider search for diet-tagged places
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osaka": (34.6937, 135.5023),
                 "singapore": (1.2903, 103.8520), "seoul": (37.5665, 126.9780), "bangkok": (13.7563, 100.5018),
@@ -176,17 +178,22 @@ def _mock_mode():
     return os.environ.get("MOCK_MODE", "true").lower() == "true"
 
 
-def _geocode(city):
+def _geocode(city, near=None, max_km=None):
+    """(lat, lng) of a place name. With near ({"lat", "lng"}) the search is biased to that point and only a result
+    within max_km of it is taken, so "Mount Fuji" near Tokyo is never a namesake on another continent."""
     parts = [x.strip().lower() for x in city.split(",") if x.strip()]
     known = KNOWN_CITIES.get(city.strip().lower()) or (KNOWN_CITIES.get(parts[-1]) if parts else None)
+    close = lambda lat, lng: near is None or _km(near["lat"], near["lng"], lat, lng) <= max_km
+    known = known if known and close(*known) else None
     if _mock_mode():
         return known
     try:
-        r = boto3.client("geo-places", config=_GEO_CFG).geocode(QueryText=city, MaxResults=1)
-        items = r.get("ResultItems", [])
-        if items:
-            lng, lat = items[0]["Position"]
-            return lat, lng
+        bias = {"BiasPosition": [near["lng"], near["lat"]], "MaxResults": 5} if near else {"MaxResults": 1}
+        r = boto3.client("geo-places", config=_GEO_CFG).geocode(QueryText=city, **bias)
+        for it in r.get("ResultItems", []):
+            lng, lat = it["Position"]
+            if close(lat, lng):
+                return lat, lng
     except Exception as e:  # noqa: BLE001
         print("geocode failed:", e)
     return known
@@ -261,9 +268,19 @@ def _validate(event):
     if event.get("lat") is not None and event.get("lng") is not None:
         lat, lng = float(event["lat"]), float(event["lng"])
     elif event.get("city"):
-        coords = _geocode(str(event["city"]))
+        near = event.get("near") if isinstance(event.get("near"), dict) else {}
+        try:
+            near = {"lat": float(near["lat"]), "lng": float(near["lng"])}
+        except (KeyError, TypeError, ValueError):
+            near = None
+        try:
+            max_km = float(event.get("maxKm") or NEAR_MAX_KM)
+        except (TypeError, ValueError):
+            max_km = float(NEAR_MAX_KM)
+        coords = _geocode(str(event["city"]), near, max_km)
         if not coords:
-            return None, _err("unknown_location", f"could not find '{event['city']}'; pass lat and lng")
+            within = f" within {max_km:g} km of near" if near else ""
+            return None, _err("unknown_location", f"could not find '{event['city']}'{within}; pass lat and lng")
         lat, lng = coords
     else:
         return None, _err("bad_input", "give either city, or lat and lng")
@@ -599,6 +616,18 @@ def _amazon_location(q, deadline):
     return out, None
 
 
+def _g_cuisine(p, cat):
+    """Cuisine of a Google place from its types: the first <x>_restaurant with x in G_MEAL_TYPES ("indian_restaurant"
+    -> "indian"), or "steak" for a steak_house. A PRICE_LEVEL_VERY_EXPENSIVE restaurant also gets "fine_dining"."""
+    types = [str(t) for t in [p.get("primaryType")] + list(p.get("types") or []) if t]
+    kind = next((t[:-11] for t in types if t.endswith("_restaurant") and t[:-11] in G_MEAL_TYPES), None)
+    kind = kind or ("steak" if "steak_house" in types else None)
+    if (p.get("priceLevel") == "PRICE_LEVEL_VERY_EXPENSIVE" and kind != "fine_dining"
+            and (cat == "restaurant" or (cat not in GOOGLE_FIRST and "restaurant" in types))):
+        kind = f"{kind} fine_dining" if kind else "fine_dining"
+    return kind
+
+
 def _google(q, deadline=None):
     key = _secret("GOOGLE_MAPS_KEY")
     if not key:
@@ -606,7 +635,7 @@ def _google(q, deadline=None):
     headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
                "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
                                    "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
-                                   "places.userRatingCount,places.priceLevel,places.businessStatus"}
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.types"}
     out = []
     for cat, text, radius_km, kw in _text_targets(q):
         if deadline and deadline - time.time() < 5:
@@ -633,7 +662,7 @@ def _google(q, deadline=None):
             out.append(_place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat,
                               loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, activity=kw,
                               website=p.get("websiteUri"), url=p.get("googleMapsUri"), rating=p.get("rating"),
-                              fame_known=False))
+                              fame_known=False, cuisine=_g_cuisine(p, cat)))
             out[-1].update(reviews=p.get("userRatingCount"), priceLevel=p.get("priceLevel"))
     return out, None
 
@@ -641,8 +670,8 @@ def _google(q, deadline=None):
 def _google_zone(q, deadline):
     """One walkable zone: ONE Nearby Search inside a hard circle of foodRadiusKm around lat/lng for the asked
     categories (restaurants with the wished cuisine types, cafes and tea houses, bakeries and dessert shops),
-    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order. With a meal priceLevel (1-4),
-    restaurants at that level come first, then those with no price, then the other levels."""
+    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order. Restaurants of a wished cuisine come
+    first; then, with a meal priceLevel (1-4), restaurants at that level, then those with no price, then the others."""
     key = _secret("GOOGLE_MAPS_KEY")
     if not key:
         return None, "no GOOGLE_MAPS_KEY in secret"
@@ -659,7 +688,8 @@ def _google_zone(q, deadline):
     headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
                "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
                                    "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
-                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType"}
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType,"
+                                   "places.types"}
     try:
         r = requests.post("https://places.googleapis.com/v1/places:searchNearby", headers=headers, json=body, timeout=8)
     except requests.RequestException as e:
@@ -674,18 +704,27 @@ def _google_zone(q, deadline):
             continue
         loc = p.get("location", {})
         raw = "; ".join((p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
-        g = _place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat_of.get(kind, "restaurant"),
+        cat = cat_of.get(kind, "restaurant")
+        g = _place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat,
                    loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, website=p.get("websiteUri"),
                    url=p.get("googleMapsUri"), rating=rating, fame_known=False,
-                   cuisine=kind.replace("_restaurant", "").replace("_", " ") if kind not in ("", "restaurant") else None)
+                   cuisine=_g_cuisine(p, cat) or (kind.replace("_restaurant", "").replace("_", " ")
+                                                  if kind not in ("", "restaurant") else None))
         g.update(reviews=n, priceLevel=p.get("priceLevel"), matches=_matches(g, q["prefs"]))
         scored.append(((n * rating + 150 * 4.2) / (n + 150), g))   # Bayesian: 4.6 with 900 reviews before 4.9 with 60
     want = q.get("priceLevel")
+    wished = [c for c in (q["cuisine"] or "").split("|") if c]
+
+    def cuisine_tier(g):   # restaurants of a wished cuisine first (matched as the agent does: cuisine, name, tags)
+        if not wished or g["category"] != "restaurant":
+            return 0
+        blob = f'{g.get("cuisine") or ""} {g.get("name") or ""} {g.get("description") or ""} {" ".join(g["tags"])}'.lower()
+        return 0 if any(c in blob or c.replace("_", " ") in blob for c in wished) else 1
 
     def price_tier(g):
         lvl = G_PRICE_LEVELS.get(g.get("priceLevel"))
         return 0 if not want or g["category"] != "restaurant" else 1 if lvl is None else 0 if lvl == want else 2
-    scored.sort(key=lambda x: (price_tier(x[1]), -x[0], x[1]["placeId"]))
+    scored.sort(key=lambda x: (cuisine_tier(x[1]), price_tier(x[1]), -x[0], x[1]["placeId"]))
     ranked = [g for _, g in scored if _allowed(g, q["prefs"])]
     return [g for c in q["categories"] for g in [x for x in ranked if x["category"] == c][:q["maxPerCategory"]]], None
 
@@ -756,7 +795,8 @@ def _named(q, deadline):
                                                     "radius": 50000}}},
                         headers={"X-Goog-Api-Key": gkey, "Content-Type": "application/json",
                                  "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
-                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating"
+                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating,"
+                                                     "places.types"
                                                      + (",places.userRatingCount,places.priceLevel,places.businessStatus"
                                                         if web else "")})
                     for gp in (r.json().get("places") or []) if r.status_code < 400 else []:
@@ -769,7 +809,8 @@ def _named(q, deadline):
                             raw = "; ".join((gp.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
                             hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), cat,
                                          loc["latitude"], loc["longitude"], q, hours_raw=raw,
-                                         url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False)
+                                         url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False,
+                                         cuisine=_g_cuisine(gp, cat))
                             if web:
                                 hit.update(reviews=gp.get("userRatingCount"), priceLevel=gp.get("priceLevel"))
                 except Exception as e:  # noqa: BLE001

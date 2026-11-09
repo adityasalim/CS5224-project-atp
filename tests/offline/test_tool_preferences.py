@@ -16,6 +16,33 @@ r = fp.lambda_handler({"city": "Tokyo", "categories": ["museum", "park"], "indoo
                        "accessibility": ["wheelchair"]}, None)
 assert r["query"]["categories"] == ["museum"] and all("paid entry" not in p["tags"] for p in r["places"])
 
+# ---------------------------------------------------------------- find_places: geocode near the destination
+GEOCODES = []
+
+
+class FarFirst:
+    def geocode(self, **k):
+        GEOCODES.append(k)
+        return {"ResultItems": [{"Position": [121.18, 14.59]},      # Antipolo, Philippines
+                                {"Position": [138.73, 35.36]}]}     # Mount Fuji, about 100 km from Tokyo
+
+
+near_tokyo = {"lat": 35.68, "lng": 139.77}
+saved = fp._mock_mode, fp.boto3.client
+try:
+    fp._mock_mode, fp.boto3.client = (lambda: False), (lambda name, **k: FarFirst())
+    q, error = fp._validate({"city": "Mount Fuji", "near": near_tokyo, "categories": ["viewpoint"]})
+    assert error is None and (q["lat"], q["lng"]) == (35.36, 138.73), q
+    assert GEOCODES[-1]["BiasPosition"] == [139.77, 35.68] and GEOCODES[-1]["MaxResults"] > 1, GEOCODES[-1]
+    r = fp.lambda_handler({"city": "Mount Fuji", "near": near_tokyo, "maxKm": 50, "categories": ["viewpoint"]}, None)
+    assert r["error"] == "unknown_location" and "within 50 km" in r["message"], r
+    q, error = fp._validate({"city": "Mount Fuji", "categories": ["viewpoint"]})
+    assert (q["lat"], q["lng"]) == (14.59, 121.18) and GEOCODES[-1] == {"QueryText": "Mount Fuji", "MaxResults": 1}
+finally:
+    fp._mock_mode, fp.boto3.client = saved
+assert fp._validate({"city": "Tokyo", "near": {"lat": 55.68, "lng": 12.57}})[1]["error"] == "unknown_location"
+assert fp._validate({"city": "Nikko", "near": near_tokyo})[0]["lat"] == 36.7199, "a known town near the point is kept"
+
 # ---------------------------------------------------------------- find_places: sizes and radii
 q, error = fp._validate({"city": "Tokyo", "categories": ["restaurant", "museum"]})
 assert error is None and q["foodRadiusKm"] == 5.0 and fp._radius_km("restaurant", q) == 5.0
@@ -132,6 +159,56 @@ assert [o["airline"] for o in r["offers"]] == ["Test Jet"], r["offers"]
 r = fl.lambda_handler({**base, "preferredAirlines": ["Test Jet"]}, None)
 assert r["offers"][0]["airline"] == "Test Jet"
 assert fl.lambda_handler({**base, "departAfter": "9am"}, None)["error"] == "bad_input"
+
+# sortBy "best" adds usable hours on the ground (return departure minus outbound arrival) at SGD 40 per hour per
+# traveller; an offer with an unknown time gets no bonus
+qb, _ = fl._validate({**base, "sortBy": "best"})
+
+
+def trip(i, price, arrive, leave):
+    return {"offerId": f"b{i}", "airline": "X", "priceTotalSGD": price, "slices": [
+        {"departAt": "2026-12-10T08:00:00", "arriveAt": arrive, "duration": "PT6H", "stops": 0, "flightNumbers": []},
+        {"departAt": leave, "arriveAt": "2026-12-15T23:00:00", "duration": "PT6H", "stops": 0, "flightNumbers": []}]}
+
+
+late_early = trip(1, 1000, "2026-12-10T22:00:00", "2026-12-15T08:00:00")     # 106 h on the ground
+early_late = trip(2, 1500, "2026-12-10T14:00:00", "2026-12-15T20:00:00")     # 126 h: 20 h x 2 pax x 40 > SGD 500
+unknown = trip(3, 1000, None, "2026-12-15T20:00:00")
+assert fl._ground_hours(late_early) == 106 and fl._ground_hours(unknown) == 0
+assert fl._ground_hours({"slices": late_early["slices"][:1]}) == 0, "one-way: no ground term"
+assert [o["offerId"] for o in fl._apply_prefs([dict(o) for o in (late_early, early_late, unknown)], qb)] == ["b2", "b1", "b3"]
+assert [o["offerId"] for o in fl._apply_prefs([dict(o) for o in (late_early, early_late, unknown)],
+                                                 {**qb, "sortBy": "price"})] == ["b1", "b3", "b2"]
+
+# return lookups (3 by default) go to the cheapest outbound and then to the ones with the most different times
+def serp_seg(dep, arr):
+    return {"departure_airport": {"id": "SIN", "time": dep}, "arrival_airport": {"id": "HND", "time": arr},
+            "airline": "X", "flight_number": "XX 1"}
+
+
+OUTS = [{"flights": [serp_seg(f"2026-12-10 {d}", a)], "price": p, "total_duration": 360, "departure_token": tok}
+        for tok, d, a, p in (("t1", "08:00", "2026-12-10 14:00", 500), ("t2", "08:30", "2026-12-10 14:30", 510),
+                             ("t3", "09:00", "2026-12-10 15:00", 520), ("t5", "13:00", "2026-12-10 19:00", 600),
+                             ("t4", "20:00", "2026-12-11 02:00", 700))]
+LOOKED = []
+
+
+def fake_serp(params):
+    if not params.get("departure_token"):
+        return {"other_flights": OUTS}, None
+    LOOKED.append(params["departure_token"])
+    return {"best_flights": [{"flights": [serp_seg("2026-12-15 10:00", "2026-12-15 16:00")], "price": 900}]}, None
+
+
+saved = fl._serp_get, os.environ.pop("SERPAPI_RETURN_LOOKUPS", None)
+try:
+    fl._serp_get, fl._DEADLINE = fake_serp, None
+    found, err = fl._call_serpapi(fl._api_query(fl._validate(base)[0]), "test-key")
+    assert err is None and LOOKED == ["t1", "t4", "t5"], LOOKED     # not the three cheapest morning flights
+finally:
+    fl._serp_get = saved[0]
+    if saved[1] is not None:
+        os.environ["SERPAPI_RETURN_LOOKUPS"] = saved[1]
 
 hop = {"from": {"city": "Copenhagen", "airport": "CPH"}, "to": {"city": "Lofoten", "airport": "BOO"},
        "date": "2026-12-13", "pax": 2}

@@ -68,7 +68,7 @@
       },
       "sortBy": {
         "type": "string",
-        "description": "'price' (default), 'duration' (shortest first, e.g. travelling with kids or elderly) or 'best' (balances price and travel time)."
+        "description": "'price' (default), 'duration' (shortest first, e.g. travelling with kids or elderly) or 'best' (balances price, travel time and usable time at the destination: every hour of travel costs and every hour between landing and the return flight counts SGD 40 per traveller)."
       }
     },
     "required": [

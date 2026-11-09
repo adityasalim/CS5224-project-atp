@@ -36,7 +36,7 @@ r = fp.lambda_handler(event, None)
 cold = time.time() - t0
 assert r["ok"] and r["source"].startswith("google+overpass"), r["source"]
 assert SIGHTS == [["temple"]], "food categories never go to Overpass when Google answers"
-assert all("places.userRatingCount" in p["mask"] and p["minRating"] == 4.0 for p in POSTS)
+assert all("places.userRatingCount" in p["mask"] and "places.types" in p["mask"] and p["minRating"] == 4.0 for p in POSTS)
 assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant"}, POSTS
 food = [p for p in r["places"] if p["category"] in ("cafe", "restaurant")]
 assert food and {p["name"] for p in food} == {"Good Roaster"}, "few reviews and closed venues are dropped"
@@ -132,12 +132,35 @@ assert r["places"][0]["reviews"] == 1200 and r["places"][0]["priceLevel"] == "PR
 assert len(POSTS) == 4 and all(p["maxResultCount"] == 1 and "places.userRatingCount" in p["mask"] for p in POSTS) and GEO == [], (POSTS, GEO)
 fp.lambda_handler({"city": "Kyoto", "names": ["Good Roaster"]}, None)
 assert GEO == [("Good Roaster", "en")], "English names, so day rules and the plan card can read them"
+assert POSTS and all("places.types" in p["mask"] for p in POSTS), "named lookups (web and pinned) ask for the types"
 fresh = load("tp-find-places")   # the category search, which this file otherwise replaces with a stub
 GEO.clear()
 q_en, _ = fresh._validate({"city": "Kyoto", "categories": ["temple"]})
 fresh._amazon_location(q_en, time.time() + 30)
 assert GEO and all(lang == "en" for _, lang in GEO), GEO
 fp.boto3.client = saved_client
+
+# Google types become the cuisine (text searches and keyword searches alike); a very expensive restaurant is also
+# fine dining, a very expensive cafe is not
+TYPED = [{**GOOD, "id": "curry", "displayName": {"text": "Spice Route"}, "types": ["indian_restaurant", "restaurant"]},
+         {**GOOD, "id": "gala", "displayName": {"text": "Gala"}, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE",
+          "types": ["italian_restaurant", "restaurant"]},
+         {**GOOD, "id": "chef", "displayName": {"text": "Chef's Table"}, "types": ["fine_dining_restaurant", "restaurant"]},
+         {**GOOD, "id": "grill", "displayName": {"text": "Grill"}, "types": ["steak_house", "restaurant"]},
+         {**GOOD, "id": "plain", "displayName": {"text": "Plain"}, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE",
+          "types": ["restaurant"]}]
+fp.requests.post = lambda url, headers=None, json=None, timeout=None: Resp({"places": TYPED})
+want = {"Spice Route": "indian", "Gala": "italian fine_dining", "Chef's Table": "fine_dining", "Grill": "steak",
+        "Plain": "fine_dining"}
+qt, _ = fp._validate({"city": "Kyoto", "categories": ["restaurant"], "cuisine": "indian"})
+assert {p["name"]: p["cuisine"] for p in fp._google(qt, time.time() + 30)[0]} == want
+qk, _ = fp._validate({"city": "Kyoto", "keywords": ["indian restaurant"]})
+kw = fp._rank(fp._google(qk, time.time() + 30)[0], qk)
+assert {p["name"]: p["cuisine"] for p in kw} == want and {p["category"] for p in kw} == {"restaurant"}, kw
+qc, _ = fp._validate({"city": "Kyoto", "categories": ["cafe"]})
+fp.requests.post = lambda url, headers=None, json=None, timeout=None: Resp({"places": [
+    {**GOOD, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE", "types": ["cafe", "restaurant"]}]})
+assert fp._google(qc, time.time() + 30)[0][0]["cuisine"] is None
 
 fp._secret_cache = {}   # no key: food goes through the free chain as before
 SIGHTS.clear()

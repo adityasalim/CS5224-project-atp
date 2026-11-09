@@ -461,4 +461,17 @@ fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestExce
 fp._amazon_location = lambda q, d: ([fp._place("aloc:1", "Corner Diner", "restaurant", 35.001, 135.77, q)], None)
 r = fp.lambda_handler(ev, None)
 assert r["source"] == "amazon_location-zone" and [p["name"] for p in r["places"]] == ["Corner Diner"], r
+# restaurants of a wished cuisine come first (cuisine from the Google types; very expensive counts as fine dining),
+# then the Bayesian order; the per-category cap still holds
+typed = [g("top", 4.9, 900, "restaurant"), {**g("curry", 4.2, 300, "restaurant"), "types": ["indian_restaurant", "restaurant"]},
+         {**g("gala", 4.5, 500, "italian_restaurant"), "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE"},
+         g("grill", 4.6, 400, "steak_house"), g("pasta", 4.3, 200, "italian_restaurant")]
+POSTS.clear()
+fp.requests.post = lambda url, headers=None, json=None, timeout=None: POSTS.append(headers["X-Goog-FieldMask"]) or Resp({"places": typed})
+zr = {**ev, "categories": ["restaurant"], "cuisine": "indian|fine_dining", "dietary": [], "maxPerCategory": 5}
+r = fp.lambda_handler(zr, None)
+assert [(p["name"], p["cuisine"]) for p in r["places"]] == [("gala", "italian fine_dining"), ("curry", "indian"),
+       ("top", None), ("grill", "steak"), ("pasta", "italian")], [(p["name"], p["cuisine"]) for p in r["places"]]
+assert len(POSTS) == 1 and "places.types" in POSTS[0]
+assert [p["name"] for p in fp.lambda_handler({**zr, "maxPerCategory": 3}, None)["places"]] == ["gala", "curry", "top"]
 print("ZONES OK")
