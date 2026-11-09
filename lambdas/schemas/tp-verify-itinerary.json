@@ -41,7 +41,7 @@
               },
               "maxRideMinutes": {
                 "type": "integer",
-                "description": "Longest taxi ride between stops of a day (the traveler's longest ride between areas); default 30."
+                "description": "Longest taxi ride between stops of a day (the traveler's longest ride between areas); default 30. Applies to city days only: a day with dayTrip set or with a full-day park stop (Disney, Universal Studios, Fuji-Q) gets no ride warning."
               }
             }
           },

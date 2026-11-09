@@ -93,7 +93,7 @@ try:
     g = r["options"][0]
     assert 105 <= g["durationMinutes"] <= 125 and 25 <= per_adult(g, "EUR") <= 60 and g["recommended"], g
     assert g["estimateBasis"].startswith("FR")
-    assert any(k.startswith("transfers-v3:") for k in STORE), "cache key prefix bumped"
+    assert any(k.startswith("transfers-v4:") for k in STORE), "cache key prefix bumped"
     print("PARIS-LYON OK", g["durationMinutes"], "min", round(per_adult(g, "EUR"), 2), "EUR pp")
 
     r = t.lambda_handler(hop({"city": "London", "airport": "LHR"}, {"city": "Rome", "airport": "FCO"}), None)

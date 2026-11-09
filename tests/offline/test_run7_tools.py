@@ -180,7 +180,7 @@ assert set(fp.G_PRIMARY_CATEGORY.values()) <= set(fp.CATEGORY_TAGS) - fp.FOOD, s
 assert set(fp.G_PRIMARY_CATEGORY.values()) <= set(sd.DEFAULT_VISIT), set(fp.G_PRIMARY_CATEGORY.values()) - set(sd.DEFAULT_VISIT)
 assert sd._default_visit({"category": "theme_park", "name": "Toei Kyoto Studio Park"}) == 240
 assert sd._default_visit({"category": "theme_park", "name": "Universal Studios Japan"}) == 480, "a big park is a full day"
-assert fp._cache_key({}).startswith("places-v8:")
+assert fp._cache_key({}).startswith("places-v9:")
 print("PLACE CATEGORY OK")
 
 # ---------------------------------------------------------------- 3. family tag only on a family trip

@@ -15,6 +15,7 @@ python3 test_serpapi_flights.py | grep " OK"
 python3 test_run6_tools.py | grep " OK$"
 python3 test_run7_tools.py | grep " OK$"
 python3 test_run8_tools.py | grep " OK$"
+python3 test_final_tools.py | grep " OK$"
 python3 test_rail_hops.py | tail -1
 python3 test_model_selection.py | tail -1
 python3 test_agent_run8.py | grep " OK$"

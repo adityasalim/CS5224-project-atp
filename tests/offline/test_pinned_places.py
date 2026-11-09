@@ -9,8 +9,10 @@ def put(p):
     STORE["pool:" + p["id"]] = {"cacheKey": "pool:" + p["id"], "payload": json.dumps(p)}
 
 
-# Staging run: a 09:00-21:00 day with Tokyo Disneyland (480 min, ~65 min by taxi from the hotel) and three cafes
-# next to it. Three cafes alone and the park plus two cafes both make three stops; the park must win.
+# Staging run: a 09:00-21:00 day with Tokyo Disneyland (~65 min by taxi from the hotel) and three cafes next to it.
+# Three cafes alone would make more stops; the park must win. Owner-approved (final tools round): the park has no
+# hours in the pool, so it is open 09:00-21:00 and the visit runs from arrival to 21:00 minus the ride home: the
+# cafes no longer fit after it.
 put({"id": "t:hotel", "name": "Hotel Akasaka", "category": "stay", "lat": 35.6640, "lng": 139.7200})
 put({"id": "t:tdl", "name": "Tokyo Disneyland", "kind": "place", "category": "requested", "lat": 35.6329, "lng": 139.8804})
 cafes = ["t:cafe1", "t:cafe2", "t:cafe3"]
@@ -25,13 +27,13 @@ for label, ev in [("category requested", event), ("pinned list", dict(event, pin
     park = next(s for s in r["stops"] if s["placeId"] == "t:tdl") if "t:tdl" in ids else None
     print(label, ids, "unscheduled:", [u["placeId"] for u in r["unscheduled"]])
     assert r["ok"] and park, r
-    assert park["visitMinutes"] == 480 and 60 <= park["travelMinutesFromPrev"] <= 70, park
-    assert len(r["unscheduled"]) == 1 and r["unscheduled"][0]["placeId"] in cafes, r["unscheduled"]
+    assert 60 <= park["travelMinutesFromPrev"] <= 70 and park["departAt"] == "19:58", park   # 21:00 - 62 min home
+    assert sorted(u["placeId"] for u in r["unscheduled"]) == cafes, r["unscheduled"]
 
 # An explicit empty pinned list turns the category fallback off; the park still opens the day (run 8: a theme park
-# day starts with the park, above the most stops), so one of the cafes after it is dropped.
+# day starts with the park, above the most stops), so the cafes after it are dropped.
 r = seq.lambda_handler(dict(event, pinned=[]), None)
-assert r["stops"][0]["placeId"] == "t:tdl" and [u["placeId"] for u in r["unscheduled"]] == ["t:cafe2"], r
+assert r["stops"][0]["placeId"] == "t:tdl" and sorted(u["placeId"] for u in r["unscheduled"]) == cafes, r
 
 # Verifier: a mustVisit place missing from the itinerary is named, not shown as its raw ID.
 spec = {"startDate": "2026-12-11", "endDate": "2026-12-11", "pax": 2, "budgetSGD": 9000, "mustVisit": ["t:tdl"]}

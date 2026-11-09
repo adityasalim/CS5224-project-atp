@@ -84,6 +84,19 @@ def _to_sgd(amount, currency):
     return round(float(amount) * rate, 2) if rate else None
 
 
+def _price(v):
+    """A fare as a float: a number, or text such as "1200" or "$1,234"; None when there is no usable price."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        p = float(re.sub(r"[^\d.]", "", str(v)))
+    except ValueError:
+        return None
+    return p if p > 0 else None
+
+
 def _validate(event):
     iata = re.compile(r"^[A-Z]{3}$")
     origin = str(event.get("origin", "")).upper()
@@ -93,13 +106,16 @@ def _validate(event):
     try:
         depart = date.fromisoformat(event["departDate"])
         ret = date.fromisoformat(event["returnDate"]) if event.get("returnDate") else None
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None, _err("bad_input", "departDate (and optional returnDate) must be YYYY-MM-DD")
     if depart < date.today():
         return None, _err("bad_input", "departDate is in the past")
     if ret and ret < depart:
         return None, _err("bad_input", "returnDate is before departDate")
-    pax = int(event.get("pax", 1))
+    try:
+        pax = int(event.get("pax", 1))
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "pax must be a whole number between 1 and 9")
     if not 1 <= pax <= 9:
         return None, _err("bad_input", "pax must be between 1 and 9")
     cabin = str(event.get("cabin", "economy")).lower()
@@ -118,12 +134,18 @@ def _validate(event):
             return None, _err("bad_input", f"{k} must be HH:MM (24h), e.g. 09:00")
         windows[k] = v or None
     max_stops = event.get("maxStops")
-    airlines = lambda k: sorted({str(a).strip().lower() for a in (event.get(k) or []) if str(a).strip()})[:5]
+    try:
+        max_stops = None if max_stops in (None, "") else min(max(int(max_stops), 0), 3)
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "maxStops must be a whole number 0-3")
+    # a single airline given as a string is one airline, not a list of letters
+    airlines = lambda k: sorted({str(a).strip().lower() for a in ([event[k]] if isinstance(event.get(k), str)
+                                                                  else event.get(k) or []) if str(a).strip()})[:5]
     sort_by = str(event.get("sortBy") or "price").lower()
     return {"origin": origin, "destination": dest, "departDate": depart.isoformat(),
             "returnDate": ret.isoformat() if ret else None, "returnFrom": ret_from,
             "pax": pax, "cabin": cabin,
-            "maxStops": None if max_stops in (None, "") else min(max(int(max_stops), 0), 3), **windows,
+            "maxStops": max_stops, **windows,
             "preferredAirlines": airlines("preferredAirlines"), "avoidAirlines": airlines("avoidAirlines"),
             "sortBy": sort_by if sort_by in ("price", "duration", "best") else "price"}, None
 
@@ -314,10 +336,16 @@ def _serp_get(params, cap=25, attempts=2):
                 return None, _err("upstream_rejected", f"SerpApi returned {r.status_code}", "serpapi",
                                   detail=r.text[:300])
             else:
-                data = r.json()
-                if data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
-                    return None, _err("no_results", f"Google Flights: {data['error'][:200]}", "serpapi")
-                return data, None
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict):   # an HTML error page with status 200: retried like a 5xx
+                    last = _err("upstream_unavailable", "SerpApi sent a reply that is not JSON", "serpapi")
+                elif data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
+                    return None, _err("no_results", f"Google Flights: {str(data['error'])[:200]}", "serpapi")
+                else:
+                    return data, None
         if attempt + 1 >= attempts or not _pause(attempt):
             break
     return None, last
@@ -352,7 +380,8 @@ def _serp_offer(legs, price, url, cabin):
     """cabin: the requested cabin. The offer's cabin is that cabin when every segment SerpApi names a class for is
     in it, else "mixed" (e.g. an economy leg on a premium economy fare)."""
     slices = [_serp_slice(o) for o in legs]
-    if not all(slices) or price in (None, ""):
+    price = _price(price)
+    if not all(slices) or price is None:
         return None
     known = {c for s_ in slices for c in s_["cabins"] if c}
     airlines = list(dict.fromkeys(a for s_ in slices for a in s_.pop("airlines")))
@@ -441,7 +470,7 @@ def _call_serpapi(q, key):
                     seen.add(_option_key(o))
                     first.append(o)
                     nonstop_params[id(o)] = ns_params
-    first = sorted((o for o in first if o.get("price")), key=lambda o: o["price"])
+    first = sorted((o for o in first if isinstance(o, dict) and _price(o.get("price"))), key=lambda o: _price(o["price"]))
     if not q["returnDate"]:
         offers = [_serp_offer([o], o["price"], url, q["cabin"]) for o in first[:40]]
         return [o for o in offers if o], None
@@ -460,7 +489,7 @@ def _call_serpapi(q, key):
             print("return lookup failed:", err)
             continue
         rets = sorted((r for r in (back.get("best_flights") or []) + (back.get("other_flights") or [])
-                       if r.get("price")), key=lambda r: r["price"])
+                       if isinstance(r, dict) and _price(r.get("price"))), key=lambda r: _price(r["price"]))
         for r in rets[:RETURNS_PER_LOOKUP]:
             o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url,
                             q["cabin"])
@@ -545,6 +574,14 @@ def _mock(q):
 
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event, context)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event, context):
     _start_budget(context, 35)
     if isinstance(event, str):
         event = json.loads(event)
@@ -571,18 +608,26 @@ def lambda_handler(event, context):
     every, source, attempts = None, None, []
     serp_key = _secret("SERPAPI_KEY")
     if serp_key:
-        found, error = _call_serpapi(_api_query(q), serp_key)
+        try:
+            found, error = _call_serpapi(_api_query(q), serp_key)
+        except Exception as e:  # noqa: BLE001 -- an unreadable SerpApi reply: try the next provider
+            found, error = None, _err("upstream_failed", f"Google Flights reply could not be read: "
+                                                         f"{type(e).__name__}: {e}"[:300], "serpapi")
         if error:
             attempts.append(error["message"])
             print("serpapi failed:", error)
         else:
             every, source = found, "google_flights"
     if every is None and _get_token():
-        found, error = _call_duffel(_api_query(q))
+        try:
+            found, error = _call_duffel(_api_query(q))
+            found = [_summarise(o) for o in found] if not error else None
+        except Exception as e:  # noqa: BLE001 -- an unreadable Duffel reply
+            found, error = None, _err("upstream_failed", f"Duffel reply could not be read: {type(e).__name__}: {e}"[:300])
         if error:
             attempts.append(error["message"])
         else:
-            every, source = [_summarise(o) for o in found], "duffel"
+            every, source = found, "duffel"
     if every is None:
         if not attempts:
             return _err("not_configured", "no flight API key in the secret (SERPAPI_KEY or DUFFEL_TOKEN); "

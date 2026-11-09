@@ -10,6 +10,9 @@ Returns two kinds of option, each with a stable transferId saved to the candidat
     distance elsewhere) with a link to search real timetables. There is no free API with real rail/bus
     prices for most countries, so these are clearly marked "estimate": true. Mention this in the report.
 Options carry doorToDoorMinutes; the fastest door-to-door option that is not overnight is "recommended": true.
+Results are cached 6 h, except an estimate-only answer after a flight search that failed for a passing reason
+(429/5xx, timeout, an unreadable reply): the next call searches again. City geocodes (Amazon Location, us-east-1) and
+the flight searches share one time budget (45 s, at most the Lambda's remaining time - 6 s).
 
 Environment variables:
   SECRET_ARN   Secrets Manager secret with {"SERPAPI_KEY": "...", "DUFFEL_TOKEN": "..."} (either may be missing)
@@ -117,7 +120,6 @@ KNOWN_CITIES = {"tokyo": (35.6812, 139.7671, "JP"), "kyoto": (35.0116, 135.7681,
                 "nara": (34.6851, 135.8048, "JP"), "kobe": (34.6901, 135.1955, "JP"), "busan": (35.1796, 129.0756, "KR"),
                 "ayutthaya": (14.3532, 100.5689, "TH"), "sapporo": (43.0618, 141.3545, "JP"),
                 "fukuoka": (33.5902, 130.4017, "JP")}
-_GEO_CFG = Config(connect_timeout=4, read_timeout=8, retries={"max_attempts": 2})
 _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
 
@@ -191,8 +193,22 @@ def _km(a, b):
     return 2 * r * math.asin(math.sqrt(h))
 
 
+def _geo_client():
+    """An Amazon Location (geo-places, us-east-1 as in find-places and stays) client whose worst case (every attempt
+    timing out) ends within the time budget: up to 3 attempts of 4 s connect + 8 s read while the budget allows, else
+    one shorter attempt. None when less than 3 s are left."""
+    left = min(_time_left(), 1e6) - 1
+    if left < 3:
+        return None
+    tries = max(1, min(3, int(left // 12)))
+    connect = min(4.0, left / 3)
+    return boto3.client("geo-places", config=Config(region_name="us-east-1", connect_timeout=connect,
+                                                    read_timeout=min(8.0, left / tries - connect),
+                                                    retries={"total_max_attempts": tries}))
+
+
 def _coords(place):
-    """(lat, lng, country code or None) for a city."""
+    """(lat, lng, country code or None) for a city; the geocode counts against the time budget."""
     city = str(place.get("city", "")).strip()
     known = KNOWN_CITIES.get(city.split(",")[0].strip().lower())
     if place.get("lat") is not None and place.get("lng") is not None:
@@ -200,8 +216,9 @@ def _coords(place):
     if _mock_mode() or not city:
         return known
     try:
-        r = boto3.client("geo-places", config=_GEO_CFG).geocode(QueryText=city, MaxResults=1)
-        items = r.get("ResultItems", [])
+        client = _geo_client()
+        r = client.geocode(QueryText=city, MaxResults=1) if client else {}
+        items = r.get("ResultItems") or []
         if items:
             lng, lat = items[0]["Position"]
             return lat, lng, ((items[0].get("Address") or {}).get("Country") or {}).get("Code2")
@@ -216,14 +233,20 @@ def _validate(event):
         return None, _err("bad_input", "from and to need a city, e.g. {\"city\": \"Oslo\", \"airport\": \"OSL\"}")
     try:
         d = date.fromisoformat(event["date"])
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None, _err("bad_input", "date must be YYYY-MM-DD")
     if d < date.today():
         return None, _err("bad_input", "date is in the past")
-    pax = int(event.get("pax", 1))
+    try:
+        pax = int(event.get("pax", 1))
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "pax must be a whole number 1-9")
     if not 1 <= pax <= 9:
         return None, _err("bad_input", "pax must be 1-9")
-    a, b = _coords(frm), _coords(to)
+    try:
+        a, b = _coords(frm), _coords(to)
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "lat and lng in from and to must be numbers")
     if not a or not b:
         missing = frm["city"] if not a else to["city"]
         return None, _err("unknown_location", f"could not find '{missing}'; pass lat and lng")
@@ -302,11 +325,26 @@ def _flight_option(offer, q):
                               for g in segs]}
 
 
+def _price(v):
+    """A fare as a float: a number, or text such as "150" or "$1,234"; None when there is no usable price."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        p = float(re.sub(r"[^\d.]", "", str(v)))
+    except ValueError:
+        return None
+    return p if p > 0 else None
+
+
 def _google_flights(q):
-    """One-way flights for this hop from Google Flights (SerpApi), prices in SGD for all travellers."""
+    """One-way flights for this hop from Google Flights (SerpApi), prices in SGD for all travellers.
+    Returns (options, error, transient): transient is True when the search failed for a reason that can pass
+    (429/5xx, timeout, an unreadable reply, no time left), so an estimate-only answer is not cached."""
     key = _secret("SERPAPI_KEY")
     if not key:
-        return [], "no SERPAPI_KEY in secret"
+        return [], "no SERPAPI_KEY in secret", False
     params = {"engine": "google_flights", "api_key": key, "type": 2, "departure_id": q["fromAirport"],
               "arrival_id": q["toAirport"], "outbound_date": q["date"], "adults": q["pax"], "currency": "SGD",
               "hl": "en", "gl": "sg", "travel_class": 1}
@@ -324,14 +362,23 @@ def _google_flights(q):
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"serpapi http {r.status_code}"
             elif r.status_code >= 400:
-                return [], f"serpapi http {r.status_code}: {r.text[:200]}"
+                return [], f"serpapi http {r.status_code}: {r.text[:200]}", False
             else:
-                data = r.json()
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict):   # an HTML error page with status 200: retried like a 5xx
+                    last = "serpapi sent a reply that is not JSON"
+                    if not _pause(attempt):
+                        break
+                    continue
                 url = (data.get("search_metadata") or {}).get("google_flights_url")
                 out = []
                 for o in (data.get("best_flights") or []) + (data.get("other_flights") or []):
-                    segs = o.get("flights") or []
-                    if not segs or not o.get("price"):
+                    segs = (o.get("flights") or []) if isinstance(o, dict) else []
+                    price = _price(o.get("price")) if segs else None
+                    if price is None or not all(isinstance(g, dict) for g in segs):
                         continue
                     dep = ((segs[0].get("departure_airport") or {}).get("time") or "").replace(" ", "T")[:16]
                     arr = ((segs[-1].get("arrival_airport") or {}).get("time") or "").replace(" ", "T")[:16]
@@ -344,23 +391,24 @@ def _google_flights(q):
                                            + (f", {stops} stop{'s' if stops > 1 else ''}" if stops else "") + ")",
                                 "airline": airlines, "fromCity": q["fromCity"], "toCity": q["toCity"],
                                 "date": q["date"], "departAt": dep, "arriveAt": arr,
-                                "durationMinutes": o.get("total_duration"), "stops": stops,
+                                "durationMinutes": o.get("total_duration") if isinstance(o.get("total_duration"), (int, float))
+                                and not isinstance(o.get("total_duration"), bool) else None, "stops": stops,
                                 "overnight": bool(arr and dep and arr[:10] > dep[:10]),
-                                "priceTotal": float(o["price"]), "currency": "SGD",
-                                "priceTotalSGD": round(float(o["price"]), 2), "flightNumbers": nums,
+                                "priceTotal": price, "currency": "SGD",
+                                "priceTotalSGD": round(price, 2), "flightNumbers": nums,
                                 "bookingUrl": url, "provider": "google_flights"})
                 if not out and data.get("error"):
-                    return [], f"google flights: {str(data['error'])[:200]}"
-                return sorted(out, key=lambda x: x["priceTotalSGD"])[:MAX_FLIGHTS], None
+                    return [], f"google flights: {str(data['error'])[:200]}", False
+                return sorted(out, key=lambda x: x["priceTotalSGD"])[:MAX_FLIGHTS], None, False
         if not _pause(attempt):
             break
-    return [], last
+    return [], last, True
 
 
 def _duffel(q):
     tok = _token()
     if not tok:
-        return [], "no DUFFEL_TOKEN in secret"
+        return [], "no DUFFEL_TOKEN in secret", False
     body = {"data": {"slices": [{"origin": q["fromAirport"], "destination": q["toAirport"], "departure_date": q["date"]}],
                      "passengers": [{"type": "adult"}] * q["pax"], "cabin_class": "economy"}}
     headers = {"Authorization": f"Bearer {tok}", "Duffel-Version": "v2", "Accept": "application/json",
@@ -380,14 +428,14 @@ def _duffel(q):
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"duffel http {r.status_code}"
             elif r.status_code >= 400:
-                return [], f"duffel http {r.status_code}: {r.text[:200]}"
+                return [], f"duffel http {r.status_code}: {r.text[:200]}", False
             else:
                 offers = [_flight_option(o, q) for o in r.json()["data"].get("offers", [])]
                 offers = [o for o in offers if o["priceTotalSGD"] is not None]
-                return sorted(offers, key=lambda o: o["priceTotalSGD"])[:MAX_FLIGHTS], None
+                return sorted(offers, key=lambda o: o["priceTotalSGD"])[:MAX_FLIGHTS], None, False
         if not _pause(attempt):
             break
-    return [], last
+    return [], last, True
 
 
 def _mock_flight(q):
@@ -454,7 +502,23 @@ def _recommend(options, q):
         o["recommended"] = o is best
 
 
+def _flight_search(provider, q):
+    """(options, error, transient) of one flight provider; an unreadable reply is a passing error of that provider."""
+    try:
+        return provider(q)
+    except Exception as e:  # noqa: BLE001
+        return [], f"{provider.__name__.strip('_')} reply could not be read: {type(e).__name__}: {str(e)[:120]}", True
+
+
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event, context)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event, context):
     _start_budget(context, 45)
     if isinstance(event, str):
         event = json.loads(event)
@@ -469,7 +533,7 @@ def lambda_handler(event, context):
     if _mock_mode():
         options, source = (_mock_flight(q) if want_flight else []), "mock"
     else:
-        key = "transfers-v3:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+        key = "transfers-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
         cached = _cache(key)
         if cached and _secret("SERPAPI_KEY") and not str(cached.get("source", "")).startswith("google_flights") \
                 and any(o.get("mode") == "flight" for o in cached.get("options", [])):
@@ -477,16 +541,17 @@ def lambda_handler(event, context):
         if cached:
             _pool_put(cached.get("options", []), q)
             return {**cached, "source": cached.get("source", "") + "-cache"}
-        options, source = [], "estimate"
+        options, source, transient = [], "estimate", False
         if want_flight:
-            options, err = _google_flights(q)
+            options, err, transient = _flight_search(_google_flights, q)
             if err:
                 notes.append(err)
                 print("google flights failed:", err)
             if options:
                 source = "google_flights+estimate"
             else:
-                options, err = _duffel(q)
+                options, err, duffel_transient = _flight_search(_duffel, q)
+                transient = transient or duffel_transient
                 if err:
                     notes.append(err)
                     print("duffel failed:", err)
@@ -507,7 +572,9 @@ def lambda_handler(event, context):
               "options": options, "fxAsOf": FX_AS_OF}
     if notes:
         result["fallbacksTried"] = notes
-    if not _mock_mode():
+    # only real results are cached: an estimate-only answer after a passing flight-search failure (429/5xx, timeout,
+    # an unreadable reply) is searched again on the next call instead of being reused for CACHE_TTL_SECONDS
+    if not _mock_mode() and not (want_flight and transient and not any(o["mode"] == "flight" for o in options)):
         _cache(key, result)
     _pool_put(options, q)
     return result

@@ -124,7 +124,8 @@ def build_pdf(event, pool, daily_spend):
     stays = [pool[s_["stayId"]] for s_ in stay_refs if s_.get("stayId") in pool]
     transfers = [pool[t["transferId"]] for t in it.get("transfers") or [] if t.get("transferId") in pool]
     transfer_on = {t.get("date"): t for t in transfers}
-    narrative = event.get("narrative") or {}
+    narrative = event.get("narrative") if isinstance(event.get("narrative"), dict) else {}
+    day_notes = narrative.get("dayNotes") if isinstance(narrative.get("dayNotes"), dict) else {}   # a list or text: none
 
     pdf = PlanPDF(format="A4")
     _setup_fonts(pdf)
@@ -229,7 +230,7 @@ def build_pdf(event, pool, daily_spend):
             pdf.multi_cell(0, 6, _t(f'Day trip to {trip["place"]}{how}, back to the hotel in the evening'),
                            new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
-        note = (narrative.get("dayNotes") or {}).get(d["date"])
+        note = day_notes.get(d["date"])
         if note:
             pdf.set_font(_FAMILY, "I", 10)
             pdf.set_text_color(90, 90, 90)
@@ -282,6 +283,7 @@ def build_pdf(event, pool, daily_spend):
         pdf.ln(2)
 
     caveats = event.get("caveats") or []
+    caveats = [caveats] if isinstance(caveats, str) else caveats   # one caveat as text is one line, not letters
     if caveats:
         section("Notes")
         pdf.set_font(_FAMILY, "", 10)
@@ -303,22 +305,23 @@ def lambda_handler(event, context):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
-    if not isinstance(event.get("tripSpec"), dict) or not isinstance(event.get("itinerary"), dict):
+    if (not isinstance(event, dict) or not isinstance(event.get("tripSpec"), dict)
+            or not isinstance(event.get("itinerary"), dict)):
         return _err("bad_input", "need tripSpec and itinerary objects")
     bucket = os.environ.get("PLANS_BUCKET")
     if not bucket:
         return _err("config", "PLANS_BUCKET environment variable is not set")
 
     it = event["itinerary"]
-    ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
-    ids += [s_.get("stayId") for s_ in it.get("stays") or [] if s_.get("stayId")]
-    ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
-    ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
-    pool = _pool_get(ids)
     try:
+        ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
+        ids += [s_.get("stayId") for s_ in it.get("stays") or [] if s_.get("stayId")]
+        ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
+        ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
+        pool = _pool_get(ids)
         pdf_bytes, total = build_pdf(event, pool, float(os.environ.get("DAILY_SPEND_SGD_PER_PERSON", "100")))
-    except (KeyError, ValueError) as e:
-        return _err("bad_input", f"could not build PDF: {e}")
+    except (KeyError, ValueError, TypeError, AttributeError, IndexError) as e:   # e.g. stays as ids, a null date
+        return _err("bad_input", f"could not build PDF: {type(e).__name__}: {e}")
 
     trip_id = str(event.get("tripId") or f"trip_{int(time.time())}")
     key = f"plans/{trip_id}/{datetime.utcnow():%Y%m%dT%H%M%S}.pdf"

@@ -71,6 +71,12 @@ def _km(a, b):
     return 2 * r * math.asin(math.sqrt(h))
 
 
+def _full_day_park(p):
+    """A big theme park that takes the whole day (the same rule as tp-sequence-day)."""
+    return p.get("category") in ("requested", "attraction", "theme_park") and any(
+        w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q"))
+
+
 def _pool_get(ids):
     table = os.environ.get("CACHE_TABLE")
     if not table or not ids:
@@ -425,7 +431,9 @@ def verify(spec, it, pool, daily_spend):
                 and prev_place is not hotel_pt:
             busy += math.floor(_km(prev_place, hotel_pt) / FASTEST_CITY_KMH * 60)   # the trip back to the hotel
 
-        if stops and not trip_min:
+        # the ride limits are for city days: a day trip (dayTrip set) or a day at a full-day park shows no warning
+        park_day = any(_full_day_park(pool.get(s_.get("placeId"), {})) for s_ in stops)
+        if stops and not trip_min and not d.get("dayTrip") and not park_day:
             if (travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN or rides > MAX_RIDES_PER_DAY
                     or max_ride > ride_cap):
                 rep.warn("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
@@ -445,7 +453,51 @@ def verify(spec, it, pool, daily_spend):
     return {"ok": True, "passed": all(c["passed"] for c in checks), "checks": checks,
             "violations": rep.violations, "warnings": rep.warnings, "totals": totals}
 
+def _input_problem(spec, it):
+    """What makes the request unreadable (a bad_input message), or None. Checked before verify(), whose own
+    KeyError/TypeError/ValueError mean prices that cannot be read in the selected currency."""
+    def number(v):   # missing, or what verify() reads with int() / float()
+        if v is None:
+            return True
+        try:
+            int(v) if isinstance(v, str) else float(v)
+        except (TypeError, ValueError):
+            return False
+        return not isinstance(v, bool)
+    try:
+        int(spec.get("pax", 1))
+    except (TypeError, ValueError):
+        return "tripSpec.pax must be a whole number"
+    lists = {k: it.get(k) for k in ("days", "stays", "transfers") if it.get(k) is not None}
+    for k, v in lists.items():
+        if not isinstance(v, list) or not all(isinstance(x, dict) for x in v):
+            return f"itinerary.{k} must be a list of objects"
+    for d in it.get("days") or []:
+        try:   # a missing date fails the dates check instead
+            d.get("date") is None or date.fromisoformat(str(d["date"])[:10])
+        except ValueError:
+            return f"every day needs date as YYYY-MM-DD (got {d.get('date')!r})"
+        stops = d.get("stops")
+        if stops is not None and (not isinstance(stops, list) or not all(isinstance(s, dict) for s in stops)):
+            return f"{d['date']}: stops must be a list of objects"
+        if any(not number(s.get("travelMinutesFromPrev")) for s in stops or []):
+            return f"{d['date']}: travelMinutesFromPrev must be a number of minutes"
+        trip = d.get("dayTrip")
+        if isinstance(trip, dict) and (not number(trip.get("lat")) or not number(trip.get("lng"))
+                                       or not number(trip.get("travelMinutes"))):
+            return f"{d['date']}: dayTrip lat, lng and travelMinutes must be numbers"
+    return None
+
+
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
@@ -459,6 +511,11 @@ def lambda_handler(event, context):
         return _err("bad_input", "tripSpec needs startDate, endDate (YYYY-MM-DD) and budgetSGD")
     if end < start:
         return _err("bad_input", "endDate is before startDate")
+    problem = _input_problem(spec, it)
+    if problem:
+        return _err("bad_input", problem)
+    if isinstance(spec.get("mustVisit"), str):   # one placeId as text, not a list of letters
+        spec = {**spec, "mustVisit": [spec["mustVisit"]]}
 
     ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
     ids += [st.get("stayId") for st in it.get("stays") or [] if st.get("stayId")]

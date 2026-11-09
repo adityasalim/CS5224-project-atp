@@ -79,18 +79,19 @@ assert sights == {f"gplace:sight{i}" for i in range(6)}, sights   # 200 reviews 
 museums = [p["placeId"] for p in r["places"] if p["category"] == "museum"]
 assert set(museums) == {"gplace:onemuseum", "osm:node/0"}, museums   # the Google museum plus the chain's
 text_bodies = {b["textQuery"]: b for b in POSTS}
-assert set(text_bodies) == {"tourist attraction", "museum", "specialty coffee"}, list(text_bodies)
+# one extra "top sights in <city>" request per city sight call (final tools round), then one per category
+assert set(text_bodies) == {"top sights in Tokyo", "tourist attraction", "museum", "specialty coffee"}, list(text_bodies)
 assert text_bodies["tourist attraction"]["maxResultCount"] == 20 and text_bodies["tourist attraction"]["minRating"] == 4.0
 assert text_bodies["specialty coffee"]["maxResultCount"] == 8, "food keeps maxPerCategory results per request"
 assert fp.GOOGLE_SIGHT_MIN_REVIEWS == 200
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v8:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v9:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/0"}, "Google places are never cached"
 
 # warm call: Google is asked for the food and sights again, the chain is not
 CHAIN.clear(); POSTS.clear()
 w = fp.lambda_handler(ev, None)
 assert w["source"] == "google+overpass-cache" and CHAIN == [], (w["source"], CHAIN)
-assert {b["textQuery"] for b in POSTS} == {"tourist attraction", "museum", "specialty coffee"}
+assert {b["textQuery"] for b in POSTS} == {"top sights in Tokyo", "tourist attraction", "museum", "specialty coffee"}
 assert {p["placeId"] for p in w["places"]} == {p["placeId"] for p in r["places"]}
 
 # Google has every sight: no chain at all; with maxPerCategory 4, two good museums would be enough
@@ -118,7 +119,9 @@ STORE.clear(); POSTS.clear(); CHAIN.clear()
 many = ["museum", "temple", "shrine", "gallery", "historic", "market", "cafe"]
 fp.lambda_handler({"city": "Tokyo", "categories": many}, None)
 asked = [p["textQuery"] for p in POSTS if p["url"].endswith("searchText")]
-assert set(asked) - {"specialty coffee"} == {"museum", "temple", "shrine", "art gallery"}, asked
+# temples and shrines are asked by place type ("temples in Tokyo" + includedType), plus the one top-sights request
+assert set(asked) - {"specialty coffee"} == {"top sights in Tokyo", "museum", "temples in Tokyo", "shrines in Tokyo",
+                                             "art gallery"}, asked
 assert any("historic" in c and "market" in c for c in CHAIN), CHAIN
 # the same categories in another order send other sights to Google, so they never share a cache entry
 POSTS.clear(); CHAIN.clear()
@@ -129,7 +132,7 @@ assert not w["source"].endswith("-cache") and {p["category"] for p in w["places"
 STORE.clear(); POSTS.clear(); CHAIN.clear()
 saved_overpass, fp._overpass = fp._overpass, lambda q, deadline: (CHAIN.append(q["categories"]) or [], None)
 r = fp.lambda_handler({"city": "Tokyo", "categories": ["museum"]}, None)
-assert [p["textQuery"] for p in POSTS] == ["museum"], [p["textQuery"] for p in POSTS]
+assert [p["textQuery"] for p in POSTS] == ["top sights in Tokyo", "museum"], [p["textQuery"] for p in POSTS]
 ids = [p["placeId"] for p in r["places"]]
 assert len(ids) == len(set(ids)) and "gplace:thinmuseum" not in ids, ids    # no duplicate; 120 reviews stays out
 fp._overpass = saved_overpass

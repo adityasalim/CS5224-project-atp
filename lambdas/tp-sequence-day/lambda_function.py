@@ -8,10 +8,16 @@ ROUTE_MATRIX_FUNCTION is set; otherwise from the same distance estimate it uses.
 Opening hours are read for the planned date (hours_util): weekday rules, lunch breaks and closed days are
 respected, and a place that is closed that day is returned in "unscheduled".
 
-Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day starts no earlier
-than 11:30 and is nudged into the 12:00-14:00 window; any later restaurant or street-food stop starts no earlier
-than 17:30 (dinner). A keyword result such as "halal restaurant" (category "activity") counts as a restaurant.
-Cafes and desserts have no time floor, so a morning coffee is possible.
+Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day is lunch when it can
+start between 11:30 and 14:30 (nudged into the 12:00-14:00 window); when it cannot start by 14:30 it is dinner (no
+earlier than 17:30) and the response says "mealGaps": ["lunch"] (also when no meal stop fits at all), so the agent can
+add a lunch. Any later restaurant or street-food stop starts no earlier than 17:30 (dinner). A keyword result such as
+"halal restaurant" (category "activity") counts as a restaurant. Cafes and desserts have no time floor, so a morning
+coffee is possible.
+
+Full-day parks (_full_day_park: Disney, Universal Studios, Fuji-Q) use their pool opening hours, or 09:00-21:00 when
+the pool has none, and the visit runs from arrival to closing (at least 480 min, home by dayEnd); stops after it fit
+in what is left of the day or are unscheduled. A visitMinutes override for the park keeps that length.
 
 Optional limits (0 or missing = no limit): "maxStops" and "minFreeMinutes" keep the day within the verifier's
 pacing and free-time rules; stops that do not fit are returned in "unscheduled".
@@ -36,6 +42,7 @@ Input event (places can be given by ID only; details are read from the pool):
 import json
 import math
 import os
+from datetime import date
 
 import boto3
 
@@ -56,7 +63,9 @@ MEAL_CATEGORIES = ("restaurant", "street_food")
 # are not in this list on purpose: they stay long activities.
 FOOD_KEYWORDS = ("restaurant", "eatery", "dining")
 LUNCH_FLOOR = 11 * 60 + 30
+LUNCH_LATEST = 14 * 60 + 30   # a first meal that cannot start by then is the dinner
 DINNER_FLOOR = 17 * 60 + 30
+PARK_HOURS = (9 * 60, 21 * 60)   # a full-day park's opening hours when the pool has none
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
 # Longer walks switch to the car/taxi time for that hop (mode "walk"). 45 keeps a planner zone (1.2 km radius, so
@@ -126,9 +135,12 @@ def _matrix(points, mode):
             resp = boto3.client("lambda").invoke(
                 FunctionName=fn, Payload=json.dumps({"points": points, "mode": mode}).encode())
             data = json.loads(resp["Payload"].read())
-            if data.get("ok"):
-                return data["minutes"], data.get("source", "route-matrix")
-            print("route matrix error:", data)
+            m = data.get("minutes") if isinstance(data, dict) and data.get("ok") else None
+            n = len(points)
+            if (isinstance(m, list) and len(m) == n and all(isinstance(r, list) and len(r) == n for r in m)
+                    and all(isinstance(x, (int, float)) and not isinstance(x, bool) for r in m for x in r)):
+                return m, data.get("source", "route-matrix")
+            print("route matrix error:", str(data)[:300])
         except Exception as e:  # noqa: BLE001
             print("route matrix invoke failed:", e)
     return [[_estimate(a, b, mode) for b in points] for a in points], "estimate"
@@ -174,42 +186,61 @@ def _full_day_park(p):
 
 def _resolve(event):
     """Builds start + stops from IDs (via the pool) and/or full objects."""
-    ids = list(event.get("placeIds") or [])
+    place_ids = [event["placeIds"]] if isinstance(event.get("placeIds"), str) else list(event.get("placeIds") or [])
+    ids = list(place_ids)
     if event.get("stayId"):
         ids.append(event["stayId"])
     pool = _pool_get(ids)
 
     if event.get("start"):
         s = event["start"]
-        start = {"id": str(s.get("id", "start")), "name": s.get("name", "Hotel"),
-                 "lat": float(s["lat"]), "lng": float(s["lng"])}
+        try:
+            start = {"id": str(s.get("id", "start")), "name": s.get("name", "Hotel"),
+                     "lat": float(s["lat"]), "lng": float(s["lng"])}
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None, None, _err("bad_input", "start needs numeric lat and lng")
     elif event.get("stayId"):
         st = pool.get(event["stayId"])
-        if not st or st.get("lat") is None:
-            return None, None, _err("not_in_pool", f"stayId {event['stayId']} not found; search stays again")
+        if not st or st.get("lat") is None or st.get("lng") is None:
+            return None, None, _err("not_in_pool", f"stayId {event['stayId']} not found or without a location; "
+                                                   f"search stays again")
         start = {"id": st["id"], "name": st["name"], "lat": st["lat"], "lng": st["lng"]}
     else:
         return None, None, _err("bad_input", "give stayId or start {lat, lng}")
 
+    def park_hours(hours):
+        """A full-day park without opening hours in the pool is open PARK_HOURS."""
+        return {"known": True, "closed": False, "intervals": [PARK_HOURS]} if not hours["known"] else hours
+
     overrides = event.get("visitMinutes") or {}
     zones = event.get("zones") or {}
     stops, missing = [], []
-    for pid in event.get("placeIds") or []:
+    for pid in place_ids:
         p = pool.get(pid)
-        if not p:
+        if not p or p.get("lat") is None or p.get("lng") is None:
             missing.append(pid)
             continue
+        park = _full_day_park(p)
+        hours = hours_for(p, event.get("date"))
         stops.append({"placeId": pid, "name": p["name"], "category": p.get("category"),
                       "activity": p.get("activity"), "zone": zones.get(pid),
                       "lat": p["lat"], "lng": p["lng"],
-                      "hours": hours_for(p, event.get("date")),
-                      "visitMinutes": int(overrides.get(pid, _default_visit(p)))})
+                      "hours": park_hours(hours) if park else hours,
+                      "visitMinutes": int(overrides.get(pid, _default_visit(p))),
+                      **({"toClose": True} if park and pid not in overrides else {})})
     for s in event.get("stops") or []:
+        try:
+            lat, lng = float(s["lat"]), float(s["lng"])
+        except (KeyError, TypeError, ValueError):
+            return None, None, _err("bad_input", f"stop {s.get('placeId')} needs numeric lat and lng")
+        park = _full_day_park(s)
+        hours = hours_for({"openSimple": s.get("openSimple")})
         stops.append({"placeId": str(s["placeId"]), "name": s.get("name", s["placeId"]),
                       "category": s.get("category"), "activity": s.get("activity"), "zone": s.get("zone"),
-                      "lat": float(s["lat"]), "lng": float(s["lng"]),
-                      "hours": hours_for({"openSimple": s.get("openSimple")}),
-                      "visitMinutes": int(s.get("visitMinutes") or _default_visit(s))})
+                      "lat": lat, "lng": lng,
+                      "hours": park_hours(hours) if park else hours,
+                      "visitMinutes": int(s.get("visitMinutes") or _default_visit(s)),
+                      **({"toClose": True} if park and not s.get("visitMinutes") else {})})
     if missing:
         return None, None, _err("not_in_pool", f"placeIds not found (expired or never searched): {missing}",
                                 missing=missing)
@@ -264,15 +295,26 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             travel, how = _hop(walk_m, car_m, cur, i, mode)
             arrive = t + travel
             is_meal = lunch and _is_meal(s)
-            floor = (DINNER_FLOOR if meals_done else LUNCH_FLOOR) if is_meal else 0
-            begin = fit_visit(s["hours"], max(arrive, floor), s["visitMinutes"])
+            begin = None
+            if is_meal and not meals_done:      # the first meal is lunch only when it can start by LUNCH_LATEST
+                begin = fit_visit(s["hours"], max(arrive, LUNCH_FLOOR), s["visitMinutes"])
+                begin = begin if begin is not None and begin <= LUNCH_LATEST else None
+            if begin is None:                   # else a meal is dinner
+                begin = fit_visit(s["hours"], max(arrive, DINNER_FLOOR if is_meal else 0), s["visitMinutes"])
             if begin is None:                   # closed that day, or never fits an opening interval
                 continue
-            end = begin + s["visitMinutes"]
             back, _ = _hop(walk_m, car_m, i, 0, mode)
+            visit = s["visitMinutes"]
+            if s.get("toClose"):   # a full-day park: from arrival to closing, home by the day's end, free time kept
+                close = next(c for o, c in sorted(s["hours"]["intervals"]) if o <= begin and begin + visit <= c)
+                last = day_end - back
+                if min_free:
+                    last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back)
+                visit = max(visit, min(close, last) - begin)
+            end = begin + visit
             if end + back > day_end:
                 continue
-            if min_free and busy + travel + s["visitMinutes"] + back > (day_end - day_start) - min_free:
+            if min_free and busy + travel + visit + back > (day_end - day_start) - min_free:
                 continue                        # would leave less free time than required
             score = end
             if long_first and s["visitMinutes"] >= 120:
@@ -307,10 +349,10 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
         out.append({"placeId": s["placeId"], "name": s["name"], "category": s.get("category"),
                     "lat": s["lat"], "lng": s["lng"], "travelMinutesFromPrev": travel, "travelBy": how,
                     "arriveAt": _fmt(begin), "departAt": _fmt(end),
-                    "waitMinutes": max(begin - arrive, 0), "visitMinutes": s["visitMinutes"]})
+                    "waitMinutes": max(begin - arrive, 0), "visitMinutes": end - begin})
         if lunch and _is_meal(s):
             meals_done += 1
-        busy += travel + s["visitMinutes"]
+        busy += travel + end - begin
         t, cur = end, i
         remaining.remove(i)
     back_minutes = _hop(walk_m, car_m, cur, 0, mode)[0] if out else 0
@@ -323,6 +365,14 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
 
 
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
@@ -330,6 +380,11 @@ def lambda_handler(event, context):
         day_start, day_end = _hm(event.get("dayStart", "09:00")), _hm(event.get("dayEnd", "21:00"))
     except ValueError:
         return _err("bad_input", "dayStart/dayEnd must be HH:MM")
+    if event.get("date") is not None:
+        try:
+            date.fromisoformat(str(event["date"])[:10])   # as hours_util reads it
+        except ValueError:
+            return _err("bad_input", "date must be YYYY-MM-DD")
     if day_end - day_start < 60:
         return _err("bad_input", "day window must be at least 1 hour")
     mode = str(event.get("mode", "walk")).lower()
@@ -374,6 +429,10 @@ def lambda_handler(event, context):
         sum(x["placeId"] in pinned for x in fo[1][0]), bool(fo[1][0]) and fo[1][0][0]["placeId"] in parks,
         len(fo[1][0]), -returns(fo[1]), fo[0] is None,
         -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
+    # a day with meal stops but no lunch (its first meal could not start by LUNCH_LATEST): the agent can add one
+    meal_ids = {s["placeId"] for s in stops if _is_meal(s)}
+    lunch_had = any(o["placeId"] in meal_ids and _hm(o["arriveAt"]) <= LUNCH_LATEST for o in ordered)
     return {"ok": True, "date": event.get("date"), "start": start, "stops": ordered,
             "returnToStartMinutes": back, "freeTimeMinutes": free, "unscheduled": unscheduled,
+            "mealGaps": ["lunch"] if lunch and meal_ids and not lunch_had else [],
             "dayStart": _fmt(day_start), "dayEnd": _fmt(day_end), "travelTimeSource": src}

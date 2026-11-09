@@ -38,12 +38,12 @@ cold = time.time() - t0
 assert r["ok"] and r["source"].startswith("google+overpass"), r["source"]
 assert SIGHTS == [["temple"]], "food categories never go to Overpass when Google answers; one Google temple is too few"
 assert all("places.userRatingCount" in p["mask"] and "places.types" in p["mask"] and p["minRating"] == 4.0 for p in POSTS)
-assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant", "temple"}, POSTS
+assert {p["textQuery"] for p in POSTS} == {"top sights in Kyoto", "specialty coffee", "italian restaurant", "temples in Kyoto"}, POSTS
 food = [p for p in r["places"] if p["category"] in ("cafe", "restaurant")]
 assert food and {p["name"] for p in food} == {"Good Roaster"}, "few reviews and closed venues are dropped"
 assert food[0]["reviews"] == 1200 and food[0]["rating"] == 4.7 and food[0]["priceLevel"] == "PRICE_LEVEL_MODERATE"
 assert "Google Maps" in r["attribution"]
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v8:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v9:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/1"}, "Google places are not cached"
 
 # warm call: the cached sights come back without Overpass, the food is asked from Google again
@@ -52,7 +52,7 @@ t0 = time.time()
 w = fp.lambda_handler(event, None)
 warm = time.time() - t0   # the warm call asks Google for the food and the temple again
 assert w["source"] == "google+overpass-cache" and SIGHTS == [], (w["source"], SIGHTS)
-assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant", "temple"}, POSTS
+assert {p["textQuery"] for p in POSTS} == {"top sights in Kyoto", "specialty coffee", "italian restaurant", "temples in Kyoto"}, POSTS
 assert {p["name"] for p in w["places"]} == {p["name"] for p in r["places"]} and w["places"][0]["placeId"].startswith("gplace:")
 print(f"find_places with fakes: cold {cold:.2f} s ({len(r['places'])} places), warm {warm:.2f} s (Google food and sights only)")
 assert warm < cold / 2
@@ -61,7 +61,7 @@ assert warm < cold / 2
 STORE.clear(); SIGHTS.clear()
 fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestException("down"))
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
-assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v8:") for k in STORE), (SIGHTS, list(STORE))
+assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v9:") for k in STORE), (SIGHTS, list(STORE))
 
 # warm call while Google is down: one Google attempt, then the chain finds the food
 fp.requests.post = fake_post
@@ -103,12 +103,12 @@ fp._amazon_location = _amazon_location
 STORE.clear()
 fp.requests.post = fake_post
 k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywords": ["pour-over coffee"]}, None)
-assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v8:") for s in STORE), (k["source"], list(STORE))
+assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v9:") for s in STORE), (k["source"], list(STORE))
 fp._overpass = lambda q, deadline: ([], None)
 g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
 # the temple was already asked from Google (with the review floor), so the chain's Google step does not ask again
 assert g["source"] == "google" and "google skipped: already searched" in g.get("fallbacksTried", []), g
-stored = [json.loads(v["payload"]) for s, v in STORE.items() if s.startswith("places-v8:")]
+stored = [json.loads(v["payload"]) for s, v in STORE.items() if s.startswith("places-v9:")]
 assert all(not p["placeId"].startswith("gplace:") for c in stored for p in c["places"]), "Google places are never cached"
 fp._overpass = _overpass
 

@@ -115,15 +115,33 @@ Set `MOCK_MODE=false` per function. Fallbacks, all labelled in the `source` fiel
   1, or 2 above economy); results are cached 6 h (`google_flights-cache`).
   SerpApi's free plan is 250 searches/month.
 - stays: Duffel Stays → liteAPI → mock (`mock-fallback`)
-- places: Overpass (2 servers) → Amazon Location Places → Google Places → mock (`mock-fallback`); the whole chain finishes within `TIME_BUDGET_SECONDS` (default 40) so it never hits the 60 s Lambda timeout.
+- places: Overpass (2 servers) → Amazon Location Places → Google Places → mock (`mock-fallback`); the whole call,
+  the city geocode included, finishes within `TIME_BUDGET_SECONDS` (default 45) so it never hits the 60 s Lambda
+  timeout.
   With `GOOGLE_MAPS_KEY` in the secret, restaurants, cafes and desserts come from Google Places Text Search first
-  (rating 4.0+, 50+ reviews). Google food is never cached, so cached calls ask Google again: one Tokyo + Kyoto plan
-  makes about 40 Text Search requests. Set a daily Places API (New) Text Search quota of about 2,000 (50 plans), a
-  billing budget alert, and restrict the key to Places API (New). Past the quota, food falls back to the free chain
-  without an error.
+  (rating 4.0+, 50+ reviews), and so do up to 4 sight categories (4.0+, 200+ reviews). A city sight call also makes
+  one "top sights in <city>" Text Search first (same floor; `searchedAs: "top_sights"`, tag `top sight`), so it
+  makes 1 + (Google-first sight categories, at most 4) + (food categories) requests; temples and shrines are searched
+  as "temples in <city>" / "shrines in <city>" with `includedType` `buddhist_temple` / `shinto_shrine` (shrines with
+  `strictTypeFiltering`). Google results are never cached, so cached calls ask Google again: one Tokyo + Kyoto plan
+  makes about 40 Text Search requests, plus 1 per city sight call. Set a daily Places API (New) Text Search quota of
+  about 2,000 (50 plans), a billing budget alert, and restrict the key to Places API (New). Past the quota, food falls
+  back to the free chain without an error.
 - route matrix: Amazon Location → distance estimate (`estimate`)
 - transfers: one-way flights from Google Flights via SerpApi (`google_flights+estimate`, 1 SerpApi search per hop,
-  cached 6 h) → Duffel (`duffel+estimate`) → ground estimate only (`estimate`)
+  cached 6 h) → Duffel (`duffel+estimate`) → ground estimate only (`estimate`). An estimate-only answer after a
+  passing SerpApi or Duffel error (429/5xx, timeout, an unreadable reply) is not cached, so the next call searches
+  again. The city geocodes (Amazon Location, us-east-1) count against the same time budget.
+
+Every tool answers a malformed provider reply (an HTML page, a null list, a place without an id or a location, a
+price such as `"$1,234"`) by going on to the next provider, and bad agent input (a date or pax it cannot read, a
+non-numeric lat) with its usual error shape (`"error": "bad_input"`), never an exception. A single string where a list
+is expected (categories, airlines, placeIds, caveats, mustVisit) is one item.
+
+`tp-sequence-day`: a full-day park (Disney, Universal Studios, Fuji-Q) is open 09:00-21:00 when the pool has no hours
+and its visit runs from arrival to closing (home by `dayEnd`); a first meal that cannot start by 14:30 is the dinner
+and the answer has `"mealGaps": ["lunch"]`. `tp-verify-itinerary`: the longest-ride rule (`maxRideMinutes`) and the
+other commute warnings apply to city days only; a day with `dayTrip` or with a full-day park stop gets none.
 
 The liteAPI and Google field names follow their current docs. If a fallback returns no results,
 check the CloudWatch log and compare the response with the provider docs.

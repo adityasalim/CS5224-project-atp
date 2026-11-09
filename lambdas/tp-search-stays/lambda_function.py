@@ -10,7 +10,8 @@ Environment variables:
   CACHE_TABLE  DynamoDB cache table (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = sample data only, no API calls (default "true")
   STAYS_PROVIDERS         optional, default "liteapi,duffel": providers to try, in order
-  PROVIDER_TIME_BUDGET_S  optional, default 60: total seconds for all providers before falling back to mock
+  PROVIDER_TIME_BUDGET_S  optional, default 60 (at most the Lambda's remaining time - 8 s): total seconds for the
+                          geocodes and all providers before falling back to mock
   REQUEST_TIMEOUT_S       optional, default 60: longest wait for one HTTP request
   LITEAPI_TIMEOUT_S       optional, default 45: wait for the liteAPI rates call (large searches are slower)
   CACHE_TTL_SECONDS  default 21600 (6 h);  POOL_TTL_SECONDS  default 86400 (24 h)
@@ -48,6 +49,7 @@ from decimal import Decimal
 
 import boto3
 import requests  # from the tp-deps layer
+from botocore.config import Config
 
 DEFAULT_MAX_RESULTS = 30
 DEFAULT_LIMIT = 100
@@ -137,6 +139,32 @@ def _clamp_int(value, default, lo, hi):
         return default
 
 
+def _price(v):
+    """A price as a float: a number, or text such as "1200" or "$1,234"; None when there is no usable price."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(re.sub(r"[^\d.]", "", str(v)))
+    except ValueError:
+        return None
+
+
+def _geo_client():
+    """An Amazon Location (us-east-1) client whose worst case (every attempt timing out) ends within the time budget:
+    up to 3 attempts of 4 s connect + 8 s read while the budget allows, else one shorter attempt. None when less than
+    3 s are left."""
+    left = min(_time_left(), 1e6) - 1
+    if left < 3:
+        return None
+    tries = max(1, min(3, int(left // 12)))
+    connect = min(4.0, left / 3)
+    return boto3.client("geo-places", config=Config(region_name="us-east-1", connect_timeout=connect,
+                                                    read_timeout=min(8.0, left / tries - connect),
+                                                    retries={"total_max_attempts": tries}))
+
+
 def _geocode(city, allow_known=True):
     parts = [x.strip().lower() for x in city.split(",") if x.strip()]
     known = (KNOWN_CITIES.get(city.strip().lower()) or (KNOWN_CITIES.get(parts[-1]) if parts else None)) \
@@ -144,8 +172,9 @@ def _geocode(city, allow_known=True):
     if os.environ.get("MOCK_MODE", "true").lower() == "true":
         return known
     try:
-        r = boto3.client("geo-places", region_name="us-east-1").geocode(QueryText=city, MaxResults=1)
-        items = r.get("ResultItems", [])
+        client = _geo_client()
+        r = client.geocode(QueryText=city, MaxResults=1) if client else {}
+        items = r.get("ResultItems") or []
         if items:
             lng, lat = items[0]["Position"]
             return lat, lng
@@ -158,18 +187,24 @@ def _validate(event):
     try:
         check_in = date.fromisoformat(event["checkIn"])
         check_out = date.fromisoformat(event["checkOut"])
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None, _err("bad_input", "checkIn and checkOut must be YYYY-MM-DD")
     if check_in < date.today():
         return None, _err("bad_input", "checkIn is in the past")
     nights = (check_out - check_in).days
     if not 1 <= nights <= 30:
         return None, _err("bad_input", "stay must be 1-30 nights")
-    guests = int(event.get("guests", 2))
+    try:
+        guests = int(event.get("guests", 2))
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "guests must be a whole number 1-8")
     if not 1 <= guests <= 8:
         return None, _err("bad_input", "guests must be 1-8")
     if event.get("lat") is not None and event.get("lng") is not None:
-        lat, lng = float(event["lat"]), float(event["lng"])
+        try:
+            lat, lng = float(event["lat"]), float(event["lng"])
+        except (TypeError, ValueError):
+            return None, _err("bad_input", "lat and lng must be numbers")
         place = event.get("city") or f"{lat:.4f},{lng:.4f}"
     elif event.get("city"):
         coords = _geocode(str(event["city"]))
@@ -208,7 +243,7 @@ def _validate(event):
          "checkIn": check_in.isoformat(), "checkOut": check_out.isoformat(), "nights": nights,
          "guests": guests, "rooms": math.ceil(guests / 2),
          "maxPricePerNightSGD": float(max_pn) if max_pn else None,
-         "radiusKm": min(max(float(event.get("radiusKm", DEFAULT_RADIUS_KM)), 1), 25),
+         "radiusKm": min(max(float(DEFAULT_RADIUS_KM if event.get("radiusKm") is None else event["radiusKm"]), 1), 25),
          "limit": _clamp_int(event.get("limit"), DEFAULT_LIMIT, 10, 200),
          "maxResults": _clamp_int(event.get("maxResults"), DEFAULT_MAX_RESULTS, 5, 60),
          "minKeep": _clamp_int(event.get("minKeep"), DEFAULT_MIN_KEEP, 1, 60),
@@ -332,13 +367,19 @@ def _duffel(q):
         return None, "duffel Stays is not enabled on this account (skipping it from now on)"
     if r.status_code >= 400:
         return None, f"duffel http {r.status_code}: {r.text[:200]}"
+    try:
+        data = r.json()
+    except ValueError:
+        return None, "duffel sent a reply that is not JSON"
     out = []
-    for res in r.json().get("data", {}).get("results", []):
-        acc = res.get("accommodation", {})
-        loc = acc.get("location", {})
-        geo = loc.get("geographic_coordinates", {})
-        addr = loc.get("address", {})
-        amount = res.get("cheapest_rate_total_amount")
+    for res in ((data.get("data") or {}).get("results") or []) if isinstance(data, dict) else []:
+        if not isinstance(res, dict) or not res.get("id"):
+            continue
+        acc = res.get("accommodation") or {}
+        loc = acc.get("location") or {}
+        geo = loc.get("geographic_coordinates") or {}
+        addr = loc.get("address") or {}
+        amount = _price(res.get("cheapest_rate_total_amount"))
         if amount is None:
             continue
         out.append(_stay("duffel:" + res["id"], acc.get("name", "Unnamed hotel"), acc.get("rating"),
@@ -391,22 +432,32 @@ def _liteapi(q):
         return None, f"liteapi {err}"
     if r.status_code >= 400:
         return None, f"liteapi http {r.status_code}: {r.text[:200]}"
-    data = r.json()
+    try:
+        data = r.json()
+    except ValueError:
+        return None, "liteapi sent a reply that is not JSON"
+    if not isinstance(data, dict):
+        return None, "liteapi sent a reply that is not JSON"
     # Field names follow liteAPI v3 docs; if results come back empty, compare with
     # https://docs.liteapi.travel/reference/overview and adjust here.
-    hotels = {h.get("id"): h for h in data.get("hotels", [])}
+    hotels = {h.get("id"): h for h in data.get("hotels") or [] if isinstance(h, dict)}
     out = []
-    for row in data.get("data", []):
-        rooms = row.get("roomTypes", [])
-        prices = [rt.get("offerRetailRate", {}) for rt in rooms if rt.get("offerRetailRate")]
+    for row in data.get("data") or []:
+        if not isinstance(row, dict) or row.get("hotelId") is None:
+            continue
+        rooms = row.get("roomTypes") or []
+        # a rate without a readable amount ("$1,234" reads as 1234, a missing one is skipped)
+        prices = [(_price(rt["offerRetailRate"].get("amount")), rt["offerRetailRate"]) for rt in rooms
+                  if isinstance(rt, dict) and isinstance(rt.get("offerRetailRate"), dict)]
+        prices = [(a, p) for a, p in prices if a is not None]
         if not prices:
             continue
-        best = min(prices, key=lambda p: float(p.get("amount", 1e12)))
+        amount, best = min(prices, key=lambda ap: ap[0])
         h = hotels.get(row.get("hotelId"), {})
         out.append(_stay("lite:" + str(row.get("hotelId")), h.get("name", "Unnamed hotel"),
                          *_liteapi_ratings(h),
                          h.get("latitude"), h.get("longitude"), h.get("address", ""),
-                         best["amount"], best.get("currency", "SGD"), q, "liteapi",
+                         amount, best.get("currency") or "SGD", q, "liteapi",
                          review_count=_liteapi_review_count(h)))
     return out, None
 
@@ -602,6 +653,14 @@ def _providers():
 
 
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event, context)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event, context):
     global _DEADLINE
     budget = float(os.environ.get("PROVIDER_TIME_BUDGET_S", "60"))
     try:   # never closer than 8 s to the Lambda timeout, so the mock fallback and cache writes still run
@@ -638,7 +697,10 @@ def lambda_handler(event, context):
         if _time_left() < 4:
             attempts.append(f"{pname} skipped: time budget used up")
             continue
-        stays, err = provider(q)
+        try:
+            stays, err = provider(q)
+        except Exception as e:  # noqa: BLE001 -- an unreadable provider reply: try the next provider
+            stays, err = None, f"{pname} reply could not be read: {type(e).__name__}: {str(e)[:120]}"
         if err:
             attempts.append(err)
             print("provider failed:", err)
