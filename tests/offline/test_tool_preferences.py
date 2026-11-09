@@ -255,3 +255,21 @@ try:
 finally:
     os.environ.pop("STAYS_PROVIDERS", None)
 print("STAYS PROVIDER ORDER OK")
+
+# ---------------------------------------------------------------- Gateway tool schemas use only keys the Gateway accepts
+import pathlib
+SCHEMA_KEYS = {"type", "properties", "required", "items", "description"}   # the Gateway's SchemaDefinition
+
+
+def bad_keys(node, path):
+    if isinstance(node, dict):
+        out = [f"{path}.{k}" for k in node if k not in SCHEMA_KEYS]
+        out += [p for k, v in (node.get("properties") or {}).items() for p in bad_keys(v, f"{path}.properties.{k}")]
+        return out + (bad_keys(node["items"], path + ".items") if "items" in node else [])
+    return []
+
+
+for f in sorted((pathlib.Path(__file__).resolve().parents[2] / "lambdas" / "schemas").glob("*.json")):
+    tool = json.loads(f.read_text(encoding="utf-8"))
+    assert not bad_keys(tool["inputSchema"], f.name + ".inputSchema"), bad_keys(tool["inputSchema"], f.name)
+print("SCHEMA KEYS OK")
