@@ -146,6 +146,9 @@ assert [o["priceTotalSGD"] for o in r["offers"]] == [900.0, 1234.0], r["offers"]
 # bad agent input
 for bad in ({"pax": "two"}, {"pax": None}, {"departDate": None}, {"departDate": 20270310}, {"maxStops": "one"}):
     assert fl.lambda_handler({**ONE, **bad}, None)["error"] == "bad_input", bad
+assert "pax must be a whole number" in fl.lambda_handler({**ONE, "pax": "two"}, None)["message"]
+# anything else it cannot read is bad_input too, never an exception
+assert fl.lambda_handler({**ONE, "avoidAirlines": 5}, None)["error"] == "bad_input"
 fl.requests.get = replies(R({"best_flights": [opt(900)]}))
 assert fl.lambda_handler({**ONE, "preferredAirlines": "SQ"}, None)["query"]["preferredAirlines"] == ["sq"]
 print("FLIGHTS ROBUST OK")
@@ -175,6 +178,13 @@ STORE.clear()
 st.requests.post = replies(R(lite({"amount": "$1,234", "currency": "SGD"}, {"currency": "SGD"}, {"amount": 900})))
 r = st.lambda_handler(dict(EV), None)
 assert r["source"] == "liteapi" and r["stays"][0]["priceTotal"] == 900.0, r["stays"][0]
+# a provider reply that breaks while it is read (a hotel name null) is that provider's failure: Duffel answers
+STORE.clear()
+NULL_NAME = lite({"amount": 900, "currency": "SGD"})
+NULL_NAME["hotels"][0]["name"] = None
+st.requests.post = replies(R(NULL_NAME), R(DSTAY))
+r = st.lambda_handler(dict(EV), None)
+assert r["source"] == "duffel" and "liteapi reply could not be read" in r["fallbacksTried"][0], r.get("fallbacksTried")
 for bad in ({"guests": "two"}, {"checkIn": None}, {"lat": "abc"}, {"minStars": "4 stars"}):
     assert st.lambda_handler({**EV, **bad}, None)["error"] == "bad_input", bad
 assert st.lambda_handler({**EV, "radiusKm": None}, None)["query"]["radiusKm"] == 8.0
