@@ -327,11 +327,11 @@ assert r["specChanges"] == {"avoid": ["crowds"], "mustInclude": ["Tokyo Tower"],
 A.ask_json = lambda *a, **k: {"intent": "modify", "specChanges": {"preferences": {"vibe": "classic"}}}
 assert A.route(st, "msg", A.Usage())["specChanges"] == {"preferences": {"vibe": "classic"}}, "an object is kept"
 # a stored spec whose avoid is one string: the meal, cuisine, score and review steps read it as one word
-avs = {**spec1, "avoid": "crowds", "preferences": {**spec1["preferences"], "avoid": "crowds"}}
+avs = {**spec1, "avoid": "crowds", "preferences": {**spec1["preferences"], "avoid": ["crowds"]}}   # list + string
 crowd = pl("cr", "restaurant", name="Crowds Bar")
 assert A._place_score(crowd, avs) < A._place_score(crowd, spec1), "the avoided word lowers the score"
 quiet(A._balance_meals, avs, pool1, copy.deepcopy(plan1))
-quiet(A._swap_wished_cuisines, avs, pool1, copy.deepcopy(plan1))
+quiet(A._swap_wished_cuisines, {**avs, "cuisines": ["sushi"]}, pool1, copy.deepcopy(plan1))   # a missing cuisine
 assert any("crowds" in json.dumps(i).lower() for i in quiet(A._deterministic_quality_eval, avs,
            {**pool1, "places": pool1["places"] + [crowd]}, {"days": [{"date": "2026-12-11", "placeIds": ["cr"]}]})["issues"])
 restore()
