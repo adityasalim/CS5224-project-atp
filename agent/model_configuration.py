@@ -111,7 +111,7 @@ class ModelConfiguration:
             ):
                 raise ValueError('Unsupported provider options')
             if 'speed' in options and (provider != 'anthropic' or options['speed'] != 'fast'
-                                       or not str(row.get('model', '')).startswith('claude-opus')):
+                                       or row.get('model') not in ('claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8')):
                 raise ValueError('speed "fast" is only for Claude Opus on the Anthropic API')
 
             if (

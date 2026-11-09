@@ -372,11 +372,12 @@ ad_c.operation = "proposal"
 A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner")
 assert claude.calls[-1]["speed"] == "fast" and claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01", "fast-mode-2026-02-01"]
 assert ad_c.records[-1]["speed"] == "fast"
-class RateLimitError(Exception): pass
+class RampLimitExceededError(Exception):   # one of the SDK's 429 subclasses
+    status_code = 429
 calls_before, real_stream = len(claude.calls), claude.beta.messages.stream
 def limited(**kw):
     if kw.get("speed"):
-        claude.calls.append(kw); raise RateLimitError("fast mode rate limit")
+        claude.calls.append(kw); raise RampLimitExceededError("ramp_limit_exceeded")
     return real_stream(**kw)
 claude.beta.messages.stream = limited
 assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner") == {"ok": True}
@@ -594,6 +595,11 @@ class MemStore:
 store = MemStore()
 ledger = BudgetLedger(store, cap_usd="50", provider_caps={"anthropic": "50"}, enforce_spending_caps=True,
                       quotes=[PriceQuote.parse(q) for q in json.loads((AGENT / "public-model-prices.json").read_text())["quotes"]])
+r_fast = ledger.authorize(ad_c.configuration.selections["planner"], "s", MSG, 1000)
+r_norm = ledger.authorize(SimpleNamespace(provider="anthropic", model_id="claude-opus-5-5", options={}), "s", MSG, 1000)
+assert r_fast.maximum == 2 * r_norm.maximum, "fast mode reserves 2x"
+raises(ValueError, lambda: ModelConfiguration.parse({**json.loads((AGENT / "public-model-config.json").read_text()),
+       "planner": {"provider": "anthropic", "model": "claude-opus-4-7", "options": {"speed": "fast"}}}), "Opus")
 web = FakeAnthropic('{"picks": []}'); web.messages.stream.reply.model = "claude-sonnet-5-5"
 web.messages.stream.reply.usage = SimpleNamespace(input_tokens=120000, output_tokens=2500, cache_read_input_tokens=0,
                                                   cache_creation_input_tokens=0, server_tool_use=SimpleNamespace(web_search_requests=3))

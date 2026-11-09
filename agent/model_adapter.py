@@ -167,11 +167,11 @@ class ModelAdapter:
                     # fast mode's own rate limit, or fast mode not enabled for this account (beta): retry at normal speed
                     refused=type(error).__name__ in ('BadRequestError','PermissionDeniedError') and any(
                         w in str(error).lower() for w in ('speed','fast'))
-                    if not fast or not (type(error).__name__=='RateLimitError' or refused):raise
+                    if not fast or not (getattr(error,'status_code',None)==429 or refused):raise   # any 429, incl. ramp limits
                     fast=False
                     with client.beta.messages.stream(**request,betas=betas[:1],fallbacks='default') as stream:
                         result=stream.get_final_message()
-                if fast:row['speed']='fast'
+                if fast and getattr(result.usage,'speed',None) in (None,'fast'):row['speed']='fast'   # as served when reported
                 text=''.join(b.text for b in result.content if b.type=='text')
                 # the pages the search really returned, so a cited source can be checked against them
                 web_urls=[r.url for b in result.content if b.type=='web_search_tool_result' and isinstance(b.content,list)
