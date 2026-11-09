@@ -433,6 +433,14 @@ hint = E["_enrich_violations"]({}, h_pool, {"days": [{"date": "2026-12-05", "pla
                                {"violations": [{"check": "commute", "day": "2026-12-05", "message": "long ride"}]},
                                [])[0]["repairHint"]
 assert "cand" in hint and "hidden" not in hint, hint
+# far-from-base, opening-hours and travel-time hints name nearby swaps (these used to raise NameError: _day_centre)
+for chk in ("far_from_base", "opening_hours", "travel_time"):
+    out = E["_enrich_violations"]({}, h_pool, {"days": [{"date": "2026-12-05", "placeIds": ["senso", "ueno"]}]},
+                                  {"violations": [{"check": chk, "day": "2026-12-05", "item": "ueno", "message": "x"}]}, [])
+    assert "km from the day's stops" in out[0].get("repairHint", ""), (chk, out)
+assert E["_day_centre"](h_pool, {"days": [{"date": "2026-12-05", "placeIds": ["senso", "ueno"]}]}, "2026-12-05",
+                        exclude_id="ueno") == {"lat": SENSO[0], "lng": SENSO[1]}
+assert E["_day_centre"](h_pool, {"days": []}, "2026-12-05") is None
 assert A["_cafes_per_day"]({"preferences": {"food": {"perDay": 2}}}) == 2
 assert A["_cafes_per_day"]({"activities": ["two coffees daily"], "preferences": {"notes": "coffee lover"}}) == 0
 diag = A["_deterministic_quality_eval"](

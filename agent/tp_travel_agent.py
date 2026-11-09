@@ -3361,6 +3361,16 @@ def _used_place_ids(plan_or_seq):
     return used
 
 
+def _day_centre(pool, plan, day, exclude_id=None):
+    """{lat, lng}: the middle of a day's planned places (without exclude_id), or None when none has coordinates."""
+    d = next((x for x in (plan or {}).get("days") or [] if x.get("date") == day), {})
+    ids = set(d.get("placeIds") or [s.get("placeId") for s in d.get("stops") or []]) - {exclude_id}
+    pts = [p for p in pool.get("places", []) if p.get("placeId") in ids and p.get("lat") is not None]
+    if not pts:
+        return None
+    return {"lat": sum(p["lat"] for p in pts) / len(pts), "lng": sum(p["lng"] for p in pts) / len(pts)}
+
+
 def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, limit=3, near=None):
     """Select top-ranked unused candidates from pool['places'] matching optional predicate and city.
     With near={lat,lng} (e.g. the middle of the day), the best-ranked candidates are re-sorted by distance to it."""
