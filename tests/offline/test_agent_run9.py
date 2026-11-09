@@ -181,6 +181,15 @@ assert got4 == [("2026-12-16", "fd1")], "me1, am1, fd2 and fd_k conflict; fd1 is
 A._dietary_status = saved_status
 for p in pool["places"]:
     p.pop("description", None)
+# an avoided word and known hours outside lunch and dinner block a new meal too
+plan5b = copy.deepcopy(before)
+got5 = {s["date"]: s["to"] for s in A._swap_wished_cuisines({**spec, "avoid": ["burger"]}, pool, plan5b)}
+assert got5 == {"2026-12-16": "me1", "2026-12-20": "fd_k"}, got5     # every American place is a burger place
+by_id["me1"]["openSimple"] = {"open": "06:00", "close": "09:00"}
+plan5c = copy.deepcopy(before)
+got6 = {s["date"]: s["to"] for s in A._swap_wished_cuisines(spec, pool, plan5c)}
+del by_id["me1"]["openSimple"]
+assert got6 == {"2026-12-20": "am1", "2026-12-16": "fd1"}, got6     # me1 serves breakfast only
 # improve() swaps before sequencing, so the swapped meal is ordered and verified like any other stop
 src = open(A.__file__, encoding="utf-8").read()
 body = src[src.index("def improve("):src.index("def deliver_refused(")]
@@ -341,4 +350,10 @@ del fakes.FPDF.cell
 shown = [(w, t, l) for w, t, l in cells if "Blue Bottle" in str(t) or "Glitch" in str(t)]
 assert shown[0][1].endswith(" (Blue Bottle Coffee Toyosu Park Cafe)") and shown[0][2] == maps_before, shown
 assert shown[1][1] == "Glitch Coffee", shown
+# the trip summary writer sees the shown names too
+facts_seen = []
+A.ask_json = lambda model, system, text, usage, **k: facts_seen.append(system) or {"title": "t", "summary": "s", "dayNotes": {}}
+A._narrative_request(g_spec, {**g_seq, "stayId": "h1"}, {**d_pool, "stays": [{"stayId": "h1", "name": "Hotel"}]}, A.Usage())
+A.ask_json = real_ask
+assert f'"{BLUE} (Blue Bottle Coffee Toyosu Park Cafe)", "Starbucks スターバックス"' in facts_seen[0], facts_seen[0][-600:]
 print("GLOSS NAMES OK")
