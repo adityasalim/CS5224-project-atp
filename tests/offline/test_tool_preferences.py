@@ -24,20 +24,21 @@ class FarFirst:
     def geocode(self, **k):
         GEOCODES.append(k)
         return {"ResultItems": [{"Position": [121.18, 14.59]},      # Antipolo, Philippines
-                                {"Position": [138.73, 35.36]}]}     # Mount Fuji, about 100 km from Tokyo
+                                {"Position": [138.73, 35.36]}]}     # Fujinomiya, about 100 km from Tokyo
 
 
 near_tokyo = {"lat": 35.68, "lng": 139.77}
 saved = fp._mock_mode, fp.boto3.client
 try:
     fp._mock_mode, fp.boto3.client = (lambda: False), (lambda name, **k: FarFirst())
-    q, error = fp._validate({"city": "Mount Fuji", "near": near_tokyo, "categories": ["viewpoint"]})
+    # a name that is not a landmark (LANDMARKS answers Mount Fuji before any geocode, tested in test_run6_tools)
+    q, error = fp._validate({"city": "Fujinomiya", "near": near_tokyo, "categories": ["viewpoint"]})
     assert error is None and (q["lat"], q["lng"]) == (35.36, 138.73), q
     assert GEOCODES[-1]["BiasPosition"] == [139.77, 35.68] and GEOCODES[-1]["MaxResults"] > 1, GEOCODES[-1]
-    r = fp.lambda_handler({"city": "Mount Fuji", "near": near_tokyo, "maxKm": 50, "categories": ["viewpoint"]}, None)
+    r = fp.lambda_handler({"city": "Fujinomiya", "near": near_tokyo, "maxKm": 50, "categories": ["viewpoint"]}, None)
     assert r["error"] == "unknown_location" and "within 50 km" in r["message"], r
-    q, error = fp._validate({"city": "Mount Fuji", "categories": ["viewpoint"]})
-    assert (q["lat"], q["lng"]) == (14.59, 121.18) and GEOCODES[-1] == {"QueryText": "Mount Fuji", "MaxResults": 1}
+    q, error = fp._validate({"city": "Fujinomiya", "categories": ["viewpoint"]})
+    assert (q["lat"], q["lng"]) == (14.59, 121.18) and GEOCODES[-1] == {"QueryText": "Fujinomiya", "MaxResults": 1}
 finally:
     fp._mock_mode, fp.boto3.client = saved
 assert fp._validate({"city": "Tokyo", "near": {"lat": 55.68, "lng": 12.57}})[1]["error"] == "unknown_location"
