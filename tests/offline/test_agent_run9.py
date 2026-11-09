@@ -81,11 +81,14 @@ add("me_close", "restaurant", "Z2", 0.05, "middle_eastern", name="Close Mezze") 
 add("me_park", "restaurant", "ZP", 0.05, "middle_eastern", name="Park Kebab")      # park day: never touched
 add("me1", "restaurant", "Z1", 0.6, "middle_eastern", name="Al Bayt")
 add("me_far", "restaurant", "Z5", 0.0, "middle_eastern", name="Far Falafel")       # zone the day does not use
+add("me_other", "restaurant", "Z2", 0.0, "middle_eastern", name="Other Zone Mezze",  # beside day 16, in zone Z2
+    lat=ZONES["Z1"][1] + 0.25 / 111.0, lng=ZONES["Z1"][2])
 add("am_park", "restaurant", "ZP", 0.1, "american", name="Park Burger")
 add("am1", "restaurant", "Z3", 0.5, "american", name="Kyoto Burger")
 add("am_trip", "restaurant", "Z3", 0.15, "american", name="Nara Burger", dayTrip="Nara")
 add("fd1", "restaurant", "Z1", 0.5, "fine_dining", name="Kaiseki Ten")
 add("fd2", "restaurant", "Z4", 0.6, "fine_dining", name="Ginza Kitcho")
+add("fd_k", "restaurant", "Z3", 0.35, "fine_dining", name="Gion Kappo")            # day 20 is taken by American
 add("sm", "supermarket", "Z4", 0.1, "american", name="Ginza Market")
 plan = {"days": [
     {"date": "2026-12-15", "placeIds": ["Z5_a"]},
@@ -169,12 +172,12 @@ assert A._swap_wished_cuisines(spec, pool, plan3) == [] and plan3 == frozen
 plan4 = copy.deepcopy(before)
 vegan = {**spec, "preferences": {"dietary": ["vegan"]}}
 for p in pool["places"]:
-    if p["placeId"] in ("me1", "am1", "fd2"):
+    if p["placeId"] in ("me1", "am1", "fd2", "fd_k"):
         p["description"] = "steak and pork house, not vegan"
 saved_status = A._dietary_status
 A._dietary_status = lambda p, d: "conflict" if "pork" in (p.get("description") or "") else "unverified"
 got4 = [(s["date"], s["to"]) for s in A._swap_wished_cuisines(vegan, pool, plan4)]
-assert got4 == [("2026-12-16", "fd1")], "me1, am1 and fd2 conflict; fd1 is the only fitting meal"
+assert got4 == [("2026-12-16", "fd1")], "me1, am1, fd2 and fd_k conflict; fd1 is the only fitting meal"
 A._dietary_status = saved_status
 for p in pool["places"]:
     p.pop("description", None)
