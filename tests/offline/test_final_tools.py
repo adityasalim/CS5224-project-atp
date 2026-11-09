@@ -343,6 +343,12 @@ fp.lambda_handler({"city": "Tokyo", "categories": ["cafe"]}, None)
 fp.lambda_handler({"lat": 35.68, "lng": 139.76, "categories": ["museum"]}, None)
 assert not any(b["textQuery"].startswith("top sights") for b in BODIES), BODIES
 assert fp._cache_key({}).startswith("places-v9:")
+# a top sight another provider also returns (an OSM temple of the same name and place) is listed once
+qk, _ = fp._validate({"city": "Kyoto", "categories": ["temple"]})
+top_k = {**fp._place("gplace:kink", "Kinkaku-ji", "temple", 35.0, 135.77, qk), "searchedAs": "top_sights"}
+osm_k = fp._place("osm:node/1", "Kinkaku-ji", "temple", 35.0, 135.77, qk)
+other = fp._place("osm:node/2", "Ginkaku-ji", "temple", 35.027, 135.798, qk)
+assert [p["placeId"] for p in fp._rank([top_k, osm_k, other], qk)] == ["gplace:kink", "osm:node/2"]
 print("TOP SIGHTS OK")
 
 # ---------------------------------------------------------------- 6 + 7. sequence_day: parks to closing, meals
@@ -460,6 +466,9 @@ print("VERIFY RIDES OK")
 
 # ---------------------------------------------------------------- 9. render_pdf: dayNotes in any shape; route matrix
 rp = load("tp-render-pdf")
+# a day line (airport, check-out, park meals) shows its time alone, a stop its arrival-departure
+assert [rp._when(s) for s in ({"arriveAt": "12:30", "departAt": "14:00"}, {"arriveAt": "20:55"}, {"arriveAt": ""},
+                              {})] == ["12:30-14:00", "20:55", "", ""]
 EVT = {"tripSpec": SPEC, "tripId": "t1", "itinerary": {"flightOfferId": "f", "stayId": "h", "days": [
     {"date": "2027-03-10", "stops": []}, city_day("b"), {"date": "2027-03-12", "stops": []}]}}
 for notes in (["a note"], "a note", None, {"2027-03-11": "Garden day"}):

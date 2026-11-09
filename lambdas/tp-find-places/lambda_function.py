@@ -1104,8 +1104,9 @@ def _rank(places, q):
     # search found too stays food
     others = {p["placeId"] for p in places if p.get("searchedAs") != TOP_SIGHTS}
     out = [p for p in places if p.get("searchedAs") == TOP_SIGHTS and p["placeId"] not in others and _allowed(p, prefs)]
+    top = {_dupe_key(p) for p in out}   # a top sight another provider also found (an OSM temple) is not listed twice
     for cat in q["categories"]:   # grouped by the category searched for, so a Google sight of another type stays
-        out.extend(best([p for p in places if (p.get("searchedAs") or p["category"]) == cat]))
+        out.extend(best([p for p in places if (p.get("searchedAs") or p["category"]) == cat and _dupe_key(p) not in top]))
     seen = {_dupe_key(p) for p in out}
     for kw in q.get("keywords", []):
         group = best([p for p in places if p["category"] == "activity" and p.get("activity") == kw])

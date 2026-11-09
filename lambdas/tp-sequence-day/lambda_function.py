@@ -289,6 +289,32 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
     meals_done = 0                              # meal stops (restaurant / street food) already scheduled
     busy = 0                                    # visit + travel minutes used so far
 
+    def _park_last(s, i, begin, back, busy, travel):
+        """When a full-day park visit must end so that the day's other planned stops still fit after it: only the
+        stops still open late enough after the park's minimum visit count (each with its visit and
+        PARK_STOP_GAP_MIN to get there), at most as many as max_stops leaves room for, and the park ends no later
+        than their latest closing time minus that time."""
+        floor_end = begin + s["visitMinutes"]
+        later = []
+        for j in remaining:
+            if j == i:
+                continue
+            o = stops[j - 1]
+            need = o["visitMinutes"] + PARK_STOP_GAP_MIN
+            if not o["hours"]["known"]:
+                later.append((need, day_end - back))
+            elif not o["hours"]["closed"]:
+                c = max((c for _, c in o["hours"]["intervals"] if c >= floor_end + need), default=None)
+                if c is not None:
+                    later.append((need, min(c, day_end - back)))
+        if max_stops:
+            later = sorted(later, key=lambda x: x[0])[:max(0, max_stops - len(out) - 1)]
+        rest = sum(n for n, _ in later)
+        last = max((c for _, c in later), default=day_end - back) - rest
+        if min_free:
+            last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back - rest)
+        return last
+
     def pick(cands):
         best = None
         for i in cands:
@@ -308,12 +334,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
             visit = s["visitMinutes"]
             if s.get("toClose"):   # a full-day park: from arrival to closing, home by the day's end, free time kept
                 close = next(c for o, c in sorted(s["hours"]["intervals"]) if o <= begin and begin + visit <= c)
-                # the day's other planned stops (cafes near the park, a dinner) keep their time after the park
-                rest = sum(stops[j - 1]["visitMinutes"] + PARK_STOP_GAP_MIN for j in remaining if j != i)
-                last = day_end - back - rest
-                if min_free:
-                    last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back)
-                visit = max(visit, min(close, last) - begin)
+                visit = max(visit, min(close, _park_last(s, i, begin, back, busy, travel)) - begin)
             end = begin + visit
             if end + back > day_end:
                 continue
