@@ -113,6 +113,26 @@ CHAIN.clear(); STORE.clear()
 fp.lambda_handler(ev, None)
 assert CHAIN == [["attraction", "cafe", "museum"]], CHAIN
 fp._secret_cache = {"GOOGLE_MAPS_KEY": "test-key"}
+# the chain's last-resort Google step never asks again, without the floor, for a sight Google already answered
+STORE.clear(); POSTS.clear(); CHAIN.clear()
+saved_overpass, fp._overpass = fp._overpass, lambda q, deadline: (CHAIN.append(q["categories"]) or [], None)
+r = fp.lambda_handler({"city": "Tokyo", "categories": ["museum"]}, None)
+assert [p["textQuery"] for p in POSTS] == ["museum"], [p["textQuery"] for p in POSTS]
+ids = [p["placeId"] for p in r["places"]]
+assert len(ids) == len(set(ids)) and "gplace:thinmuseum" not in ids, ids    # no duplicate; 120 reviews stays out
+fp._overpass = saved_overpass
+# one failed Google search keeps the other categories' results
+STORE.clear(); POSTS.clear()
+real_post = fp.requests.post
+def flaky_post(url, headers=None, json=None, timeout=None):
+    if json.get("textQuery") == "museum":
+        POSTS.append({"url": url, **json})
+        return type("R", (), {"status_code": 429, "text": "quota"})()
+    return real_post(url, headers=headers, json=json, timeout=timeout)
+fp.requests.post = flaky_post
+found, err = fp._google(fp._validate({"city": "Tokyo", "categories": ["attraction", "museum"]})[0], sights_first=True)
+assert err is None and {p["category"] for p in found} == {"attraction"}, (err, found and len(found))
+fp.requests.post = real_post
 print("GOOGLE-FIRST SIGHTS OK")
 
 # ---------------------------------------------------------------- 2. English names in every Google request
@@ -157,6 +177,13 @@ for name in ("Mount Fuji", "Mt Fuji", "Mt. Fuji", "Fuji", "Kawaguchiko"):
     q, err = fp._validate({"city": name, "near": TOKYO, "maxKm": 200, "minKm": 25, "categories": ["viewpoint"]})
     assert err is None and (q["lat"], q["lng"]) == (35.5, 138.76), (name, q, err)
 assert geo.searches == [], "a known landmark needs no place search"
+# the landmark wins over an address geocode that answers with a namesake town in range (Fuji city, Shizuoka)
+real_geocode = Geo.geocode
+Geo.geocode = lambda s, **k: {"ResultItems": [{"Position": [138.6763, 35.1613]}]}
+for name in ("Fuji", "Mount Fuji, Japan", "Mt Fuji (Kawaguchiko)", "Lake Kawaguchiko"):
+    q, err = fp._validate({"city": name, "near": TOKYO, "maxKm": 200, "minKm": 25, "categories": ["viewpoint"]})
+    assert err is None and (q["lat"], q["lng"]) == (35.5, 138.76), (name, q, err)
+Geo.geocode = real_geocode
 # not in KNOWN_CITIES: the place search; a namesake office in Shibuya is closer than minKm and is skipped
 geo.places = [("Fuji-Q Highland Ticket Office", 35.658, 139.701), ("Fuji-Q Highland", 35.487, 138.781)]
 q, err = fp._validate({"city": "Fuji-Q Highland", "near": TOKYO, "maxKm": 200, "minKm": 25, "categories": ["theme_park"]})

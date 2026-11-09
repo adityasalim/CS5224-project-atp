@@ -79,6 +79,7 @@ OVERPASS_MIN_CAP, OVERPASS_MAX_CAP = 200, 600    # elements returned per categor
 OVERPASS_NOTABLE_CAP = 100       # well-known places (with a wikidata tag) per category, listed first
 OVERPASS_DIET_CAP = 200          # diet-tagged food places per category
 _GEO_CFG = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 2})
+_GEO_ONE = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 1})   # runs before the time budget
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
 CATEGORY_TAGS = {
@@ -159,9 +160,12 @@ KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osa
                 "nikko": (36.7199, 139.6982), "kamakura": (35.3192, 139.5467), "hakone": (35.2324, 139.1069),
                 "nara": (34.6851, 135.8048), "kobe": (34.6901, 135.1955), "busan": (35.1796, 129.0756),
                 "ayutthaya": (14.3532, 100.5689), "sapporo": (43.0618, 141.3545), "fukuoka": (33.5902, 130.4017),
-                # day-trip landmarks, at the town a visit is based in (the address geocode does not know them)
-                "mount fuji": (35.50, 138.76), "mt fuji": (35.50, 138.76), "mt. fuji": (35.50, 138.76),
-                "fuji": (35.50, 138.76), "kawaguchiko": (35.50, 138.76)}
+                }
+# Day-trip landmarks, at the town a visit is based in. Checked before the address geocode, which answers "Fuji"
+# with Fuji city (Shizuoka), 38 km from the Kawaguchiko side.
+LANDMARKS = {"mount fuji": (35.50, 138.76), "mt fuji": (35.50, 138.76), "mt. fuji": (35.50, 138.76),
+             "fuji": (35.50, 138.76), "kawaguchiko": (35.50, 138.76), "lake kawaguchiko": (35.50, 138.76),
+             "fujikawaguchiko": (35.50, 138.76)}
 
 _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
@@ -195,6 +199,10 @@ def _geocode(city, near=None, max_km=None, min_km=0.0):
     parts = [x.strip().lower() for x in city.split(",") if x.strip()]
     known = KNOWN_CITIES.get(city.strip().lower()) or (KNOWN_CITIES.get(parts[-1]) if parts else None)
     close = lambda lat, lng: near is None or min_km <= _km(near["lat"], near["lng"], lat, lng) <= max_km
+    name = re.sub(r"\s*\(.*?\)", "", parts[0]) if parts else ""      # "Mt Fuji (Kawaguchiko)" -> "mt fuji"
+    mark = LANDMARKS.get(city.strip().lower()) or LANDMARKS.get(name)
+    if mark and close(*mark):
+        return mark
     known = known if known and close(*known) else None
     if _mock_mode():
         return known
@@ -210,7 +218,7 @@ def _geocode(city, near=None, max_km=None, min_km=0.0):
     if known or near is None:
         return known
     try:
-        r = boto3.client("geo-places", config=_GEO_CFG).search_text(
+        r = boto3.client("geo-places", config=_GEO_ONE).search_text(
             QueryText=city, MaxResults=10, BiasPosition=[near["lng"], near["lat"]], Language="en")
         for it in r.get("ResultItems", []):
             pos = it.get("Position")
@@ -674,7 +682,7 @@ def _google(q, deadline=None, sights_first=False):
                "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
                                    "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
                                    "places.userRatingCount,places.priceLevel,places.businessStatus,places.types"}
-    out = []
+    out, errs = [], []
     for cat, text, radius_km, kw in _text_targets(q):
         if deadline and deadline - time.time() < 5:
             break
@@ -690,9 +698,11 @@ def _google(q, deadline=None, sights_first=False):
             r = requests.post("https://places.googleapis.com/v1/places:searchText",
                               headers=headers, json=body, timeout=15)
         except requests.RequestException as e:
-            return None, f"google {type(e).__name__}"
-        if r.status_code >= 400:
-            return None, f"google http {r.status_code}: {r.text[:200]}"
+            errs.append(f"google {type(e).__name__}")
+            continue
+        if r.status_code >= 400:   # one failed search keeps the other categories' results
+            errs.append(f"google http {r.status_code}: {r.text[:200]}")
+            continue
         for p in r.json().get("places", []):
             if p.get("businessStatus", "OPERATIONAL") != "OPERATIONAL" or (floor and (
                     (p.get("userRatingCount") or 0) < floor or (p.get("rating") or 0) < GOOGLE_MIN_RATING)):
@@ -705,7 +715,9 @@ def _google(q, deadline=None, sights_first=False):
                               website=p.get("websiteUri"), url=p.get("googleMapsUri"), rating=p.get("rating"),
                               fame_known=False, cuisine=_g_cuisine(p, cat)))
             out[-1].update(reviews=p.get("userRatingCount"), priceLevel=p.get("priceLevel"))
-    return out, None
+    if errs:
+        print("google searches failed:", "; ".join(errs))
+    return (out, None) if out or not errs else (None, errs[0])
 
 
 def _google_zone(q, deadline):
@@ -1017,10 +1029,11 @@ def lambda_handler(event, context):
         return {**cached, "places": named + cached.get("places", []),
                 "source": cached.get("source", "") + "-cache", **extra}
 
-    attempts, places, sources, chain_google = [], [], [], False
+    attempts, places, sources, chain_google, asked = [], [], [], False, []
     if gcats:   # rated, reviewed food and sights from Google first; the rest (and all if Google fails) from the chain
         found, err = _google({**q, "categories": gcats, "keywords": []}, deadline, sights_first=True)
         if found:
+            asked = list(gcats)
             places += found
             sources.append("google")
             have = _count_by_category(found)
@@ -1036,7 +1049,12 @@ def lambda_handler(event, context):
             if deadline - time.time() < 3:
                 attempts.append(f"{provider.__name__.strip('_')} skipped: time budget used up")
                 continue
-            found, err = provider(qc, deadline)
+            # categories Google already answered above (with the rating floor) are not asked again without it
+            pq = {**qc, "categories": [c for c in qc["categories"] if c not in asked]} if provider is _google else qc
+            if not pq["categories"]:
+                attempts.append("google skipped: already searched")
+                continue
+            found, err = provider(pq, deadline)
             if err:
                 attempts.append(err)
                 print("provider failed:", err)
