@@ -90,6 +90,22 @@ win.send().then(() => {
   return win.send();
 }).then(() => {
   assert.deepEqual(chipTexts(), [], "no follow-ups after a refused plan");
+  // a normal plan followed by a message with choices keeps those choices
+  win.runDemo = async (text, handle) => {
+    handle({type: "itinerary", itinerary: plan});
+    handle({type: "message", message: "Want a cheaper hotel?", choices: ["Yes, cheaper"]});
+  };
+  win.document.getElementById("input").value = "Plan again";
+  return win.send();
+}).then(() => {
+  assert.deepEqual(chipTexts(), ["Yes, cheaper"]);
+  // after a reload, a refused latest plan brings back no follow-ups
+  const saved = [{kind: "itinerary", data: {...plan, status: "refused", pdfUrl: null}}];
+  const re = new JSDOM(html, {url: "https://example.test/", runScripts: "dangerously", virtualConsole: console_,
+                               beforeParse(w) { w.sessionStorage.setItem("transcript", JSON.stringify(saved)); }}).window;
+  assert.deepEqual([...re.document.querySelectorAll("#chips button")].map(b => b.textContent), [],
+                   "no follow-ups after reloading a refused plan");
+  re.close();
   assert.deepEqual(errors, []);
   console.log("PASS: plan card zone headers, food chips, Maps and day-route links, attribution; question choices as chips; " +
               "refused plan without days, PDF or feedback; message choices kept after a plan");

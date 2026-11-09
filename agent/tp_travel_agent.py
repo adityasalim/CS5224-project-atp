@@ -917,11 +917,13 @@ def normalize_special(spec):
     # a far theme park made a day trip by build_zones is the traveler's pinned park, not one of their listed trips
     # at most 4 in all, the same ceiling _park_day_trip keeps, so a park flag in model output cannot add more
     spec["dayTrips"] = ([t for t in trips if not t.get("park")][:limit] + [t for t in trips if t.get("park")])[:4]
-    # one role per place: a day-trip town or landmark ("Mount Fuji") is not also a pinned city stop
-    towns = [t["place"].lower() for t in spec["dayTrips"]]
+    # one role per place: a day-trip town or landmark ("Mount Fuji") is not also a pinned city stop. Only the pin's
+    # whole name inside the trip's name counts ("Fuji" in "Mount Fuji"), so sights in a trip town ("Nara Park") stay,
+    # and far theme parks (park trips) stay pinned
+    mt = lambda x: re.sub(r"\bmt\.?\s", "mount ", x.lower()).strip()
+    towns = [mt(t["place"]) for t in spec["dayTrips"] if not t.get("park")]
     spec["mustInclude"] = [m for m in spec["mustInclude"] if not any(
-        m["name"].lower() == t or (min(len(t), len(m["name"])) >= 4 and (t in m["name"].lower() or m["name"].lower() in t))
-        for t in towns)]
+        mt(m["name"]) == t or (len(mt(m["name"])) >= 4 and mt(m["name"]) in t) for t in towns)]
     return spec
 
 
@@ -3552,14 +3554,17 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
         elif chk == "must_visit":
             missing_pins = [x for x in (spec.get("pinned") or []) if x.get("placeId") not in used_ids]
             dropped = {u.get("placeId"): u.get("date") for u in unscheduled or []}
+            parts = []
             if missing_pins:
                 p_txt = ", ".join(f"{x['placeId']} ({x.get('name')})" for x in missing_pins)
-                item["repairHint"] = (f"{hint} Add missing pinned placeId(s) on a full day: {p_txt}.").strip()
-            elif item.get("item") in dropped:   # planned, but the day had no room for it once ordered
+                parts.append(f"Add missing pinned placeId(s) on a full day: {p_txt}.")
+            if item.get("item") in dropped:   # planned, but the day had no room for it once ordered
                 name = next((x.get("name") for x in spec.get("pinned") or [] if x.get("placeId") == item["item"]), item["item"])
-                item["repairHint"] = (f"{name} ({item['item']}) is planned on {dropped[item['item']]} but did not fit "
-                                      "once the day was ordered: remove cafes or other stops from that day so it fits. "
-                                      "Never drop a pinned place.")
+                parts.append(f"{name} ({item['item']}) is planned on {dropped[item['item']]} but did not fit once the day "
+                             "was ordered: remove cafes or other stops from that day, or move it to a full day where it "
+                             "fits. Never drop a pinned place.")
+            if parts:
+                item["repairHint"] = (f"{hint} " + " ".join(parts)).strip()
         elif chk in ("far_from_base", "city_mismatch") and item.get("day"):
             day_obj = next((d for d in (plan.get("days") or []) if d.get("date") == item["day"]), {})
             city = day_obj.get("city")
@@ -3596,7 +3601,8 @@ def _enrich_violations(spec, pool, plan, verify_res, unscheduled):
         pid = u.get("placeId", "")
         is_edge = dt in (spec.get("startDate"), spec.get("endDate"))
         pinned = pid in {x.get("placeId") for x in spec.get("pinned") or []}
-        hint = (f"{pid} is a place the traveller asked for: keep it on {dt} and remove other stops from that day."
+        hint = (f"{pid} is a place the traveller asked for: free up time on {dt} by removing other stops, or move it to "
+                "a full day where it fits. Never drop it."
                 if pinned else
                 f"Drop {pid} from travel day {dt} (keep arrival/departure days to 0-1 stops) or move to a full day."
                 if is_edge else f"Move {pid} from {dt} to a lighter full day or drop it.")
@@ -4007,7 +4013,7 @@ def sequence(spec, pool, plan):
     by_date = {d.get("date"): d for d in plan.get("days", [])}
     days, buckets, pending = [], [], []   # buckets: each day's unscheduled stops, kept in day order
     zone_of = {p["placeId"]: p["zone"] for p in pool["places"] if p.get("zone")}
-    pinned_ids = {x.get("placeId") for x in spec.get("pinned") or []}   # the day ordering keeps these first
+    pinned_ids = {x.get("placeId") for x in spec.get("pinned") or [] if isinstance(x, dict)}   # kept first by day ordering
     for i in range((e - s).days + 1):
         dt = (s + timedelta(days=i)).isoformat()
         d = by_date.get(dt, {"date": dt, "placeIds": []})

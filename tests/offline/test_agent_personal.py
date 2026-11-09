@@ -283,10 +283,20 @@ hint = A._enrich_violations(pin_spec, pool_r, plan_r, {"violations": [{"check": 
                             [{"placeId": first_id, "date": "2026-12-03"}])
 assert any("Tokyo Disneyland" in h.get("repairHint", "") and "Never drop a pinned place" in h.get("repairHint", "")
            for h in hint), hint
-assert not any("drop it" in h.get("repairHint", "") for h in hint if h.get("item") == first_id), hint
+assert not any("or drop it" in h.get("repairHint", "") for h in hint if h.get("item") == first_id), hint
 # one role per place: Mount Fuji as a day trip is not also pinned
-one = A.normalize_special({"mustInclude": ["Mount Fuji", "teamLab Planets"], "dayTrips": ["Mount Fuji"]})
+one = A.normalize_special({"mustInclude": ["Mount Fuji", "teamLab Planets", "Mt. Fuji", "Fuji"], "dayTrips": ["Mount Fuji"]})
 assert [m["name"] for m in one["mustInclude"]] == ["teamLab Planets"] and one["dayTrips"][0]["place"] == "Mount Fuji", one
+kept = ["Kyoto Tower", "Nara Park", "Hakone Open-Air Museum", "Fuji TV Building"]   # sights, not the trip itself
+two = A.normalize_special({"mustInclude": kept, "dayTrips": ["Kyoto", "Nara", "Hakone", "Fuji"]})
+assert [m["name"] for m in two["mustInclude"]] == kept, two["mustInclude"]
+park = A.normalize_special({"mustInclude": ["Universal Studios Japan"],
+                            "dayTrips": [{"place": "Universal Studios Japan", "park": True}]})
+assert [m["name"] for m in park["mustInclude"]] == ["Universal Studios Japan"], "a far park stays pinned on chat changes"
+# one note per missing place, not a second "didn't fit on <date>" note
+_, notes_ = classify_acceptance(miss, None, {"issues": []}, [{"placeId": "aloc:x", "name": "Tokyo Disneyland",
+                                                              "date": "2026-12-18"}], loop_enabled=False)
+assert notes_ == ["Tokyo Disneyland didn't fit into this plan. Ask me to swap it in for another day."], notes_
 
 # ---- spare budget: firm star wish, hotels by rating and flights by price and travel time when the budget has room
 def prefs_for(amount):

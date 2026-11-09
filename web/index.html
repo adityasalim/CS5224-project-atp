@@ -838,7 +838,8 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
     $("tripFormScreen").classList.add("hidden");
     $("app").classList.remove("hidden");
     transcript.forEach(render);
-    showChips(hasUsablePlan() ? FOLLOW_UPS : []);
+    const last = transcript.filter((t) => t.kind === "itinerary").pop();
+    showChips(hasUsablePlan() ? FOLLOW_UPS : ((last && last.data && last.data.choices) || []));
   } else {
     store.del("session_id");   // fresh page, fresh conversation
     showChips([]);

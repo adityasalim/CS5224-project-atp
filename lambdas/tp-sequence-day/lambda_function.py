@@ -347,7 +347,7 @@ def lambda_handler(event, context):
     # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one; keep the
     # one that fits the most pinned places, then the most stops, then never goes back to a zone it left, then starts
     # in the farther zone, then has the least waiting.
-    pinned = (set(event["pinned"]) if event.get("pinned") is not None
+    pinned = ({x for x in event["pinned"] if isinstance(x, str)} if isinstance(event.get("pinned"), list)
               else {s["placeId"] for s in stops if s.get("category") == "requested"})
     firsts = [None] + (sorted(set(_zone_groups(stops)[1:])) if mode == "walk" and any(s.get("zone") for s in stops)
                        else [])

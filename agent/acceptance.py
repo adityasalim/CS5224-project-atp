@@ -346,7 +346,9 @@ def classify_acceptance(verify_res, judge_res, diag, unscheduled, unpriced_booki
         t = _finding_text(i)
         if t:
             reasons.append(t)
-    left_out = [f"{_readable(u.get('name') or u.get('placeId'))} ({u.get('date')})" for u in (unscheduled or [])]
+    named = {v.get("item") for v in violations if str(v.get("check") or "").lower().strip() == "must_visit"}
+    unscheduled = [u for u in (unscheduled or []) if u.get("placeId") not in named]   # already a named note above
+    left_out = [f"{_readable(u.get('name') or u.get('placeId'))} ({u.get('date')})" for u in unscheduled]
     if len(left_out) == 1:
         u = unscheduled[0]
         reasons.append(f"{_readable(u.get('name') or u.get('placeId'))} didn't fit on {u.get('date')} "

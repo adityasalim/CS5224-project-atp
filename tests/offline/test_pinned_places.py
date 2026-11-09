@@ -39,4 +39,7 @@ it = {"stayId": "t:hotel", "days": [{"date": "2026-12-11", "stops": [
 v = verify.lambda_handler({"tripSpec": spec, "itinerary": it}, None)
 msgs = [x["message"] for x in v["violations"] if x["check"] == "must_visit"]
 assert msgs == ["Tokyo Disneyland was requested by the user but is not planned"], v["violations"]
+# a malformed pinned list (dicts, a string) never crashes the tool
+for bad in ([{"placeId": "t:tdl"}], "t:tdl"):
+    assert seq.lambda_handler(dict(event, pinned=bad), None)["ok"], bad
 print("PINNED PLACES OK")
