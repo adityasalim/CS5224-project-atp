@@ -26,6 +26,10 @@
         "type": "number",
         "description": "With near: the largest accepted distance in km between the found city and near (default 450)."
       },
+      "minKm": {
+        "type": "number",
+        "description": "With near: the smallest accepted distance in km between the found city and near (default 0). For a day trip use 25, so a namesake in the main city (a tour office called 'Mount Fuji Tours') is not taken."
+      },
       "lat": {
         "type": "number",
         "description": "Latitude of a search centre, e.g. the chosen hotel, to find places close to it."
@@ -100,6 +104,10 @@
       "priceLevel": {
         "type": "integer",
         "description": "Meal price level 1-4 ($ to $$$$) for a walkable zone (foodRadiusKm 2 or less): restaurants at this Google price level are ranked first."
+      },
+      "cuisineOnly": {
+        "type": "boolean",
+        "description": "true with categories ['restaurant'], a cuisine and lat/lng with foodRadiusKm 2 or less: only restaurants of that cuisine near the point (no generic restaurants)."
       },
       "maxPerCategory": {
         "type": "integer",

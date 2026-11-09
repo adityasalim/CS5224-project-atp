@@ -1,6 +1,6 @@
 {
   "name": "search_flights",
-  "description": "Search flights and return offers with offerId, airline, departure/arrival times per slice, stops, total travel minutes, 'matches' and the total price in SGD for all passengers. Turn the traveller's flight wishes into the filters below (direct only, no red-eyes, a late flight home, an airline they like or avoid). Filters that would leave nothing are relaxed and noted in 'filterNote'. For multi-city trips set returnFrom to the last city's airport (open-jaw).",
+  "description": "Search flights and return offers with offerId, airline, departure/arrival times per slice, stops, total travel minutes, cabin ('mixed' when a segment is in another class than asked), 'matches' and the total price in SGD for all passengers. Turn the traveller's flight wishes into the filters below (direct only, no red-eyes, a late flight home, an airline they like or avoid). Filters that would leave nothing are relaxed and noted in 'filterNote'. For multi-city trips set returnFrom to the last city's airport (open-jaw).",
   "inputSchema": {
     "type": "object",
     "properties": {

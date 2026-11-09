@@ -209,7 +209,7 @@ def _apply_prefs(offers, q):
     return offers
 
 def _cache_key(q):
-    return "flights-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v5:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -331,19 +331,24 @@ def _serp_slice(option):
             "duration": _iso_min(option.get("total_duration")),
             "stops": max(len(segs) - 1, 0),
             "flightNumbers": [str(g.get("flight_number") or "").replace(" ", "") for g in segs],
+            # per segment, as SerpApi writes it ("Economy", "Premium economy", ...) -> "economy", "premium_economy"
+            "cabins": [str(g.get("travel_class") or "").strip().lower().replace(" ", "_") or None for g in segs],
             "airlines": list(dict.fromkeys(g.get("airline") for g in segs if g.get("airline")))}
 
 
-def _serp_offer(legs, price, url):
+def _serp_offer(legs, price, url, cabin):
+    """cabin: the requested cabin. The offer's cabin is that cabin when every segment SerpApi names a class for is
+    in it, else "mixed" (e.g. an economy leg on a premium economy fare)."""
     slices = [_serp_slice(o) for o in legs]
     if not all(slices) or price in (None, ""):
         return None
+    known = {c for s_ in slices for c in s_["cabins"] if c}
     airlines = list(dict.fromkeys(a for s_ in slices for a in s_.pop("airlines")))
     ident = "|".join(f"{s_['departAt']}{','.join(s_['flightNumbers'])}" for s_ in slices)
     offer_id = "gf:" + hashlib.sha256(ident.encode()).hexdigest()[:20]
     return {"offerId": offer_id, "airline": " / ".join(airlines[:3]), "priceTotal": float(price), "currency": "SGD",
             "priceTotalSGD": round(float(price), 2), "slices": slices, "bookingUrl": url,
-            "provider": "google_flights"}
+            "provider": "google_flights", "cabin": cabin if known <= {cabin} else "mixed"}
 
 
 def _time_gap(a, b):
@@ -379,7 +384,7 @@ def _call_serpapi(q, key):
     first = (data.get("best_flights") or []) + (data.get("other_flights") or [])
     first = sorted((o for o in first if o.get("price")), key=lambda o: o["price"])
     if not q["returnDate"]:
-        offers = [_serp_offer([o], o["price"], url) for o in first[:40]]
+        offers = [_serp_offer([o], o["price"], url, q["cabin"]) for o in first[:40]]
         return [o for o in offers if o], None
     lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "3")), 0), 4)
     # look up returns for the cheapest outbound, then each time for the one (of the cheapest SPREAD_POOL) whose
@@ -399,7 +404,8 @@ def _call_serpapi(q, key):
         rets = sorted((r for r in (back.get("best_flights") or []) + (back.get("other_flights") or [])
                        if r.get("price")), key=lambda r: r["price"])
         for r in rets[:RETURNS_PER_LOOKUP]:
-            o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url)
+            o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url,
+                            q["cabin"])
             if o:
                 offers.append(o)
     if not offers:

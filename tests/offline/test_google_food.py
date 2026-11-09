@@ -1,5 +1,6 @@
-"""find_places: food comes from Google Places first (rated, reviewed, open), sights from the free chain, no API calls.
-Only the non-Google places are cached; a cached call asks Google for the food again and skips the slow chain."""
+"""find_places: food and sights come from Google Places first (rated, reviewed, open); a sight category Google has
+too few for also goes through the free chain; no API calls. Only the non-Google places are cached; a cached call asks
+Google for the food and sights again and skips the slow chain."""
 import json, os, time
 from fakes import load, STORE
 os.environ["MOCK_MODE"] = "false"
@@ -35,32 +36,32 @@ t0 = time.time()
 r = fp.lambda_handler(event, None)
 cold = time.time() - t0
 assert r["ok"] and r["source"].startswith("google+overpass"), r["source"]
-assert SIGHTS == [["temple"]], "food categories never go to Overpass when Google answers"
+assert SIGHTS == [["temple"]], "food categories never go to Overpass when Google answers; one Google temple is too few"
 assert all("places.userRatingCount" in p["mask"] and "places.types" in p["mask"] and p["minRating"] == 4.0 for p in POSTS)
-assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant"}, POSTS
+assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant", "temple"}, POSTS
 food = [p for p in r["places"] if p["category"] in ("cafe", "restaurant")]
 assert food and {p["name"] for p in food} == {"Good Roaster"}, "few reviews and closed venues are dropped"
 assert food[0]["reviews"] == 1200 and food[0]["rating"] == 4.7 and food[0]["priceLevel"] == "PRICE_LEVEL_MODERATE"
 assert "Google Maps" in r["attribution"]
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v6:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v7:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/1"}, "Google places are not cached"
 
 # warm call: the cached sights come back without Overpass, the food is asked from Google again
 POSTS.clear(); SIGHTS.clear()
 t0 = time.time()
 w = fp.lambda_handler(event, None)
-warm = time.time() - t0
+warm = time.time() - t0   # the warm call asks Google for the food and the temple again
 assert w["source"] == "google+overpass-cache" and SIGHTS == [], (w["source"], SIGHTS)
-assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant"}, POSTS
+assert {p["textQuery"] for p in POSTS} == {"specialty coffee", "italian restaurant", "temple"}, POSTS
 assert {p["name"] for p in w["places"]} == {p["name"] for p in r["places"]} and w["places"][0]["placeId"].startswith("gplace:")
-print(f"find_places with fakes: cold {cold:.2f} s ({len(r['places'])} places), warm {warm:.2f} s (Google food only)")
+print(f"find_places with fakes: cold {cold:.2f} s ({len(r['places'])} places), warm {warm:.2f} s (Google food and sights only)")
 assert warm < cold / 2
 
 # Google fails: the chain finds the food and nothing is cached, so the next call tries Google again
 STORE.clear(); SIGHTS.clear()
 fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestException("down"))
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
-assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v6:") for k in STORE), (SIGHTS, list(STORE))
+assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v7:") for k in STORE), (SIGHTS, list(STORE))
 
 # warm call while Google is down: one Google attempt, then the chain finds the food
 fp.requests.post = fake_post
@@ -102,11 +103,11 @@ fp._amazon_location = _amazon_location
 STORE.clear()
 fp.requests.post = fake_post
 k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywords": ["pour-over coffee"]}, None)
-assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v6:") for s in STORE), (k["source"], list(STORE))
+assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v7:") for s in STORE), (k["source"], list(STORE))
 fp._overpass = lambda q, deadline: ([], None)
 g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
 assert g["source"] == "google+google" and any(p["category"] == "temple" and p["placeId"].startswith("gplace:") for p in g["places"])
-assert not any(s.startswith("places-v6:") for s in STORE), list(STORE)
+assert not any(s.startswith("places-v7:") for s in STORE), list(STORE)
 fp._overpass = _overpass
 
 # a web pick (namesCategory) is verified on Google only, one Text Search per name, with the 4.0-star, 50-review and
