@@ -81,6 +81,15 @@ win.send().then(() => {
   return win.send();
 }).then(() => {
   assert.equal(chipTexts()[0], "Make day 3 more relaxed");
+  // a refused plan with no choices gets no "make day 3 more relaxed" follow-ups
+  win.runDemo = async (text, handle) => {
+    handle({type: "itinerary", itinerary: {...plan, status: "refused", pdfUrl: null}});
+    handle({type: "message", message: "I couldn't build a plan that meets all your must-haves."});
+  };
+  win.document.getElementById("input").value = "Plan with every must-have";
+  return win.send();
+}).then(() => {
+  assert.deepEqual(chipTexts(), [], "no follow-ups after a refused plan");
   assert.deepEqual(errors, []);
   console.log("PASS: plan card zone headers, food chips, Maps and day-route links, attribution; question choices as chips; " +
               "refused plan without days, PDF or feedback; message choices kept after a plan");

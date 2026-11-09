@@ -735,8 +735,13 @@ async function send() {
   catch (e) { ok = false; add("error", "Couldn't reach the planner: " + e.message); }
   finally {
     work.done(ok); setBusy(false);
-    if (!gotChoices && (gotPlan || transcript.some((t) => t.kind === "itinerary"))) showChips(FOLLOW_UPS);
+    if (!gotChoices && hasUsablePlan()) showChips(FOLLOW_UPS);
   }
+}
+// follow-up chips ("make day 3 more relaxed") only make sense when the latest plan was delivered, not refused
+function hasUsablePlan() {
+  const plans = transcript.filter((t) => t.kind === "itinerary");
+  return plans.length > 0 && (plans[plans.length - 1].data || plans[plans.length - 1]).status !== "refused";
 }
 
 async function runAgent(prompt, handle) {
@@ -833,7 +838,7 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
     $("tripFormScreen").classList.add("hidden");
     $("app").classList.remove("hidden");
     transcript.forEach(render);
-    showChips(transcript.some((t) => t.kind === "itinerary") ? FOLLOW_UPS : []);
+    showChips(hasUsablePlan() ? FOLLOW_UPS : []);
   } else {
     store.del("session_id");   // fresh page, fresh conversation
     showChips([]);
