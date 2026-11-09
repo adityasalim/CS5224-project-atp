@@ -166,7 +166,12 @@ class Gateway:
     def call(self, short_or_full, arguments):
         """Calls a tool and returns the Lambda's JSON output as a dict."""
         name = short_or_full if "___" in short_or_full else self.full_name(short_or_full)
-        res = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        t0, res = time.monotonic(), None
+        try:
+            res = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        finally:   # per-tool timing for latency work (also when the call fails)
+            print(json.dumps({"stage": "tool", "tool": name.split("___")[-1], "ms": round((time.monotonic() - t0) * 1000),
+                              "failed": res is None}))
         text = "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
         try:
             data = json.loads(text) if text else {}

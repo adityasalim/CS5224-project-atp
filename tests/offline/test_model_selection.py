@@ -68,9 +68,9 @@ def raises(exc, fn, text=None):
 cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
 S = cfg.selections
 # the website roles: Opus 5.5 plans, Haiku 5.5 does the small jobs, Sonnet 5.5 reviews and evaluates, all on the
-# Anthropic API at effort medium
+# Anthropic API at effort medium; the Opus first draft in fast mode (owner decision, 2026-11-09)
 assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
-    "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium"}),
+    "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium", "speed": "fast"}),
     "executor": ("anthropic", "claude-haiku-5-5", {"reasoningEffort": "medium"}),
     "reviewer": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"}),
     "independent_evaluator": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"})}
@@ -367,6 +367,27 @@ assert ad_c.records[-1]["cacheReadTokens"] == 3000 and ad_c.records[-1]["success
 # the Opus planner opts into the server-side refusal fallback (beta); Haiku has none, so its calls never send it
 assert c["betas"] == ["server-side-fallback-2026-07-01"] and c["fallbacks"] == "default"
 assert ad_c.records[-1]["transport"] == "anthropic.beta.messages.stream" and ad_c.records[-1]["responseModelId"] == "claude-opus-5-5"
+# fast mode (beta, 2x price) only on the Opus first draft; a fast-mode rate limit falls back to normal speed
+ad_c.operation = "proposal"
+A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner")
+assert claude.calls[-1]["speed"] == "fast" and claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01", "fast-mode-2026-02-01"]
+assert ad_c.records[-1]["speed"] == "fast"
+class RateLimitError(Exception): pass
+calls_before, real_stream = len(claude.calls), claude.beta.messages.stream
+def limited(**kw):
+    if kw.get("speed"):
+        claude.calls.append(kw); raise RateLimitError("fast mode rate limit")
+    return real_stream(**kw)
+claude.beta.messages.stream = limited
+assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner") == {"ok": True}
+assert [k.get("speed") for k in claude.calls[calls_before:]] == ["fast", None], "retried once at normal speed"
+assert claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01"] and "speed" not in ad_c.records[-1]
+claude.beta.messages.stream = real_stream
+ad_c.operation = "correction"
+A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: repair"], "fix", uc, max_tokens=5440, model_role="planner")
+assert "speed" not in claude.calls[-1] and claude.calls[-1]["betas"] == ["server-side-fallback-2026-07-01"], "corrections at normal speed"
+ad_c.operation = None
+raises(ValueError, lambda: ModelConfiguration.parse(with_("executor", options={"speed": "fast"})), "Opus")
 A.ask_json(A.EXECUTOR_MODEL, "sys", "intake", uc, temperature=0.0, model_role="executor")
 assert claude.calls[-1]["model"] == "claude-haiku-5-5" and "cache_control" not in claude.calls[-1]["system"][0]
 assert "fallbacks" not in claude.calls[-1] and "temperature" not in claude.calls[-1] and claude.calls[-1]["output_config"] == {"effort": "medium"}
@@ -384,11 +405,13 @@ assert all((s.provider, s.model_id) in QUOTES for s in S.values()), "a website m
 sq = QUOTES[("anthropic", "claude-sonnet-5-5")]
 assert (sq.input_per_million, sq.output_per_million, sq.cache_read_per_million, sq.cache_write_per_million) == (2, 10, Decimal(".2"), Decimal("2.5"))
 assert sq.source.startswith("https://platform.claude.com/")
+oq, one_m = QUOTES[("anthropic", "claude-opus-5-5")], {"inputTokens": 1000000, "outputTokens": 100000}
+assert oq.estimate({**one_m, "speed": "fast"})[0] == 2 * oq.estimate(one_m)[0] == Decimal("12"), "fast mode is 2x ($8/$40)"
 truncated = ModelAdapter(ad_c.configuration, clients={"anthropic": FakeAnthropic("", "max_tokens")},
                          budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t3", system="s", messages=MSG)
 assert truncated["stopReason"] == "max_tokens" and truncated["_adapter"]["emptyBecauseTruncated"]
 # a refusal re-run on a fallback model is marked, and that model has a verified quote so the ledger prices it at its rates
-assert [r["fallbackUsed"] for r in ad_c.records if r["role"] == "planner"] == [False]
+assert {r["fallbackUsed"] for r in ad_c.records if r["role"] == "planner"} == {False}
 fb = FakeAnthropic('{"ok": true}'); fb.messages.stream.reply.model = "claude-opus-4-8"
 ModelAdapter(ad_c.configuration, clients={"anthropic": fb}, budget_authorizer=lambda *a: Reservation()).generate(role="planner", trip_id="t4", system="s", messages=MSG)
 assert SETTLED[-1]["fallbackUsed"] is True and SETTLED[-1]["responseModelId"] == "claude-opus-4-8"

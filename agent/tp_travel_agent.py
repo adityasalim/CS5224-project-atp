@@ -1569,6 +1569,7 @@ def assign_zones(places, radius_km=ZONE_RADIUS_KM):
 ZONE_R_KM, ZONE_SPARSE_R_KM, ZONE_ATTACH_KM = 1.2, 1.6, 1.2   # 1.2 km seed radius: members <= 2.4 km apart, 42 min on foot
 ZONE_FOOD_KM, ZONE_FOOD_WIDE_KM, RIDE_MAX_MIN = 1.2, 2.0, 30
 ZONE_FOOD_WORKERS = int(os.environ.get("ZONE_FOOD_WORKERS", "6"))
+SEQUENCE_WORKERS = 6   # days ordered at the same time (one sequence_day call each)
 GOOGLE_FOOD_CAP = 20   # Google food requests per plan: one Nearby Search per zone plus one coffee Text Search per city
 ZONE_FOOD_CATS = {"restaurant", "cafe", "dessert"}
 ZONE_FOOD_WORDS = re.compile(r"caf|coffee|dessert|matcha|\btea\b|bak(?:ery|eries)|pastr", re.I)
@@ -3564,7 +3565,8 @@ def _repair_request(spec, pool, plan, verify_res, judge_res, unscheduled, usage,
         special=_special_rules(spec))
     return ask_json(PLANNER_MODEL, [planning_context(spec, pool), role], "Return the repaired plan.", usage,
                     max_tokens=plan_tokens(spec), temperature=0.2, think=True, cache=True,
-                    model_role='executor' if getattr(getattr(usage, 'adapter', None), 'operation', None) == 'correction' else 'planner')
+                    model_role='executor' if getattr(getattr(usage, 'adapter', None), 'operation', None) == 'correction'
+                    and _planner_provider(usage) != "anthropic" else 'planner')   # Claude: corrections on Opus too
 
 
 # ====================================================================== 4 sequence (code)
@@ -3918,7 +3920,8 @@ def sequence(spec, pool, plan):
     move_on = {t["date"]: {**t_by_id.get(t["transferId"], {}), **t} for t in transfers if t["transferId"]}
     s, e = date.fromisoformat(spec["startDate"]), date.fromisoformat(spec["endDate"])
     by_date = {d.get("date"): d for d in plan.get("days", [])}
-    days, unscheduled = [], []
+    days, buckets, pending = [], [], []   # buckets: each day's unscheduled stops, kept in day order
+    zone_of = {p["placeId"]: p["zone"] for p in pool["places"] if p.get("zone")}
     for i in range((e - s).days + 1):
         dt = (s + timedelta(days=i)).isoformat()
         d = by_date.get(dt, {"date": dt, "placeIds": []})
@@ -3949,23 +3952,29 @@ def sequence(spec, pool, plan):
             seq_args = {"date": dt, "start": {"id": "daytrip", "name": trip["place"], "lat": trip["lat"],
                                               "lng": trip["lng"]}}
             anchor = trip
+        bucket = []
         if ids and end - start >= 60:
             ordered_ids, adj_start = _order_day_stops(ids, pool, dt, start, end, anchor=anchor)
-            zone_of = {p["placeId"]: p["zone"] for p in pool["places"] if p.get("zone")}
-            res = gw.call("sequence_day", {**seq_args, "placeIds": ordered_ids, "dayStart": _fmt(adj_start),
-                                           "dayEnd": _fmt(end), "mode": "walk", "lunch": True,
-                                           "zones": {i: zone_of[i] for i in ordered_ids if i in zone_of}})
+            pending.append((day, dt, ordered_ids, bucket, {
+                **seq_args, "placeIds": ordered_ids, "dayStart": _fmt(adj_start), "dayEnd": _fmt(end), "mode": "walk",
+                "lunch": True, "zones": {i: zone_of[i] for i in ordered_ids if i in zone_of}}))
+        elif ids:
+            bucket += [{"placeId": p, "name": p, "date": dt, "reason": "no time on this day"} for p in ids]
+        days.append(day)
+        buckets.append(bucket)
+    if pending:   # the days are independent, so they are ordered at the same time
+        with ThreadPoolExecutor(max_workers=min(len(pending), SEQUENCE_WORKERS)) as ex:
+            results = list(ex.map(lambda job: copy.copy(gw).call("sequence_day", job[4]), pending))
+        for (day, dt, ordered_ids, bucket, _), res in zip(pending, results):
             if res.get("ok"):
                 day["stops"] = [{k: s_.get(k) for k in ("placeId", "name", "category", "arriveAt", "departAt",
                                                          "travelMinutesFromPrev", "travelBy")}
                                 for s_ in res.get("stops", [])]
-                unscheduled += [{**u, "date": dt} for u in res.get("unscheduled", [])]
+                bucket += [{**u, "date": dt} for u in res.get("unscheduled", [])]
             else:
                 # e.g. unknown IDs -> leave times off; the verifier will flag it for repair
                 day["stops"] = [{"placeId": p} for p in ordered_ids]
-        elif ids:
-            unscheduled += [{"placeId": p, "name": p, "date": dt, "reason": "no time on this day"} for p in ids]
-        days.append(day)
+    unscheduled = [u for bucket in buckets for u in bucket]
     out = {"flightOfferId": plan.get("flightOfferId"), "stayId": stays[0]["stayId"], "days": days}
     if multi:
         out["stays"] = stays

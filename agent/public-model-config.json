@@ -5,7 +5,8 @@
     "provider": "anthropic",
     "model": "claude-opus-5-5",
     "options": {
-      "reasoningEffort": "medium"
+      "reasoningEffort": "medium",
+      "speed": "fast"
     }
   },
   "executor": {

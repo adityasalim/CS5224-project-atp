@@ -106,9 +106,13 @@ class ModelConfiguration:
                     'thinkingBudget',
                     'temperature',
                     'reasoningEffort',
+                    'speed',
                 }
             ):
                 raise ValueError('Unsupported provider options')
+            if 'speed' in options and (provider != 'anthropic' or options['speed'] != 'fast'
+                                       or not str(row.get('model', '')).startswith('claude-opus')):
+                raise ValueError('speed "fast" is only for Claude Opus on the Anthropic API')
 
             if (
                 'temperature' in options

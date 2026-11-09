@@ -156,9 +156,19 @@ class ModelAdapter:
                         **({'tools':tools} if tools else {}))   # server tools only (web search)
                 # Opus: a safety-classifier refusal is re-run server side on Anthropic's recommended model (beta; Haiku has none)
                 opus=selected.model_id.startswith('claude-opus')
-                with (client.beta.messages.stream(**request,betas=['server-side-fallback-2026-07-01'],fallbacks='default') if opus
-                      else client.messages.stream(**request)) as stream:
-                    result=stream.get_final_message()
+                # Fast mode (beta, Opus, 2x price) only for the first draft; its own rate limit falls back to normal speed
+                fast=opus and selected.options.get('speed')=='fast' and getattr(self,'operation',None)=='proposal'
+                betas=['server-side-fallback-2026-07-01']+(['fast-mode-2026-02-01'] if fast else [])
+                try:
+                    with (client.beta.messages.stream(**request,betas=betas,fallbacks='default',**({'speed':'fast'} if fast else {}))
+                          if opus else client.messages.stream(**request)) as stream:
+                        result=stream.get_final_message()
+                except Exception as error:   # the SDK is imported lazily, so match its rate-limit error by name
+                    if not fast or type(error).__name__!='RateLimitError':raise
+                    fast=False
+                    with client.beta.messages.stream(**request,betas=betas[:1],fallbacks='default') as stream:
+                        result=stream.get_final_message()
+                if fast:row['speed']='fast'
                 text=''.join(b.text for b in result.content if b.type=='text')
                 # the pages the search really returned, so a cited source can be checked against them
                 web_urls=[r.url for b in result.content if b.type=='web_search_tool_result' and isinstance(b.content,list)

@@ -40,15 +40,18 @@ class Protocol(unittest.TestCase):
   self.assertIn('Explain missing hours',invoke.call_args.kwargs['system'])
  def test_correction_routes_to_executor_in_real_handler(self):
   tree=ast.parse((ROOT/'agent/tp_travel_agent.py').read_text())
-  node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_repair_request')
+  nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in ('_repair_request','_planner_provider')]
   captured={}
   ns={'prepare_pool':lambda *a:None,'DAILY_SPEND':100,'is_multi':lambda s:False,'_special_rules':lambda s:'','planning_context':lambda *a:'facts','get_prompt':lambda n:'repairer','json':__import__('json'),'PLANNER_MODEL':'unused','plan_tokens':lambda spec:6000,
      '_enrich_violations':lambda *a:[],'_deterministic_quality_eval':lambda *a:{'suggestions':[]},'_is_valid_judge_result':lambda r:False}
   def ask(*args,**kw):captured.update(kw);return {}
   ns['ask_json']=ask
-  exec(compile(ast.Module(body=[node],type_ignores=[]),'<repair>','exec'),ns)
+  exec(compile(ast.Module(body=nodes,type_ignores=[]),'<repair>','exec'),ns)
   ns['_repair_request']({}, {}, {}, {}, {}, [],SimpleNamespace(adapter=SimpleNamespace(operation='correction')))
-  self.assertEqual(captured['model_role'],'executor')
+  self.assertEqual(captured['model_role'],'executor')   # configuration 19: corrections on the executor
+  claude=SimpleNamespace(operation='correction',configuration=SimpleNamespace(selections={'planner':SimpleNamespace(provider='anthropic')}))
+  ns['_repair_request']({}, {}, {}, {}, {}, [],SimpleNamespace(adapter=claude))
+  self.assertEqual(captured['model_role'],'planner')    # Claude: corrections on Opus, as approved
  def test_no_second_provider_or_json_request(self):
   source=(ROOT/'agent/tp_travel_agent.py').read_text();tree=ast.parse(source)
   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='ask_json')

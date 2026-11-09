@@ -263,4 +263,23 @@ best = claude_run([3, 2])   # the corrected plan scores worse: the first one is 
 assert REPAIRS == [None] and min(best["judge"]["scores"].values()) == 3, (REPAIRS, best["judge"])
 best = claude_run([2, 1, 1])   # still below 3: the second correction starts from the best plan
 assert REPAIRS == [None, None] and min(best["judge"]["scores"].values()) == 2, (REPAIRS, best["judge"])
+# the days are ordered at the same time, and results stay in day order
+import threading, time as _time
+class SlowGw:
+    calls, lock = [], threading.Lock()
+    def call(self, tool, args):
+        _time.sleep(0.3)
+        with self.lock:
+            self.calls.append(args["date"])
+        return {"ok": True, "stops": [{"placeId": args["placeIds"][0], "name": args["date"]}],
+                "unscheduled": [{"placeId": "late", "name": "late"}]}
+saved_clients, A._clients = A._clients, lambda: (None, None, SlowGw())
+t0 = _time.time()
+seq_out, late = A.sequence(spec_r, pool_r, plan_r)
+took = _time.time() - t0
+A._clients = saved_clients
+n = len(SlowGw.calls)
+assert n >= 2 and took < 0.3 * n * 0.7, (n, took)
+assert [d["stops"][0]["name"] for d in seq_out["days"] if d["stops"] and "name" in d["stops"][0]] == sorted(SlowGw.calls)
+assert [u["date"] for u in late if u["placeId"] == "late"] == sorted(SlowGw.calls), "unscheduled stays in day order"
 print("PERSONALISATION OK")

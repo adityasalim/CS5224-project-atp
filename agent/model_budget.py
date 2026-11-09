@@ -125,8 +125,9 @@ class PriceQuote:
             if not self.input_includes_cache:inp+=read
             return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000)+search,'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
         uncached=inp-read if self.input_includes_cache else inp
-        amount=(uncached*self.input_per_million+read*(self.cache_read_per_million or 0)+write*(self.cache_write_per_million or 0)+out*self.output_per_million)/Decimal(1000000)+search
-        return amount,self.rate_basis
+        amount=(uncached*self.input_per_million+read*(self.cache_read_per_million or 0)+write*(self.cache_write_per_million or 0)+out*self.output_per_million)/Decimal(1000000)
+        if row.get('speed')=='fast':return amount*2+search,'fast mode at 2x the standard rates; '+self.rate_basis
+        return amount+search,self.rate_basis
 
 class BudgetLedger:
     def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=False):
@@ -149,7 +150,7 @@ class BudgetLedger:
         quote=self.quotes.get((selection.provider,selection.model_id))
         if quote is None:raise BudgetError('No verified pricing quote for selected model')
         quote.validate_date(self.today())
-        maximum=quote.reserve_cost(system,messages,max_tokens)
+        maximum=quote.reserve_cost(system,messages,max_tokens)*(2 if (getattr(selection,'options',None) or {}).get('speed')=='fast' else 1)   # fast mode: 2x
         identifier=uuid.uuid4().hex
         def reserve(state):
             if self.enforce_spending_caps and state['halted']:
