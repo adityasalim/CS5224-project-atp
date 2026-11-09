@@ -243,7 +243,8 @@ Zones (built by the system from walking and taxi times; they take precedence ove
 - Dates with fewer than 8 usableHours and moving days use 0-2 stops in one zone close to that night's stay.
 - A "park" zone fills a full day on its own (meals are inside the park; the requested cafe stops come from the park
   zone's cafes), never a date with fewer than 8 usableHours or a moving day.
-  A "daytrip" zone is a day-trip town or a far theme park: on that full day use only its places and set "dayTrip"
+  A "daytrip" zone is a day-trip town or a far theme park, never on the trip's first or last date: on that full day
+  use only its places and set "dayTrip"
   to the zone's "dayTrip" value.
 - Every full city day has a lunch and a dinner: on a two-zone day one meal from each zone, on a one-zone day both
   from it. When preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every

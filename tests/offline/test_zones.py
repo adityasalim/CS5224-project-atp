@@ -253,6 +253,12 @@ big_spec, big_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 big_pool["zones"] = [dict(zones[2], id=f"Z{100 + i}", kind="walk") for i in range(30)]
 assert drain(Z["zone_food"](big_spec, big_pool, [], set())) == 20 and drain(Z["zone_food"](spec, {"places": []}, [], set())) == 0
 assert len(SENT) == 20, f"hard cap of 20 Google requests per plan, sent {len(SENT)}"
+SENT.clear()
+two = copy.deepcopy(spec)
+two["cuisines"] = ["Italian", "Indian"]
+drain(Z["zone_food"](two, copy.deepcopy(pool), [], set()))
+cuisine_jobs = [a["cuisine"] for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]]
+assert sorted(cuisine_jobs) == ["indian", "italian", "italian"] and len(SENT) == 20, (cuisine_jobs, len(SENT))   # one each, capped
 # a meal price level goes to the zone searches only, and adds no request
 assert not any("priceLevel" in a for a in nearby)
 SENT.clear()

@@ -1880,11 +1880,14 @@ def gather_specials(spec, pool, calls, sources, only=None):
             yield ev("status", f"Finding things to do on a day trip to {t['place']}…")
             # geocode near the trip's city (a bare "Fuji" matched Antipolo, Philippines), wide enough to reach the
             # base towns around a landmark (Kawaguchiko is ~13 km from Fuji's summit)
-            li_t = leg_of(t.get("fromCity")) if multi else 0   # no centre for an unknown city on a route
+            li_t = leg_of(t.get("fromCity")) if multi else 0
             home = [p_ for p_ in pool["places"] if not p_.get("dayTrip") and p_.get("lat") is not None
-                    and (not multi or (li_t is not None and p_.get("leg") == li_t))]
-            near = ({"near": {"lat": statistics.median(p_["lat"] for p_ in home),
-                              "lng": statistics.median(p_["lng"] for p_ in home)}, "maxKm": DAY_TRIP_NEAR_KM} if home else {})
+                    and (li_t is None or not multi or p_.get("leg") == li_t)]
+            near = {}
+            if home:   # the trip's city; for an unknown city on a route, the route, wide enough to reach every city
+                c = {"lat": statistics.median(p_["lat"] for p_ in home), "lng": statistics.median(p_["lng"] for p_ in home)}
+                reach = DAY_TRIP_NEAR_KM + (max(_km(c, p_) for p_ in home) if multi and li_t is None else 0)
+                near = {"near": c, "maxKm": round(reach)}
             r = call({"city": t["place"], "categories": cats, "radiusKm": DAY_TRIP_RADIUS_KM, "maxPerCategory": 4,
                       **near})   # food: zone_food
             if not r.get("ok") or not r.get("places"):
@@ -2008,10 +2011,9 @@ def _usable_hours(f, spec):
     """The flight's local planning window on its arrival and departure dates ("none" = no time), so the planner
     knows a 05:55 landing still leaves a full day."""
     slices, prefs, days = f.get("slices") or [{}], spec.get("preferences") or {}, {}
-    if not slices[0].get("arriveAt") and not slices[-1].get("departAt"):
-        return days   # times unknown: no window rather than an invented full day
-    edges = {spec["startDate"], spec.get("endDate", ""), str(slices[0].get("arriveAt") or "")[:10],
-             str(slices[-1].get("departAt") or "")[:10]}
+    arr, dep = str(slices[0].get("arriveAt") or "")[:10], str(slices[-1].get("departAt") or "")[:10]
+    edges = ({spec["startDate"], arr} if arr else set()) | ({spec.get("endDate", ""), dep} if dep else set())
+    # a side whose time is unknown gets no window rather than an invented full day
     for day in sorted(d for d in edges if len(d) == 10 and spec["startDate"] <= d <= spec.get("endDate", "~")):
         a, b = _flight_day_window(spec, {"flights": [f]}, {"flightOfferId": f.get("offerId")}, day,
                                   _hm(prefs.get("dayStart") or "09:00"), _hm(prefs.get("dayEnd") or "21:00"))
@@ -3479,7 +3481,10 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
         cafes = sum(p.get("category") == "cafe" for p in st)
         if d.get("dayTrip") or any(p.get("zone") in parkz or p.get("category") == "theme_park"
                                    or PARK_RE.search(p.get("name") or "") for p in st):
-            if cafes < want_cafes:   # park and day-trip days: meals may be inside, but the requested cafes count
+            here = {p.get("zone") for p in st} | {p.get("dayTrip") for p in st}
+            have = sum(1 for p in pool.get("places") or [] if p.get("category") == "cafe"
+                       and (p.get("zone") in here or (p.get("dayTrip") and p.get("dayTrip") in here)))
+            if cafes < min(want_cafes, have):   # park and day-trip days: only the cafes the pool has nearby
                 msg = f"{d['date']} needs {want_cafes} cafe stops near that day's park or town."
                 issues.append({"priority": 6, "day": d.get("date"), "status": "zones", "message": msg})
                 suggestions.append(msg)
