@@ -214,6 +214,36 @@ for low, want in ((2, 2), (3, 1)):
     assert len(REPAIRS) == want and best["rounds"] == want, (low, REPAIRS, best["rounds"])
 assert A._planner_provider(strict) is None, "configuration 19 keeps one correction"
 
+# hard checks still failing: Claude gets a second correction and a "not fully verified" plan; configuration 19 refuses
+b_, m_, g_ = A._clients()
+class FailVerify:
+    def __init__(self, gw): self.gw = gw
+    def call(self, tool, args):
+        if tool == "verify_itinerary":
+            return {"ok": True, "passed": False, "violations": [
+                {"check": "opening_hours", "day": spec_r["startDate"], "message": "Senso-ji is closed at 07:00"}]}
+        return self.gw.call(tool, args)
+saved_clients = A._clients
+A._clients = lambda: (b_, m_, FailVerify(g_))
+for adapter, want in ((claude, 2), (strict.adapter, 1)):
+    REPAIRS.clear()
+    A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
+    gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=adapter, trip_id="t-hard"))
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        best = stop.value
+    except ValueError as e:
+        best = e
+    A.repair = saved[1]
+    assert len(REPAIRS) == want, (adapter is claude, REPAIRS)
+    if adapter is claude:
+        assert best["acceptanceState"] == "caveated" and any("not fully verified" in r for r in best["acceptanceReasons"]), best
+    else:
+        assert isinstance(best, ValueError), "configuration 19 keeps its strict refusal"
+A._clients = saved_clients
+
 # ---- spare budget: firm star wish, hotels by rating and flights by price and travel time when the budget has room
 def prefs_for(amount):
     s = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2,

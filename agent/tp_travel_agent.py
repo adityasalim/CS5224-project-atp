@@ -4732,7 +4732,8 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     _, _, gw = _clients()
     strict_mode = bool(getattr(getattr(usage, 'adapter', None), 'strict_no_retry', False))
     round_limit = 1 if strict_mode else MAX_REPAIR_ROUNDS
-    # Claude on the website: a second correction when a review score is below 3, and the best-ranked plan is kept
+    # Claude on the website: a second correction when the hard checks fail or a review score is below 3, and the
+    # best-ranked plan is kept
     claude = _planner_provider(usage) == "anthropic"
     prepare_pool(spec, pool, DAILY_SPEND)
     tspec = trip_spec_for_tools(spec)
@@ -4760,6 +4761,9 @@ def improve(spec, pool, plan, full_request, usage, change=None):
                     "violations": [{"check": "verify_error", "message": msg or "verification service did not return a successful result"}]}
         elif vres.get("passed") is not True:
             vres["passed"] = False
+        print(json.dumps({"stage": "verify", "round": rounds, "passed": vres.get("passed") is True, "violations": [
+            {"check": v.get("check"), "day": v.get("day"), "message": str(v.get("message") or "")[:160]}
+            for v in (vres.get("violations") or [])[:10] if isinstance(v, dict)]}, ensure_ascii=False))
         diag = _deterministic_quality_eval(spec, pool, seq)
         unpriced = _unpriced_bookings(spec, pool, seq)
         det_suggestions = list(diag["suggestions"])
@@ -4808,7 +4812,8 @@ def improve(spec, pool, plan, full_request, usage, change=None):
         done = _verified(vres) and judge_ok and not unscheduled and not unpriced
         if LOOP_ENABLED and judge_res is not None and judge_res.get("unavailable"):
             judge_res["status"] = "unavailable"
-        limit = 2 if strict_mode and claude and (_judge_min(best["judge"]) or 5) < 3 else round_limit
+        limit = 2 if strict_mode and claude and (not _verified(best["verify"])
+                                                 or (_judge_min(best["judge"]) or 5) < 3) else round_limit
         if done or not LOOP_ENABLED or rounds >= limit:
             stop_reason = STOP_ACCEPTED if done else (STOP_LOOP_DISABLED if not LOOP_ENABLED else STOP_ROUND_LIMIT)
             break
@@ -4849,7 +4854,9 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     best["acceptanceReasons"] = accept_reasons
     best["stopReason"] = stop_reason
     best["qualityAccepted"] = accept_state == STATE_ACCEPTED
-    if strict_mode and not _verified(best["verify"]) and not _budget_only_failure(best["verify"]):
+    # Claude: a plan still failing checks is delivered as "not fully verified" with the failures listed (or refused
+    # for a mandatory conflict) by classify_acceptance; configuration 19 keeps its strict refusal
+    if strict_mode and not claude and not _verified(best["verify"]) and not _budget_only_failure(best["verify"]):
         raise ValueError("Optimized itinerary failed deterministic checks after one correction")
     return best
 
