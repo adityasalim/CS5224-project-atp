@@ -430,6 +430,8 @@ def _call_serpapi(q, key):
         except FutureTimeout:
             ns, ns_err = None, _err("upstream_timeout", "the nonstop search was still running when the return "
                                                         "lookups needed the time", "serpapi")
+        except Exception as e:  # noqa: BLE001 -- the nonstop search is optional: a bad answer never costs the results
+            ns, ns_err = None, _err("upstream_failed", f"nonstop search: {type(e).__name__}: {e}"[:300], "serpapi")
         if ns_err:
             print("nonstop search failed:", ns_err)
         else:

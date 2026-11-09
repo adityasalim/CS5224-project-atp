@@ -519,7 +519,26 @@ next(gen)   # the first status line comes after the spec is saved and before the
 legs_ = st_["spec"]["legs"]
 assert [l["checkIn"] for l in legs_] == ["2026-12-15", "2026-12-18"] and legs_[1]["hotel"] == {"name": "Hotel X"}, legs_
 gen.close()
+# the router writes only that stay (by its dates), or the full list without nights: the old legs are kept
+old_legs = json.loads(json.dumps(ms["legs"]))
+for router_legs in ([{"checkIn": "2026-12-18", "checkOut": "2026-12-20", "hotel": {"name": "Hotel X"}}],
+                    [{"city": "Tokyo", "checkIn": "2026-12-15", "checkOut": "2026-12-18"},
+                     {"city": "Kyoto", "checkIn": "2026-12-18", "checkOut": "2026-12-20", "hotel": {"name": "Hotel X"}}]):
+    st_ = {"spec": json.loads(json.dumps(ms)), "pool": {"stays": [], "flights": [], "transfers": [], "places": []},
+           "version": 1, "history": [], "request": "Plan Tokyo and Kyoto"}
+    gen = A.revise(st_, "Stay at Hotel X for 18-20 Dec", {"legs": router_legs}, "u", A.Usage(), {}, time.time())
+    next(gen)
+    got = st_["spec"]["legs"]
+    assert [(l["city"], l["nights"], l["checkIn"]) for l in got] == [(l["city"], l["nights"], l["checkIn"]) for l in old_legs] \
+        and got[1]["hotel"] == {"name": "Hotel X"} and not got[0].get("hotel", {}).get("name"), got
+    gen.close()
+assert A._hotel_only_legs(old_legs, [{"city": "Kyoto", "nights": 5, "hotel": {"name": "X"}}]) is None, "nights changed"
+assert A._hotel_only_legs(old_legs, [{"city": "Osaka", "hotel": {"name": "X"}}]) is None, "a new city"
 A._clients = clients
+# the router reads a chip named by its stay dates (approved wording)
+import prompts as _prompts
+assert '(write the full legs list, unchanged except that hotel).' in _prompts.ROUTER and \
+    '"for <d1> <Mon>-<d2> <Mon>"' in _prompts.ROUTER
 # the search categories keep the traveler's interest order (tp-find-places asks Google first for the first 4 sights)
 order = A.preference_search_categories({"interests": ["temple", "shrine", "museum", "viewpoint", "garden"]})
 assert order[:5] == ["temple", "shrine", "museum", "viewpoint", "garden"], order

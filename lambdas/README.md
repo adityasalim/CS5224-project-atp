@@ -22,7 +22,7 @@ providers, never from the model. That is the report's "prices are never generate
 
 | Function | Layer `tp-deps` | Timeout | Memory | Environment variables |
 | --- | --- | --- | --- | --- |
-| `tp-search-flights` | yes | 30 s | 512 MB | `SECRET_ARN`, `CACHE_TABLE`, `MOCK_MODE` |
+| `tp-search-flights` | yes | 60 s | 512 MB | `SECRET_ARN`, `CACHE_TABLE`, `MOCK_MODE` |
 | `tp-search-stays` | yes | 60 s | 512 MB | `SECRET_ARN`, `CACHE_TABLE`, `MOCK_MODE` |
 | `tp-find-places` | yes | 60 s | 512 MB | `SECRET_ARN`, `CACHE_TABLE`, `MOCK_MODE`, optional `CONTACT_EMAIL` |
 | `tp-search-transfers` | yes | 60 s | 512 MB | `SECRET_ARN`, `CACHE_TABLE`, `MOCK_MODE` |

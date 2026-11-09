@@ -135,6 +135,13 @@ assert [s["name"] for s in r["stops"]][0] == "Tokyo DisneySea" and len(r["stops"
 BREAKFAST = stop("bk", "Breakfast Cafe", "cafe", 35.6300, 139.8820, {"open": "08:00", "close": "10:00"})
 r = day(BREAKFAST, SEA, pinned=["bk"])
 assert [s["name"] for s in r["stops"]] == ["Breakfast Cafe", "Tokyo DisneySea"], r
+# a small amusement venue (a theme_park that is not a full-day park) does not force the day open with it: it opens at
+# 11:00, so the market that closes early comes first and nothing is dropped
+JOY = stop("joy", "Tokyo Joypolis", "theme_park", 35.6283, 139.7754, {"open": "11:00", "close": "20:00"})
+MARKET = stop("mkt", "Tsukiji Outer Market", "market", 35.6655, 139.7707, {"open": "07:00", "close": "14:00"})
+r = sd.lambda_handler({"date": "2026-12-16", "start": HOTEL, "stops": [JOY, MARKET], "dayStart": "09:00",
+                       "dayEnd": "21:00", "mode": "walk"}, None)
+assert [s["name"] for s in r["stops"]] == ["Tsukiji Outer Market", "Tokyo Joypolis"] and not r["unscheduled"], r
 # a day with no park is ordered as before
 r = day(GAZEBO, GONDOLIER)
 assert [s["name"] for s in r["stops"]] == ["The Gazebo", "Gondolier Snacks"], r

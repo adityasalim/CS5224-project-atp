@@ -66,7 +66,7 @@ deploy() {
   fi
 }
 
-deploy tp-search-flights    30 512 yes "${SEARCH[@]}"
+deploy tp-search-flights    60 512 yes "${SEARCH[@]}"
 deploy tp-search-stays      60 512 yes "${SEARCH[@]}"
 deploy tp-find-places       60 512 yes "${SEARCH[@]}"
 deploy tp-search-transfers  60 512 yes "${SEARCH[@]}"

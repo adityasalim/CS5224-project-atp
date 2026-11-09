@@ -172,11 +172,6 @@ def _full_day_park(p):
         w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q"))
 
 
-def _opens_day(p):
-    """A theme park (category theme_park, or a full-day park listed as an attraction) opens its day."""
-    return p.get("category") == "theme_park" or _full_day_park(p)
-
-
 def _resolve(event):
     """Builds start + stops from IDs (via the pool) and/or full objects."""
     ids = list(event.get("placeIds") or [])
@@ -255,7 +250,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
     In walk mode the day starts in the walkable group farthest from the hotel and finishes a group before it takes a
     ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN. A group is a zone
     when the stops carry zone ids, else a chain of walks of MAX_WALK_MINUTES or less. first (a group id) starts the
-    day in that group instead. park_first starts the day with a theme park (_opens_day) when one fits."""
+    day in that group instead. park_first starts the day with a full-day park (_full_day_park) when one fits."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
@@ -293,7 +288,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
     while remaining:
         if max_stops and len(out) >= max_stops:
             break
-        parks = [i for i in remaining if park_first and not out and _opens_day(stops[i - 1])]
+        parks = [i for i in remaining if park_first and not out and _full_day_park(stops[i - 1])]
         best = pick(parks) if parks else None   # the park opens the day, the other stops come after it
         if best is None:
             if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
@@ -371,7 +366,7 @@ def lambda_handler(event, context):
         z = [zone_of[x["placeId"]] for x in o[0]]
         runs = [a for k, a in enumerate(z) if k == 0 or a != z[k - 1]]
         return len(runs) - len(set(runs))
-    parks = {s["placeId"] for s in stops if _opens_day(s)}
+    parks = {s["placeId"] for s in stops if _full_day_park(s)}   # a full-day park opens the day; a small one need not
     options = [(f, schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
                             max_stops=max_stops, min_free=min_free, first=f, park_first=pf))
                for pf in ((False, True) if parks else (False,)) for lf in (False, True) for f in firsts]

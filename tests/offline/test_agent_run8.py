@@ -69,6 +69,14 @@ cafes = [cafe("sb", "Starbucks Coffee Shibuya", 4.6), cafe("dt", "Doutor Coffee 
 order = [p["placeId"] for p in A._order_places(copy.deepcopy(cafes), None, spec=coffee_spec)]
 assert order[:3] == ["gl", "on", "ro"] and set(order[-4:]) == {"sb", "dt", "tl", "sm"}, order
 assert order[3] == "pl", "a plain cafe sits between the specialty cafes and the chains"
+# whole-word chain names only, Japanese chain names too; "roast" counts only as roaster/roastery in the name or tags
+score = lambda p: A._place_score(p, coffee_spec)
+base = score(cafe("x", "Plain Cafe", 4.4))
+for name in ("Just Marc's Coffee", "Rebecks Bakery Cafe"):
+    assert score(cafe("x", name, 4.4)) == base, name
+assert abs(score(cafe("x", "スターバックス コーヒー 渋谷店", 4.4)) - (base - 8)) < 1e-9
+assert score(cafe("x", "Roast Beef Sandwich Cafe", 4.4)) == base
+assert score({**cafe("x", "Plain Cafe", 4.4), "description": "roasted chestnuts"}) <= base + 0.5
 # without the wish the ranking is unchanged (the chains are not pushed down)
 plain = {**coffee_spec, "preferences": {**coffee_spec["preferences"], "food": {"tea": True}}}
 assert [p["placeId"] for p in A._order_places(copy.deepcopy(cafes), None, spec=plain)][0] == "sb"

@@ -2477,9 +2477,11 @@ def _accessibility_status(p, access_reqs):
     return "verified" if has_pos else "unknown"
 
 
-# Coffee chains, as their names read with spaces and punctuation removed: ranked below roasters and specialty cafes
-# when the traveler wished specialty coffee or pour-over.
-CHAIN_CAFES = ("starbucks", "doutor", "tullys", "excelsior", "komeda", "pronto", "veloce", "stmarc", "saintmarc", "becks")
+# Coffee chains (as whole words in a lower-case name, or their Japanese names): ranked below roasters and specialty
+# cafes when the traveler wished specialty coffee or pour-over.
+CHAIN_CAFES = re.compile(r"(?<![a-z])(starbucks|doutor|tully['’]?s|excelsior|komeda|pronto|veloce|st\.? ?marc|saint marc|"
+                         r"beck['’]?s)(?![a-z])|スターバックス|ドトール|タリーズ|エクセルシオール|コメダ|プロント|ベローチェ|サンマルク")
+SPECIALTY_COFFEE = re.compile(r"\broast(?:er|ers|ery|eries|ing)\b|焙煎|specialty coffee")
 
 
 def _place_score(p, spec=None):
@@ -2561,9 +2563,9 @@ def _place_score(p, spec=None):
     # 3b. Specialty coffee or pour-over wished: roasters and specialty cafes above the coffee chains (kept, ranked lower)
     coffee = (spec.get("preferences") or {}).get("food") or {}
     if cat == "cafe" and (coffee.get("coffee") or coffee.get("coffeeStyle") == "pour_over"):
-        if any(c in re.sub(r"[\W_]", "", name_l) for c in CHAIN_CAFES):
+        if CHAIN_CAFES.search(name_l):   # a chain's name as a whole word ("Just Marc's Coffee" is not St. Marc)
             score -= 8.0
-        elif re.search(r"roast|焙煎|specialty coffee", f"{name_l} {meta_text}"):
+        elif SPECIALTY_COFFEE.search(" ".join([name_l] + [str(t).lower() for t in tags])):   # name and tags only
             score += 4.0
 
     # 4. Explicit activity relevance (distinguishing verified trails/activities from generic parks and retail)
@@ -5701,6 +5703,32 @@ def refresh_bookings(state, spec, what, metrics):
             pool["transfers"] = new
 
 
+def _hotel_only_legs(old_legs, new_legs):
+    """The old legs with the hotel wishes of new_legs, when new_legs only names existing stays (by checkIn/checkOut,
+    else by a city that has one stay) without changing their city or nights and at least one carries a hotel;
+    else None."""
+    if not old_legs or not new_legs or len(new_legs) > len(old_legs):
+        return None
+    out, hotel = [dict(o) for o in old_legs], False
+    for n in new_legs:
+        if not isinstance(n, dict):
+            return None
+        hits = [i for i, o in enumerate(old_legs) if n.get("checkIn") and n.get("checkIn") == o.get("checkIn")
+                and n.get("checkOut", o.get("checkOut")) == o.get("checkOut")]
+        if not hits and n.get("city"):
+            hits = [i for i, o in enumerate(old_legs)
+                    if str(o.get("city")).strip().lower() == str(n.get("city")).strip().lower()]
+        if len(hits) != 1:
+            return None
+        o = old_legs[hits[0]]
+        if (n.get("city") and str(n["city"]).strip().lower() != str(o.get("city")).strip().lower()) or \
+                (n.get("nights") not in (None, o.get("nights"))):
+            return None
+        if isinstance(n.get("hotel"), dict) and n["hotel"].get("name"):
+            out[hits[0]]["hotel"], hotel = n["hotel"], True
+    return out if hotel else None
+
+
 def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=None):
     """Apply a change request to the current trip."""
     old = state["spec"]
@@ -5798,6 +5826,12 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
                             for o, n in zip(old["legs"], spec["legs"])]
             if [l.get("hotel") for l in spec["legs"]] != [l.get("hotel") for l in old.get("legs") or []]:
                 refresh.add("stays")
+        elif _hotel_only_legs(old.get("legs") or [], spec.get("legs") or []) is not None:
+            # a part of the list, or legs without nights: each names an existing stay by its dates (or its city when
+            # the city has one stay) and only adds a hotel wish, so the old legs are kept with that hotel
+            spec["legs"] = _hotel_only_legs(old["legs"], spec["legs"])
+            changes.pop("legs")
+            refresh.add("stays")
     problems = _check_spec(spec)
     if not problems and set(changes or {}) & {"legs", "startDate", "endDate"} and spec.get("legs"):
         problems = normalize_legs(spec)    # re-split nights and dates across the cities
