@@ -293,7 +293,7 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
         """When a full-day park visit must end so that the day's other planned stops still fit after it: only the
         stops still open late enough after the park's minimum visit count (each with its visit and
         PARK_STOP_GAP_MIN to get there), at most as many as max_stops leaves room for, and the park ends no later
-        than their latest closing time minus that time."""
+        than each such stop's closing time minus the time of the stops closing no later than it."""
         floor_end = begin + s["visitMinutes"]
         later = []
         for j in remaining:
@@ -310,7 +310,8 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
         if max_stops:
             later = sorted(later, key=lambda x: x[0])[:max(0, max_stops - len(out) - 1)]
         rest = sum(n for n, _ in later)
-        last = max((c for _, c in later), default=day_end - back) - rest
+        # earliest deadline first: each stop must fit, with the ones closing no later than it, before it closes
+        last = min((c - sum(n2 for n2, c2 in later if c2 <= c) for _, c in later), default=day_end - back)
         if min_free:
             last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back - rest)
         return last

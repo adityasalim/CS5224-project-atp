@@ -2099,14 +2099,15 @@ def _brand_words(name, cities):
     return words[:1] + [w for w in words[1:] if w not in cities]
 
 
-def _same_brand(a, b):
-    """The shared leading words of two _brand_words lists when they are one brand (see the rule above), else None."""
+def _same_brand(a, b, cities=()):
+    """The shared leading words of two _brand_words lists when they are one brand (see the rule above), else None.
+    A shared city word is not the brand's distinctive word ("Kyoto Tower" and "Kyoto Tower Sando" are not one brand)."""
     k = 0
     while k < min(len(a), len(b)) and a[k] == b[k]:
         k += 1
     if not (k >= 2 or (k == 1 and min(len(a), len(b)) == 1 and len(a[0]) >= 4)):
         return None
-    if not any(w not in _VENUE_NOUNS and w not in _BRANCH_WORDS and len(w) >= 3 for w in a[:k]):
+    if not any(w not in _VENUE_NOUNS and w not in _BRANCH_WORDS and w not in cities and len(w) >= 3 for w in a[:k]):
         return None
     ra, rb = a[k:], b[k:]
     if len(ra) > 2 or len(rb) > 2 or {w for w in ra if w in _VENUE_NOUNS} != {w for w in rb if w in _VENUE_NOUNS}:
@@ -2134,7 +2135,7 @@ def _hide_brand_repeats(spec, pool, plan=None):
     root = lambda i: i if group[i] == i else root(group[i])
     for n, p in enumerate(uniq):
         for q in uniq[n + 1:]:
-            if words[p["placeId"]] and words[q["placeId"]] and _same_brand(words[p["placeId"]], words[q["placeId"]]):
+            if words[p["placeId"]] and words[q["placeId"]] and _same_brand(words[p["placeId"]], words[q["placeId"]], cities):
                 group[root(q["placeId"])] = root(p["placeId"])
     members = {}
     for p in uniq:

@@ -147,6 +147,15 @@ r = day(SEA, stop("m", "Museum", "museum", 35.627, 139.886, {"open": "09:00", "c
 assert r["stops"][0]["departAt"] == "20:45", r["stops"][0]
 r = day(SEA, stop("d", "Dinner", "restaurant", 35.6265, 139.8855, {"open": "11:00", "close": "23:00"}), minFreeMinutes=60)
 assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea", "Dinner"], r
+# earliest closing first: a cafe closing 19:00 and a dinner until 23:00 both fit after the park
+r = day(SEA, stop("c19", "Cafe", "cafe", 35.6262, 139.8857, {"open": "10:00", "close": "19:00"}),
+        stop("d", "Dinner", "restaurant", 35.6265, 139.8855, {"open": "11:00", "close": "23:00"}))
+assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea", "Cafe", "Dinner"] and not r["unscheduled"], r
+# a stop without known hours keeps its time after the park; maxStops leaves room only for the stops it allows
+r = day(SEA, stop("u", "Cafe", "cafe", 35.6262, 139.8857))
+assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea", "Cafe"] and r["stops"][0]["departAt"] < "20:00", r
+r = day(SEA, *early, maxStops=1)
+assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea"] and r["stops"][0]["departAt"] == "20:45", r
 # pinned first still wins: a pinned breakfast cafe that closes at 10:00 keeps its morning slot before the park
 BREAKFAST = stop("bk", "Breakfast Cafe", "cafe", 35.6300, 139.8820, {"open": "08:00", "close": "10:00"})
 r = day(BREAKFAST, SEA, pinned=["bk"])

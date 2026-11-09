@@ -606,6 +606,13 @@ for a, b, brand in (("SAMURAI NINJA MUSEUM Kyoto", "Samurai Ninja Museum Asakusa
                     ("Samurai Ninja Museum Tokyo", "Samurai Ninja Museum Kyoto", "samurai ninja museum")):
     assert A._same_brand(W(a), W(b)) == brand, (a, b, A._same_brand(W(a), W(b)))
 assert W("Kyoto National Museum") == ["kyoto", "national", "museum"] and W("MAIKOYA Kyoto Gion") == ["maikoya", "gion"]
+# with the route's city words, a shared city word is not a brand's distinctive word
+CW = {"tokyo", "kyoto", "osaka"}
+for a, b, brand in (("Kyoto Tower", "Kyoto Tower Sando", None), ("Tokyo Tower", "Tokyo Tower Foot Town", None),
+                    ("Osaka Station", "Osaka Station City", None),
+                    ("Tokyo National Museum", "Tokyo National Museum Heiseikan", "tokyo national museum"),
+                    ("Samurai Ninja Museum Tokyo", "Samurai Ninja Museum Kyoto", "samurai ninja museum")):
+    assert A._same_brand(W(a), W(b), CW) == brand, (a, b, A._same_brand(W(a), W(b), CW))
 place = lambda pid, name, cat, leg=0, rating=4.5, reviews=1000, **k: {
     "placeId": pid, "name": name, "category": cat, "leg": leg, "zone": "Z1", "rating": rating, "reviews": reviews,
     "lat": 35.0, "lng": 135.7, **k}
