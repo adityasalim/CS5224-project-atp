@@ -152,7 +152,7 @@ r = day(SEA, stop("c19", "Cafe", "cafe", 35.6262, 139.8857, {"open": "10:00", "c
         stop("d", "Dinner", "restaurant", 35.6265, 139.8855, {"open": "11:00", "close": "23:00"}))
 assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea", "Cafe", "Dinner"] and not r["unscheduled"], r
 # a stop without known hours keeps its time after the park; maxStops leaves room only for the stops it allows
-r = day(SEA, stop("u", "Cafe", "cafe", 35.6262, 139.8857))
+r = day(SEA, stop("u", "Cafe", "cafe", 35.6262, 139.8857, None))   # no hours known
 assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea", "Cafe"] and r["stops"][0]["departAt"] < "20:00", r
 r = day(SEA, *early, maxStops=1)
 assert [s["name"] for s in r["stops"]] == ["Tokyo DisneySea"] and r["stops"][0]["departAt"] == "20:45", r
