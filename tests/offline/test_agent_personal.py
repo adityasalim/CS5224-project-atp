@@ -231,6 +231,13 @@ roomy = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget":
          "dailySpend": {"amount": "100", "currency": "SGD"}, "preferences": {}}
 A.normalize_prefs(roomy)
 assert A._flight_sort(roomy["preferences"]["flight"], roomy) == "best", "the planner's flight order follows the search"
+offers = [{"offerId": "cheap", "priceTotalSGD": 300, "durationMinutes": 900, "stops": 1},
+          {"offerId": "direct", "priceTotalSGD": 400, "durationMinutes": 400, "stops": 0}]
+assert [f["offerId"] for f in A._order_flights(offers, roomy)] == ["direct", "cheap"], "budget room: price and travel time"
+tight = {**roomy, "budget": {"amount": "5000", "currency": "SGD"}}
+assert [f["offerId"] for f in A._order_flights(offers, tight)] == ["cheap", "direct"], "no room: cheapest first"
+thrifty = {**roomy, "preferenceScores": {"comfort": 3}}
+assert A._comfort(thrifty) == 3 and A._comfort(roomy) == 8, "budget room never overrides a low comfort wish"
 assert not A._budget_room({**roomy, "dailySpend": {"amount": "0", "currency": "SGD"}}), "a zero daily estimate is no room"
 s0 = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"amount": "5000", "currency": "SGD"},
       "preferences": {}}

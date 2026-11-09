@@ -3040,9 +3040,10 @@ def _budget_room(spec):
 
 
 def _comfort(spec):
-    """The traveler's comfort score (1-10), at least 8 when the budget has room, for both hotel rankings."""
+    """The traveler's comfort score (1-10) for both hotel rankings: at least 8 when the budget has room, unless the
+    traveler asked for less comfort (a score under 5)."""
     comfort = int((spec.get("preferenceScores") or {}).get("comfort", 5))
-    return max(comfort, 8) if _budget_room(spec) else comfort
+    return max(comfort, 8) if comfort >= 5 and _budget_room(spec) else comfort
 
 
 def _flight_sort(f_pref, spec):
