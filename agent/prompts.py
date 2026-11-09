@@ -1,7 +1,7 @@
 """
 System prompts for each LLM step. Kept in one place so they can be versioned.
 
-Roles: INTAKE, ROUTER, CHAT, NARRATIVE and GATHER run on the executor model, PLANNER/REPAIR (and the multi-city
+Roles: INTAKE, ROUTER, CHAT, NARRATIVE, GLOSS and GATHER run on the executor model, PLANNER/REPAIR (and the multi-city
 variants) on the planner model, JUDGE on the reviewer model (see public-model-config.json).
 
 Phase 7.2: to load a prompt from Bedrock Prompt Management instead, set an environment
@@ -422,9 +422,12 @@ Score each criterion as an integer from 1 (poor) to 5 (excellent):
   classic = "well-known"), and budget-aware hotel comfort. Score 2 or lower for any confirmed conflict, supermarket used
   as a food stop, or missing high-priority (8-10) experience.
 - theme: coherent daily themes, logical geographic grouping, and meaningful alignment with traveller interests.
-- pacing: matches requested pace/intensity, light days with little time after landing or before departure, light
-  transfer days, realistic hike/activity density, and
-  no evening-only stops scheduled in the morning.
+- pacing: matches requested pace/intensity on full sightseeing days; a
+  full-day theme park (Disney, Universal Studios, Fuji-Q) is a complete
+  day on its own, and days with little time after landing or before
+  departure and transfer days are meant to be light, so none of these
+  count against a packed pace; realistic hike/activity density, and no
+  evening-only stops scheduled in the morning.
 - variety: diverse categories and dining across days without repetitive attractions or filler stops.
 
 Scale: 4 or 5 requires meaningful satisfaction of all important preferences and explicit requests (5 = no fixable
@@ -521,6 +524,15 @@ Recent conversation:
 {history}
 
 Reply in at most 120 words of plain text. If natural, end with one short example of a change they could ask for."""
+
+# English names for planned stops written only in Japanese (small-jobs model, one call per delivery). Sent as is,
+# never through str.format(): the braces below are literal.
+GLOSS = """ROLE: place-name translator for a travel itinerary.
+For each place name below that is written only in Japanese, give the
+name an English-speaking traveller would recognise: the brand's usual
+Latin spelling (ブルーボトルコーヒー -> Blue Bottle Coffee) and the
+branch or area words in plain English. If unsure, transliterate.
+Return JSON only: {"<placeId>": "<English name>"}."""
 
 # Insert the shared rule blocks (they contain no braces, so str.format() on the prompts still works).
 _SHARED = {"<<GUARD>>": DATA_GUARD, "<<SCORES>>": SCORE_RULES, "<<TIMING>>": TIMING_RULES,

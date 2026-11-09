@@ -18,6 +18,7 @@ python3 test_run8_tools.py | grep " OK$"
 python3 test_rail_hops.py | tail -1
 python3 test_model_selection.py | tail -1
 python3 test_agent_run8.py | grep " OK$"
+python3 test_agent_run9.py | grep " OK$"
 python3 fake_gateway.py & GW=$!
 trap 'kill $GW 2>/dev/null' EXIT
 sleep 2

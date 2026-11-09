@@ -298,7 +298,7 @@ assert len(A._clip("a" * 500, 400)) <= 401
 CURRENT_MIN_TOKENS = {            # enclosing function -> lowest allowed constant max_tokens
     "intake": 4000, "resolve_airport": 100, "_judge_request": 5000, "answer": 1000, "_narrative_request": 4000,
     "route": 1500, "select_packages": 4000, "review_text": 3000, "revise_text": 2500, "evaluator_call": 4000,
-    "gather_model": 3000,
+    "gather_model": 3000, "_gloss_names": 2000,
 }
 DEFAULT_MIN_TOKENS = 1000
 ROLES = set(S)

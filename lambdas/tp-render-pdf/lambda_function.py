@@ -3,7 +3,8 @@ from trip_currency import normalize_cached_pool, code as currency_code, budget_a
 tp-render-pdf — Lambda tool: turn a final (verified) itinerary into a PDF travel plan with
 clickable links, save it to S3 and return a short-lived download link.
 
-Names, prices and links are read from the candidate pool by ID (not from model text).
+Names, prices and links are read from the candidate pool by ID (not from model text); a stop's optional "nameEn"
+(the agent's English name for a Japanese-only name) is shown after it in brackets.
 Optional narrative text from the agent (already checked by Guardrails) can be included.
 
 Environment variables:
@@ -242,6 +243,9 @@ def build_pdf(event, pool, daily_spend):
         for s in stops:
             p = pool.get(s.get("placeId"), {})
             name = p.get("name") or s.get("name") or s.get("placeId")
+            gloss = s.get("nameEn")   # the agent's English name for a Japanese-only name
+            if isinstance(gloss, str) and gloss.strip():
+                name = f"{name} ({gloss.strip()[:80]})"
             when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
             travel = s.get("travelMinutesFromPrev")
             extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
@@ -256,7 +260,9 @@ def build_pdf(event, pool, daily_spend):
             pdf.cell(26, 6, _t(when))
             pdf.set_text_color(30, 90, 170)
             link = s.get("googleMapsUri") or p.get("url") or p.get("mapsUrl")
-            pdf.cell(110, 6, _t(name), link=link or "")
+            shown = _t(name)   # a longer (glossed) name widens its cell up to the travel time, never over it
+            room = pdf.w - pdf.r_margin - pdf.get_x() - pdf.get_string_width(_t(extra)) - 2
+            pdf.cell(max(110, min(pdf.get_string_width(shown) + 1, room)), 6, shown, link=link or "")
             pdf.set_text_color(110, 110, 110)
             pdf.cell(0, 6, _t(extra), align="R", new_x="LMARGIN", new_y="NEXT")
             rating, reviews = s.get("rating", p.get("rating")), s.get("reviews", p.get("reviews"))

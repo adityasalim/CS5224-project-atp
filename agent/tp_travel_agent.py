@@ -46,7 +46,7 @@ import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
 
 from gateway_client import Gateway, GatewayError
-from prompts import get_prompt, ZONE_RULES
+from prompts import get_prompt, ZONE_RULES, GLOSS
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
 from package_recommendations import recommend as recommend_packages, MODES as PACKAGE_MODES
@@ -3422,20 +3422,116 @@ def _top_replacement_places(spec, pool, exclude_ids, predicate=None, city=None, 
     return [f"{p['placeId']} ({p.get('name')}, {p.get('category')})" for p in cands[:limit]]
 
 
-CUISINE_HINTS_MAX = 2   # missing wished cuisines named per correction (the next round names the others)
 MEAL_CATS = ("restaurant", "street_food")
 
 
-def _missing_cuisines(spec, stops):
-    """(search key, the traveller's words) of each wished cuisine (as pref_args sends it) no planned meal has."""
+def _wished_cuisines(spec):
+    """{search key: the traveller's words} of each wished meal cuisine, as pref_args sends it ("Fine dining" ->
+    fine_dining); cafe and dessert wishes are not meals."""
     raw = (spec or {}).get("cuisines") or ([spec["cuisine"]] if (spec or {}).get("cuisine") else [])
     wished = {}
     for c in raw[:6]:
         for part in str(c).split("|"):
             if part.strip() and not re.search(r"caf|dessert", part.lower()):
                 wished.setdefault(part.strip().lower().replace(" ", "_"), part.strip())
+    return wished
+
+
+def _missing_cuisines(spec, stops):
+    """(search key, the traveller's words) of each wished cuisine (as pref_args sends it) no planned meal has."""
     meals = [p for _, _, p in stops if p.get("category") in MEAL_CATS]
-    return [(k, v) for k, v in wished.items() if not any(_cuisine_hit(p, [k]) for p in meals)]
+    return [(k, v) for k, v in _wished_cuisines(spec).items() if not any(_cuisine_hit(p, [k]) for p in meals)]
+
+
+def _swap_wished_cuisines(spec, pool, plan):
+    """For each wished cuisine no planned meal serves, swap one ordinary lunch or dinner (a restaurant or street-food
+    stop that is not pinned or requested and serves no wished cuisine) on a full city day for the unused pool meal of
+    that cuisine nearest to the day's sights, in a zone the day already uses (within MEAL_MAX_KM of its sights when
+    the pool has no zones). At most one swap per day, so each cuisine lands on its own day; the cuisine with the
+    fewest possible days goes first. Arrival, departure and moving days, day trips and theme-park days are never
+    touched, and a swap keeps the number of stops. Changes plan["days"] in place; returns the swaps."""
+    places = pool.get("places") or []
+    multi = is_multi(spec)
+    by_id = {p["placeId"]: p for p in places}
+    by_leg = {(p.get("leg") or 0, p["placeId"]): p for p in places}
+    days = plan.get("days") or []
+    leg_of = lambda d: leg_index(spec, d["date"]) if multi and d.get("date") else 0
+    look = lambda li, i: by_leg.get((li, i)) or by_id.get(i)
+    day_places = lambda d: [p for p in (look(leg_of(d), i) for i in d.get("placeIds") or [] if isinstance(i, str)) if p]
+    missing = _missing_cuisines(spec, [(d.get("date"), None, p) for d in days for p in day_places(d)])
+    if not missing:
+        return []
+    wished = list(_wished_cuisines(spec))
+    used = {i for d in days for i in d.get("placeIds") or [] if isinstance(i, str)}
+    pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
+    prefs = spec.get("preferences") or {}
+    dietary, access = prefs.get("dietary") or [], prefs.get("accessibility") or []
+    avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    edge = {spec.get("startDate"), spec.get("endDate")} | {l.get("checkIn") for l in (spec.get("legs") or [])[1:]}
+    parkz = {z["id"] for z in pool.get("zones") or [] if z.get("kind") == "park"}
+    zoned = bool(pool.get("zones"))
+
+    def fits(c, original):
+        if dietary:
+            status = _dietary_status(c, dietary)
+            if status == "conflict" or (_dietary_status(original, dietary) == "verified" and status != "verified"):
+                return False
+        if access and _accessibility_status(c, access) == "conflict":
+            return False
+        blob = f'{c.get("name", "")} {c.get("category", "")} {c.get("cuisine", "")} {c.get("description", "")}'.lower()
+        return not any(a in blob for a in avoid) and _meal_hours_ok(c, original)
+
+    def options(key, d):
+        """(km to the nearest sight, new meal, the meal it replaces) of every fitting swap on day d."""
+        li, st = leg_of(d), day_places(d)
+        if (d.get("date") in edge or d.get("dayTrip") or not st
+                or any(p.get("dayTrip") or p.get("zone") in parkz or p.get("category") == "theme_park"
+                       or PARK_RE.search(p.get("name") or "") for p in st)):
+            return []
+        sights = [p for p in st if not _is_food_place(p) and p.get("lat") is not None]
+        meals = [p for p in st if p.get("category") in MEAL_CATS and p["placeId"] not in pinned
+                 and not p.get("requested") and not _is_supermarket(p) and not _cuisine_hit(p, wished)]
+        if not sights or not meals:
+            return []
+        zones = {p.get("zone") for p in st if p.get("zone")}
+        gap = lambda c: min(_km(a, c) for a in sights)
+        out = []
+        for c in places:
+            if (c.get("category") not in MEAL_CATS or c["placeId"] in used or c.get("lat") is None
+                    or c.get("dayTrip") or _is_supermarket(c) or (multi and (c.get("leg") or 0) != li)
+                    or not _cuisine_hit(c, [key])):
+                continue
+            km = gap(c)
+            if (c.get("zone") not in zones) if zoned else km > MEAL_MAX_KM:
+                continue
+            # the replaced meal: the one in the new meal's zone, then the same category, then the lowest score
+            for m in sorted(meals, key=lambda m: (m.get("zone") != c.get("zone"), m.get("category") != c.get("category"),
+                                                  _place_score(m, spec), m["placeId"])):
+                if fits(c, m):
+                    out.append((round(km, 3), c["placeId"], c, m))
+                    break
+        return sorted(out, key=lambda x: x[:2])
+
+    swaps, done_days = [], set()
+    todo = sorted(missing, key=lambda kv: (sum(bool(options(kv[0], d)) for d in days), wished.index(kv[0])))
+    for key, label in todo:
+        planned = [(d.get("date"), None, p) for d in days for p in day_places(d)]
+        if key not in {k for k, _ in _missing_cuisines(spec, planned)}:
+            continue   # an earlier swap already serves this cuisine
+        best = min(((opts[0], d) for d in days if d.get("date") not in done_days and (opts := options(key, d))),
+                   key=lambda x: (x[0][:2], x[1].get("date") or ""), default=None)
+        if not best:
+            continue
+        (km, _, c, m), d = best
+        ids = d["placeIds"]
+        ids[ids.index(m["placeId"])] = c["placeId"]
+        used.discard(m["placeId"])
+        used.add(c["placeId"])
+        done_days.add(d.get("date"))
+        swaps.append({"date": d.get("date"), "cuisine": label, "from": m["placeId"], "to": c["placeId"], "km": km})
+    print(json.dumps({"stage": "cuisine-swaps", "missing": [label for _, label in missing], "swaps": swaps},
+                     ensure_ascii=False))
+    return swaps
 
 
 def _cuisine_candidates(spec, pool, days, used_ids, key):
@@ -3682,8 +3778,10 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
                     issues.append({"priority": 4, "day": weakest_day, "status": "missing_preference", "message": msg})
                     suggestions.append(msg)
 
-    # 3b. Wished cuisines the pool has but the plan does not: name the nearest candidates to a planned day's stops
-    for key, label in _missing_cuisines(spec, all_stops)[:CUISINE_HINTS_MAX]:
+    # 3b. Every wished cuisine the pool has but the plan does not: name the nearest candidates to a planned day's
+    # stops; these hints go first among the suggestions the correction sees
+    cuisine_hints = []
+    for key, label in _missing_cuisines(spec, all_stops):
         near = _cuisine_candidates(spec, pool, days, used_ids, key)
         if near:
             dt = near[0][2]
@@ -3693,7 +3791,7 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
                                  + f", {k:.1f} km from the day's stops)" for k, p, _ in near)
                    + f" to satisfy the wished cuisine {label}.")
             issues.append({"priority": 4, "day": dt, "status": "missing_cuisine", "message": msg})
-            suggestions.append(msg)
+            cuisine_hints.append(msg)
 
     # 4. Check hidden_gems vibe alignment
     if prefs.get("vibe") == "hidden_gems" and all_stops:
@@ -3759,7 +3857,7 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
 
     return {
         "issues": issues,
-        "suggestions": suggestions,
+        "suggestions": cuisine_hints + suggestions,
         "mandatory_conflicts": mandatory_conflicts,
         "soft_conflicts": soft_conflicts,
         "critical_conflicts": mandatory_conflicts + soft_conflicts,
@@ -3894,8 +3992,9 @@ def _repair_request(spec, pool, plan, verify_res, judge_res, unscheduled, usage,
             critique_obj["scores"] = j_scores
         if prior_suggestions and not j_scores:
             critique_obj["priorReviewerSuggestions"] = prior_suggestions[:4]
-        if det_suggestions:
-            critique_obj["diagnosticSuggestions"] = det_suggestions[:4]
+        if det_suggestions:   # every missing-cuisine hint (they come first), then the others up to 4 in all
+            n_cuisine = sum(i.get("status") == "missing_cuisine" for i in diag["issues"])
+            critique_obj["diagnosticSuggestions"] = det_suggestions[:max(4, n_cuisine)]
         if (judge_res or {}).get("unavailable"):
             critique_obj["note"] = "reviewer unavailable; apply deterministic diagnostic suggestions"
         critique = json.dumps(critique_obj, separators=(",", ":"), ensure_ascii=False)
@@ -4698,6 +4797,47 @@ def _judge_request(request, spec, seq, pool, usage):
 
 
 # ====================================================================== 8 deliver
+_LATIN_RE = re.compile(r"[A-Za-z]")
+_JAPANESE_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f]")   # kana, CJK ideographs, half-width katakana
+GLOSS_MAX_CHARS = 80
+
+
+def _gloss_names(seq, pool, usage):
+    """English names for the planned stops whose name is written only in Japanese (no Latin letters), from one
+    small-jobs model call; each is kept on its pool place as nameEn (Google Maps link and place ID unchanged) and
+    shown as "<original> (<English>)". A failed call or a malformed reply keeps the original names."""
+    places = pool.get("places") or []
+    by_id = {p["placeId"]: p for p in places}
+    todo = {}
+    for d in seq.get("days") or []:
+        for s in d.get("stops") or []:
+            p = by_id.get(s.get("placeId"))
+            name = str((p or {}).get("name") or "")
+            if p and not p.get("nameEn") and _JAPANESE_RE.search(name) and not _LATIN_RE.search(name):
+                todo[p["placeId"]] = name
+    if not todo:
+        return {}
+    try:
+        out = ask_json(EXECUTOR_MODEL, GLOSS, "\n".join(f"{k}: {v}" for k, v in todo.items()), usage,
+                       max_tokens=2000, temperature=0.0, model_role='executor')
+    except Exception as e:  # noqa: BLE001 — never fail the plan for a translation
+        print(json.dumps({"stage": "gloss-names", "asked": len(todo), "error": str(e)[:200]}))
+        return {}
+    glossed = {k: v.strip() for k, v in (out.items() if isinstance(out, dict) else [])
+               if k in todo and isinstance(v, str) and 0 < len(v.strip()) <= GLOSS_MAX_CHARS and _LATIN_RE.search(v)}
+    for p in places:
+        if p["placeId"] in glossed:
+            p["nameEn"] = glossed[p["placeId"]]
+    print(json.dumps({"stage": "gloss-names", "asked": len(todo), "glossed": len(glossed)}))
+    return glossed
+
+
+def _shown_name(p, default=""):
+    """A stop's name as the plan card, the PDF and the narrative show it: "<original> (<English>)" once glossed."""
+    name = p.get("name", default)
+    return f"{name} ({p['nameEn']})" if p.get("nameEn") else name
+
+
 def narrative(spec, seq, pool, usage):
     adapter = getattr(usage, "adapter", None)
     if hasattr(adapter, "context"):
@@ -4711,7 +4851,7 @@ def _narrative_request(spec, seq, pool, usage):
     stays = _stays_of(seq, pool)
     facts = {"flight": _web_selected_flight(spec, seq, pool), "hotel": stays[0].get("name"), "days": [
         {"date": d["date"], "theme": d.get("theme"),
-         "places": [names.get(s["placeId"], {}).get("name", "") for s in d["stops"]]} for d in seq["days"]]}
+         "places": [_shown_name(names.get(s["placeId"], {})) for s in d["stops"]]} for d in seq["days"]]}
     if is_multi(spec):
         facts["route"] = _route_text(spec)
         facts["hotels"] = [{"city": st.get("city"), "name": st.get("name")} for st in stays]
@@ -4786,7 +4926,8 @@ def _stop_display(p, spec, zones, s=None):
     ride label ("taxi or transit" unless the traveler chose taxi or a rental car) and, for food and coffee stops,
     rating, review count, price level, why it was picked and the guide that featured it."""
     lat, lng = p.get("lat"), p.get("lng")
-    out = {"googleMapsUri": (p.get("url") if str(p.get("placeId", "")).startswith("gplace:") else None)
+    out = {"nameEn": p.get("nameEn"),   # the English name of a Japanese-only name (_gloss_names), for the PDF
+           "googleMapsUri": (p.get("url") if str(p.get("placeId", "")).startswith("gplace:") else None)
            or (f"https://www.google.com/maps/search/?api=1&query={quote(str(p.get('name') or ''))}%20{lat},{lng}"
                if lat is not None and lng is not None else None)}
     transport = ((spec.get("preferences") or {}).get("days") or {}).get("transport", "transit")
@@ -4852,7 +4993,7 @@ def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id,
             shown = _stop_display(p, spec, zones, s)
             by = shown.get("travelBy", s.get("travelBy", ""))
             note = f"{s['travelMinutesFromPrev']} min {by}".strip() if s.get("travelMinutesFromPrev") else ""
-            stops.append({"time": s.get("arriveAt", ""), "name": p.get("name", s["placeId"]), "note": note,
+            stops.append({"time": s.get("arriveAt", ""), "name": _shown_name(p, s["placeId"]), "note": note,
                           "url": p.get("url") or p.get("mapsUrl"), **shown})
         route = _day_route_url(d, names, stays)
         days.append({"title": title, "stops": stops, "note": story["dayNotes"].get(d["date"], ""),
@@ -5173,6 +5314,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     judge_down = False
     while True:
         _balance_meals(spec, pool, plan)
+        _swap_wished_cuisines(spec, pool, plan)
         cur_sig = _plan_signature(plan)
         if cur_sig: seen_plans.add(cur_sig)
         yield ev("status", "Ordering each day around opening hours and travel times…")
@@ -5272,6 +5414,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
             stop_reason = STOP_REPAIR_FAILED
             break
         _balance_meals(spec, pool, next_plan)
+        _swap_wished_cuisines(spec, pool, next_plan)
         next_sig = _plan_signature(next_plan)
         if not strict_mode and (not next_sig or next_sig in seen_plans):
             stop_reason = STOP_NO_PROGRESS
@@ -5371,6 +5514,7 @@ def deliver(state, best, usage, metrics, user_id, t0):
         state['packageRecommendations']=package_result
     if getattr(getattr(usage, "adapter", None), "strict_no_retry", False):
         usage.adapter.feedback = judge_res or {}
+    _gloss_names(seq, pool, usage)   # English names for Japanese-only stops, before the summary, card and PDF
     yield ev("status", "Writing your trip summary…")
     story = narrative(spec, seq, pool, usage)
     if os.environ.get("TARGETED_NARRATIVE_REVIEW", "false").lower() == "true":

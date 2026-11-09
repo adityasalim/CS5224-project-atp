@@ -151,6 +151,10 @@
                         "type": "string",
                         "description": "Google Maps link for the stop"
                       },
+                      "nameEn": {
+                        "type": "string",
+                        "description": "English name for a Japanese-only place name, shown after it in brackets"
+                      },
                       "rating": {
                         "type": "number"
                       },
