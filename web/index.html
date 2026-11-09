@@ -475,6 +475,14 @@ function renderPackageOptions(result, it) {
 function renderItinerary(it) {
   const row = el("div", "row bot"); const card = el("div", "card");
   card.append(el("h2", null, it.title || "Your itinerary"));
+  if (it.status === "refused") {   // not a bookable plan: no days, PDF or feedback, only why and what to do next
+    if (it.message || it.summary) card.append(el("p", null, it.message || it.summary));
+    const notes = (it.caveats || []).length ? it.caveats : it.refusalReasons || [];
+    if (notes.length) { const ul = el("ul", "notes"); notes.forEach((c) => ul.append(el("li", null, c))); card.append(ul); }
+    if ((it.choices || []).length) showChips(it.choices);
+    row.append(card); $("chat").append(row); scrollDown();
+    return;
+  }
   const meta = [];
   if (it.version) meta.push("Version " + it.version);
   if (it.repairRounds) meta.push(it.repairRounds + " improvement round" + (it.repairRounds > 1 ? "s" : ""));
@@ -710,18 +718,24 @@ async function send() {
   add("me", text);
   setBusy(true);
   const work = startWork();
-  let gotPlan = false, ok = true;
+  let gotPlan = false, gotChoices = false, ok = true;
   const handle = (ev) => {
     if (ev.type === "status") work.step(ev.message);
-    else if (ev.type === "question" || ev.type === "message") { add("bot", ev.message); if (ev.choices) showChips(ev.choices); }
-    else if (ev.type === "itinerary") { add("itinerary", { ...ev.itinerary, receivedAt: Date.now() }); gotPlan = true; }
+    else if (ev.type === "question" || ev.type === "message") {
+      add("bot", ev.message);
+      if (ev.choices) { showChips(ev.choices); gotChoices = ev.choices.length > 0; }
+    }
+    else if (ev.type === "itinerary") {
+      add("itinerary", { ...ev.itinerary, receivedAt: Date.now() }); gotPlan = true;
+      if ((ev.itinerary.choices || []).length) gotChoices = true;
+    }
     else if (ev.type === "error") { add("error", ev.message); ok = false; }
   };
   try { LIVE_AGENT ? await runAgent(text, handle) : await runDemo(text, handle); }
   catch (e) { ok = false; add("error", "Couldn't reach the planner: " + e.message); }
   finally {
     work.done(ok); setBusy(false);
-    if (gotPlan || transcript.some((t) => t.kind === "itinerary")) showChips(FOLLOW_UPS);
+    if (!gotChoices && (gotPlan || transcript.some((t) => t.kind === "itinerary"))) showChips(FOLLOW_UPS);
   }
 }
 

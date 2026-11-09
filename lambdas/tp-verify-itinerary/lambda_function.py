@@ -464,6 +464,7 @@ def lambda_handler(event, context):
     ids += [st.get("stayId") for st in it.get("stays") or [] if st.get("stayId")]
     ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
     ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
+    ids += [x for x in spec.get("mustVisit") or [] if isinstance(x, str)]   # so a missing one is named
     pool = _pool_get(ids)
     try:
         pool = normalize_cached_pool(spec, pool)

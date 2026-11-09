@@ -19,6 +19,13 @@
         },
         "description": "2-8 placeIds from find_places for this day"
       },
+      "pinned": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional placeIds the traveler named (must-visit). The day keeps these over other stops when not everything fits. Default: places with category requested"
+      },
       "zones": {
         "type": "object",
         "description": "Optional zone id per placeId, e.g. {\"<placeId>\": \"Z1\"}: the day finishes one zone, takes one ride, then does the next"

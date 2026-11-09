@@ -26,7 +26,8 @@ Input event (places can be given by ID only; details are read from the pool):
    "visitMinutes": {"osm:way/123": 90},          # optional overrides
    "zones": {"osm:way/123": "Z1"},               # optional zone id per place: the day finishes a zone, then rides on
    "dayStart": "09:00", "dayEnd": "21:00", "mode": "walk", "lunch": true,
-   "maxStops": 6, "minFreeMinutes": 60}
+   "maxStops": 6, "minFreeMinutes": 60,
+   "pinned": ["osm:way/123"]}                    # optional: places the traveler named; default = category "requested"
   Instead of stayId/placeIds you can pass full objects:
   "start": {"id": "hotel", "lat": .., "lng": ..},
   "stops": [{"placeId": "..", "name": "..", "lat": .., "lng": .., "visitMinutes": 90,
@@ -344,8 +345,10 @@ def lambda_handler(event, context):
     max_stops = int(event.get("maxStops") or 0)
     min_free = int(event.get("minFreeMinutes") or 0)
     # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one; keep the
-    # one that fits the most stops, then never goes back to a zone it left, then starts in the farther zone, then
-    # has the least waiting.
+    # one that fits the most pinned places, then the most stops, then never goes back to a zone it left, then starts
+    # in the farther zone, then has the least waiting.
+    pinned = (set(event["pinned"]) if event.get("pinned") is not None
+              else {s["placeId"] for s in stops if s.get("category") == "requested"})
     firsts = [None] + (sorted(set(_zone_groups(stops)[1:])) if mode == "walk" and any(s.get("zone") for s in stops)
                        else [])
     zone_of = {s["placeId"]: s.get("zone") or s["placeId"] for s in stops}
@@ -358,7 +361,8 @@ def lambda_handler(event, context):
                             max_stops=max_stops, min_free=min_free, first=f))
                for lf in (False, True) for f in firsts]
     ordered, unscheduled, back, free = max(options, key=lambda fo: (
-        len(fo[1][0]), -returns(fo[1]), fo[0] is None, -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
+        sum(x["placeId"] in pinned for x in fo[1][0]), len(fo[1][0]), -returns(fo[1]), fo[0] is None,
+        -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
     return {"ok": True, "date": event.get("date"), "start": start, "stops": ordered,
             "returnToStartMinutes": back, "freeTimeMinutes": free, "unscheduled": unscheduled,
             "dayStart": _fmt(day_start), "dayEnd": _fmt(day_end), "travelTimeSource": src}
