@@ -913,7 +913,8 @@ def normalize_special(spec):
                           **({"park": True} if t.get("park") is True else {})})
     limit = {"none": 0, "1": 1, "2": 2}.get(((spec.get("preferences") or {}).get("days") or {}).get("dayTripLimit"), 4)
     # a far theme park made a day trip by build_zones is the traveler's pinned park, not one of their listed trips
-    spec["dayTrips"] = [t for t in trips if not t.get("park")][:limit] + [t for t in trips if t.get("park")]
+    # at most 4 in all, the same ceiling _park_day_trip keeps, so a park flag in model output cannot add more
+    spec["dayTrips"] = ([t for t in trips if not t.get("park")][:limit] + [t for t in trips if t.get("park")])[:4]
     return spec
 
 
