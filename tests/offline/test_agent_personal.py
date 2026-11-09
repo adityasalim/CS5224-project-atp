@@ -390,7 +390,7 @@ up_pool = {"stays": [{"stayId": "hil", "name": "Hilton Tokyo Hotel", "starRating
                        {"offerId": "sq", "airline": "Singapore Airlines", "priceTotalSGD": 9000, "stops": 0}]}
 seq_up = {"stayId": "hil", "flightOfferId": "aax", "days": []}
 assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "8389.71"}}) == [
-    "Stay at Imperial Hotel, Tokyo (rated 9.6), +SGD 1,013.65", "Fly JAL nonstop, +SGD 4,554.00"]
+    "Stay at Imperial Hotel, Tokyo (rated 9.6), +SGD 1,013.65", "Fly JAL in economy nonstop, +SGD 4,554.00"]
 assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "11500"}}) == [
     "Stay at Imperial Hotel, Tokyo (rated 9.6), +SGD 1,013.65"], "nothing that ends over the budget"
 assert A._upgrade_choices(spec_h, up_pool, seq_up, {"totals": {"total": "12990"}}) == []
@@ -400,7 +400,7 @@ cab = {"stays": [], "flights": [{"offerId": "m0", "airline": "A", "cabin": "mixe
                                 {"offerId": "p1", "airline": "C", "cabin": "premium_economy", "priceTotalSGD": 1200, "stops": 1},
                                 {"offerId": "p0", "airline": "D", "cabin": "premium_economy", "priceTotalSGD": 1300, "stops": 0}]}
 assert A._upgrade_choices(pe, cab, {"stayId": None, "flightOfferId": "m0"}, {"totals": {"total": "5000"}}) == [
-    "Fly D in premium economy, +SGD 300.00"], "a cabin upgrade never loses the nonstop flight"
+    "Fly D in premium economy nonstop, +SGD 300.00"], "a cabin upgrade never loses the nonstop flight"
 
 # ---- direct only reaches the flight search; over budget with a firm cabin and direct only -> cheaper-flight choices
 bd = {**spec_h, "originAirport": "SIN", "destinationAirport": "HND", "legs": [],
@@ -484,6 +484,34 @@ st_pool = {"stays": [{"stayId": "ryo", "name": "Machiya Ryokan", "starRating": 4
                       "matches": ["ryokan"]}], "flights": []}
 assert A._upgrade_choices(spec_h, st_pool, {"stayId": "ryo", "days": []}, {"totals": {"total": "5000"}}) == [
     "Stay at Grand Ryokan (rated 9.5), +SGD 800.00"]
+one = lambda *xs: {"stays": [st_pool["stays"][0], *xs], "flights": []}
+up = lambda pool_: A._upgrade_choices(spec_h, pool_, {"stayId": "ryo", "days": []}, {"totals": {"total": "5000"}})
+assert up(one({"stayId": "w", "name": "Better Tower", "starRating": 5, "reviewScore": 9.6, "priceTotalSGD": 1500})) == [], \
+    "a better-reviewed hotel that is not a ryokan loses the style wish"
+assert up(one({"stayId": "s", "name": "Star Ryokan", "starRating": 5, "reviewScore": 9.1, "priceTotalSGD": 1500,
+               "matches": ["ryokan"]})) == [], "more stars never make up for a lower review"
+req = {"stays": [{**st_pool["stays"][0], "matches": ["requested hotel", "ryokan"]}, st_pool["stays"][2]], "flights": []}
+assert A._upgrade_choices(spec_h, req, {"stayId": "ryo", "days": []}, {"totals": {"total": "5000"}}) == [], \
+    "the hotel the traveler named gets no upgrade"
+# a tapped "Stay at X" on a single-city trip searches hotels by that name (with_prefs adds it)
+class StayGw:
+    def __init__(s): s.calls = []
+    def call(s, tool, args): s.calls.append(args); return {"ok": True, "stays": []}
+sg = StayGw()
+A._clients = lambda: (None, None, sg)
+named = {**spec_h, "destination": "Tokyo", "legs": [], "preferences": {"hotel": {"name": "Imperial Hotel, Tokyo"}}}
+A.normalize_prefs(named)
+list(A.refresh_bookings({"pool": {"stays": [], "flights": []}}, named, {"stays"}, {}))
+assert sg.calls and sg.calls[0]["name"] == "Imperial Hotel, Tokyo", sg.calls
+A._clients = clients
+# the search categories keep the traveler's interest order (tp-find-places asks Google first for the first 4 sights)
+order = A.preference_search_categories({"interests": ["temple", "shrine", "museum", "viewpoint", "garden"]})
+assert order[:5] == ["temple", "shrine", "museum", "viewpoint", "garden"], order
+# any failure while building the choices drops them, never the delivered plan
+real_up = A._upgrade_choices
+A._upgrade_choices = lambda *a, **k: 1 / 0
+assert drain_ev(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "1"}}})) == ([], [])
+A._upgrade_choices = real_up
 
 
 def claude_run(lows):

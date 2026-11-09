@@ -120,6 +120,11 @@ fp.lambda_handler({"city": "Tokyo", "categories": many}, None)
 asked = [p["textQuery"] for p in POSTS if p["url"].endswith("searchText")]
 assert set(asked) - {"specialty coffee"} == {"museum", "temple", "shrine", "art gallery"}, asked
 assert any("historic" in c and "market" in c for c in CHAIN), CHAIN
+# the same categories in another order send other sights to Google, so they never share a cache entry
+POSTS.clear(); CHAIN.clear()
+w = fp.lambda_handler({"city": "Tokyo", "categories": ["historic", "market"] + many}, None)
+assert not w["source"].endswith("-cache") and {p["category"] for p in w["places"]} >= {"gallery", "historic", "market"}, \
+    (w["source"], {p["category"] for p in w["places"]})
 # the chain's last-resort Google step never asks again, without the floor, for a sight Google already answered
 STORE.clear(); POSTS.clear(); CHAIN.clear()
 saved_overpass, fp._overpass = fp._overpass, lambda q, deadline: (CHAIN.append(q["categories"]) or [], None)
@@ -190,6 +195,9 @@ Geo.geocode = lambda s, **k: {"ResultItems": [{"Position": [138.6763, 35.1613]}]
 for name in ("Fuji", "Mount Fuji, Japan", "Mt Fuji (Kawaguchiko)", "Lake Kawaguchiko"):
     q, err = fp._validate({"city": name, "near": TOKYO, "maxKm": 200, "minKm": 25, "categories": ["viewpoint"]})
     assert err is None and (q["lat"], q["lng"]) == (35.5, 138.76), (name, q, err)
+for name in ("Fuji, Shizuoka", "Fuji (Shizuoka)"):   # the city of Fuji, not the mountain
+    q, err = fp._validate({"city": name, "near": TOKYO, "maxKm": 200, "minKm": 25, "categories": ["viewpoint"]})
+    assert err is None and (q["lat"], q["lng"]) == (35.1613, 138.6763), (name, q, err)
 Geo.geocode = real_geocode
 # not in KNOWN_CITIES: the place search; a namesake office in Shibuya is closer than minKm and is skipped
 geo.places = [("Fuji-Q Highland Ticket Office", 35.658, 139.701), ("Fuji-Q Highland", 35.487, 138.781)]

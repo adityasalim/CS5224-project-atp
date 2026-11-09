@@ -200,8 +200,10 @@ def _geocode(city, near=None, max_km=None, min_km=0.0):
     parts = [x.strip().lower() for x in city.split(",") if x.strip()]
     known = KNOWN_CITIES.get(city.strip().lower()) or (KNOWN_CITIES.get(parts[-1]) if parts else None)
     close = lambda lat, lng: near is None or min_km <= _km(near["lat"], near["lng"], lat, lng) <= max_km
-    name = re.sub(r"\s*\(.*?\)", "", parts[0]) if parts else ""      # "Mt Fuji (Kawaguchiko)" -> "mt fuji"
-    mark = LANDMARKS.get(city.strip().lower()) or LANDMARKS.get(name)
+    # "Mt Fuji (Kawaguchiko)" or "Mount Fuji, Japan" -> the landmark; "Fuji, Shizuoka" or "Fuji (Shizuoka)" is the city
+    name = parts[0] if parts and all(p == "japan" for p in parts[1:]) else ""
+    name = name if not re.search(r"\((?!kawaguchi)", name) else ""
+    mark = LANDMARKS.get(city.strip().lower()) or LANDMARKS.get(re.sub(r"\s*\(.*?\)", "", name))
     if mark and close(*mark):
         return mark
     known = known if known and close(*known) else None
@@ -1008,8 +1010,6 @@ def lambda_handler(event, context):
                 "attribution": "Ratings and places from Google Maps" if source == "google-zone"
                                else "Place data © Amazon Location Service / HERE", **extra}
 
-    key = _cache_key({**q, "names": []})
-    cached = _cache_get(key)
     # food and the first GOOGLE_SIGHTS_MAX sights (in the traveler's interest order) come from Google first when there
     # is a key; further sights use the free chain
     asked_order = [str(c).strip().lower() for c in event.get("categories") or []]   # q["categories"] is sorted
@@ -1017,6 +1017,9 @@ def lambda_handler(event, context):
                     key=lambda c: asked_order.index(c) if c in asked_order else len(asked_order))[:GOOGLE_SIGHTS_MAX]
     gcats = ([c for c in q["categories"] if c in GOOGLE_FIRST or c in sights]
              if _secret("GOOGLE_MAPS_KEY") else [])
+    # the cache holds only the chain's places, so which sights Google answers is part of the key
+    key = _cache_key({**q, "names": [], **({"googleFirst": sorted(sights)} if gcats else {})})
+    cached = _cache_get(key)
     google_wanted = bool(gcats)
     if cached and gcats and "google" in cached.get("source", "").split("+"):
         # The cache holds only the non-Google places (Places terms): ask Google for the food and sights again
@@ -1037,8 +1040,8 @@ def lambda_handler(event, context):
     attempts, places, sources, chain_google, asked = [], [], [], False, []
     if gcats:   # rated, reviewed food and sights from Google first; the rest (and all if Google fails) from the chain
         found, err = _google({**q, "categories": gcats, "keywords": []}, deadline, sights_first=True)
+        asked = list(gcats)   # asked once already (answered, nothing above the floor, or down): never again unfloored
         if found:
-            asked = list(gcats)
             places += found
             sources.append("google")
             have = _count_by_category(found)

@@ -1094,10 +1094,11 @@ def _intensity_to_pace(intensity):
 
 
 def preference_search_categories(spec):
-    """Add search categories for strongly rated traveller interests."""
+    """The traveller's interests in their order, then categories for strongly rated scores and the food kinds (the
+    order matters: tp-find-places asks Google first for the first few sights)."""
     scores = spec.get("preferenceScores") or {}
 
-    categories = set(spec.get("interests") or [])
+    categories = dict.fromkeys(spec.get("interests") or [])
 
     mapping = {
         "culture": ("museum", "historic", "temple"),
@@ -1107,16 +1108,16 @@ def preference_search_categories(spec):
 
     for key, options in mapping.items():
         if scores.get(key, 5) >= 8:
-            categories.update(options)
+            categories.update(dict.fromkeys(options))
 
-    categories.add("restaurant")
+    categories["restaurant"] = None
     food = (spec.get("preferences") or {}).get("food") or {}
     if food.get("coffee") or food.get("tea") or food.get("perDay"):
-        categories.add("cafe")
+        categories["cafe"] = None
     if food.get("dessert") or food.get("bakery"):
-        categories.add("dessert")
+        categories["dessert"] = None
 
-    return sorted(categories)
+    return list(categories)
 
 
 def normalize_form_preferences(spec, base_scores=None, pace_explicit=None):
@@ -1375,8 +1376,8 @@ def gather(spec, usage, metrics):
     if spec.get("flightType") != "oneway":
         flight["returnDate"] = spec["endDate"]
     # Food comes per walkable zone (zone_food), so the city search asks for sights only and gets cached.
-    cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
-                  - ZONE_FOOD_CATS) or ["attraction"]
+    cats = [c for c in preference_search_categories(spec)
+            if c in PLACE_CATEGORIES and c not in ZONE_FOOD_CATS] or ["attraction"]
     keywords = [k for k in ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
                             + list(spec.get("activities") or [])) if not ZONE_FOOD_WORDS.search(str(k))][:8]
     name, booked, price = _hotel_wish(spec)
@@ -1728,7 +1729,7 @@ def food_cap(spec):
 
 
 def zone_food(spec, pool, calls, sources):
-    """Rated food for the zones with at most GOOGLE_FOOD_CAP Google requests: one "specialty coffee" Text Search per
+    """Rated food for the zones with at most food_cap(spec) Google requests: one "specialty coffee" Text Search per
     city (when cafes are wished), one combined Nearby Search per zone (none inside a theme park), and for wished
     cuisines one cuisine-only search per walk zone plus one city-wide Text Search per cuisine. Returns the number
     of requests, so the web picks get only what is left of the cap. The calls run on
@@ -2966,8 +2967,8 @@ def gather_multi(spec, usage, metrics):
     pool["flights"] = res.get("offers", []) if res.get("ok") else []
 
     # Food comes per walkable zone (zone_food), so the city searches ask for sights only and get cached.
-    cats = sorted({c for c in preference_search_categories(spec) if c in PLACE_CATEGORIES}
-                  - ZONE_FOOD_CATS) or ["attraction"]
+    cats = [c for c in preference_search_categories(spec)
+            if c in PLACE_CATEGORIES and c not in ZONE_FOOD_CATS] or ["attraction"]
     kws = [k for k in ([c for c in spec.get("interests", []) if c and c not in PLACE_CATEGORIES]
                        + list(spec.get("activities") or [])) if not ZONE_FOOD_WORDS.search(str(k))][:8]
     leg_counts = []
@@ -3137,7 +3138,10 @@ def _budget_room(spec):
         if "budget" in spec:   # the base figure in the trip currency: dailySpend is unset before the first
             cur = currency_code(spec)   # prepare_pool and stale while a change is searched again
             if cur != "SGD":
-                daily = float(fx_convert(DAILY_SPEND, "SGD", cur, spec.get("_fx") or load_fx_quote(cur)))
+                try:
+                    daily = float(fx_convert(DAILY_SPEND, "SGD", cur, spec.get("_fx") or load_fx_quote(cur)))
+                except ValueError:   # a stale quote (older than 48 h): a fresh one, as prepare_pool does
+                    daily = float(fx_convert(DAILY_SPEND, "SGD", cur, load_fx_quote(cur)))
         return daily > 0 and _bookable(spec, daily) >= ROOMY_NIGHT_SHARE * daily * spec["pax"] * nights
     except (KeyError, TypeError, ValueError, OSError):
         return False
@@ -4174,6 +4178,12 @@ def _loyalty_caveats(spec, seq, pool):
     return [x for x in out if x]
 
 
+def _leg_stops(f):
+    """Stops per direction, as maxStops counts them (a 1-stop round trip has 1 each way)."""
+    sl = [s.get("stops") for s in f.get("slices") or [] if isinstance(s.get("stops"), (int, float))]
+    return max(sl) if sl else int(f.get("maxStops", f.get("stops")) or 0)
+
+
 def _upgrade_choices(spec, pool, seq, vres):
     """At most 3 upgrades priced from pool offers that each keep the verified total within the budget: per hotel the
     best-reviewed hotel of its leg that has a better review or more stars, then the cheapest nonstop or
@@ -4218,7 +4228,9 @@ def _upgrade_choices(spec, pool, seq, vres):
         if better:
             f = min(better, key=lambda f: (-len(gains(f)), known_price(f), str(f.get("offerId"))))
             extra = money_text(spec, known_price(f) - known_price(cur_f))
-            out.append(f"Fly {f['airline']} {' '.join(gains(f))}, +{extra}")
+            n = _leg_stops(f)   # worded like the cheaper-flight choices, so the router reads cabin and stops back
+            how = "nonstop" if n == 0 else f"with {n} stop{'s' if n > 1 else ''}"
+            out.append(f"Fly {f['airline']} in {CABIN_TEXT.get(f.get('cabin'), CABIN_TEXT[cabin])} {how}, +{extra}")
     return out[:3]
 
 
@@ -4263,10 +4275,6 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
         return []
     avoid = [str(a).lower() for a in ((spec.get("preferences") or {}).get("flight") or {}).get("avoidAirlines") or []]
 
-    def leg_stops(f):   # stops per direction, as maxStops counts them (a 1-stop round trip has 1 each way)
-        sl = [s.get("stops") for s in f.get("slices") or [] if isinstance(s.get("stops"), (int, float))]
-        return max(sl) if sl else int(f.get("maxStops", f.get("stops")) or 0)
-
     def search(alt):
         aspec = copy.deepcopy(spec)
         aspec["preferences"]["flight"].update(alt)
@@ -4281,7 +4289,7 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
         fits = [f for f in offers if f.get("airline") and known_price(f) is not None
                 and known_price(f) < known_price(cur)
                 and str(f.get("cabin") or alt["cabin"]) == alt["cabin"]
-                and leg_stops(f) <= (alt["maxStops"] if alt["maxStops"] is not None else 9)
+                and _leg_stops(f) <= (alt["maxStops"] if alt["maxStops"] is not None else 9)
                 and not any(a in str(f["airline"]).lower() for a in avoid)]
         if not fits:
             return None
@@ -4289,7 +4297,7 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
         saved = round(known_price(cur) - known_price(f), -1)
         if saved < 10:
             return None
-        n = leg_stops(f)
+        n = _leg_stops(f)
         how = "nonstop" if n == 0 else f"with {n} stop{'s' if n > 1 else ''}"
         return f"Fly {f['airline']} in {CABIN_TEXT[alt['cabin']]} {how}, saves about {currency_code(spec)} {saved:,.0f}"
 
@@ -5564,6 +5572,9 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
         if [(l.get("city"), l.get("nights")) for l in spec.get("legs") or []] == \
                 [(l.get("city"), l.get("nights")) for l in old.get("legs") or []]:
             changes.pop("legs")
+            # keep the old legs (their checkIn/checkOut), taking only a per-leg hotel wish from the router's list
+            spec["legs"] = [{**o, **({"hotel": n["hotel"]} if isinstance(n.get("hotel"), dict) else {})}
+                            for o, n in zip(old["legs"], spec["legs"])]
             if [l.get("hotel") for l in spec["legs"]] != [l.get("hotel") for l in old.get("legs") or []]:
                 refresh.add("stays")
     problems = _check_spec(spec)
