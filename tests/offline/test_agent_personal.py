@@ -664,6 +664,22 @@ assert msgs7[:5] == ["Searching flights SIN → Tokyo, home from Osaka…", "Sea
                      "Finding ways to get from Tokyo to Kyoto on 2026-12-05…"], msgs7
 assert "Finding things to do on a day trip to Kawaguchiko…" in msgs7
 print(f"parallel gather: {len(gather_calls)} searches in {took_a:.2f} s (one after another {sum(gw_a.waits):.2f} s), peak {gw_a.peak[0]}")
+# the hotel workers rank sights on a snapshot of the spec, never on the pins the main thread sets meanwhile; and a
+# worker's raw error (not a GatewayError) fails only its own search
+seen7, real_stays = [], A._city_stays
+A._city_stays = lambda g, s, *a: (seen7.append(s.get("pinned")), real_stays(g, s, *a))[1]
+class BrokenFlight(ParGw):
+    def call(self, tool, args):
+        if tool == "search_flights":
+            raise TimeoutError("The read operation timed out")
+        return super().call(tool, args)
+gw8, s8 = BrokenFlight(3), json.loads(json.dumps(spec7))
+A._clients = lambda: (None, None, gw8)
+with contextlib.redirect_stdout(io.StringIO()):
+    pool8, _ = drain_ev(A.gather_multi(s8, A.Usage(), {}))
+A._clients, A._city_stays = saved_clients, real_stays
+assert seen7 == [spec7.get("pinned")] * 3 and s8["pinned"], (seen7, s8.get("pinned"))
+assert pool8["flights"] == [] and pool8["stays"] and pool8["places"], "a failed flight search leaves the rest of the pool"
 
 # ---- run 7: the choices a delivered plan offers are logged
 A._upgrade_choices = lambda *a, **k: ["Upgrade to a 5-star hotel"]

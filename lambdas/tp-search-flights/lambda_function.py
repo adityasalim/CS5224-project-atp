@@ -255,6 +255,10 @@ _DEADLINE = None
 REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "20"))   # one HTTP request, at most
 
 
+NONSTOP_WAIT_S = 8        # the optional nonstop-only search: one attempt of at most this long
+NONSTOP_MIN_LEFT_S = 25   # and only when this much of the time budget is left for it and the return lookups
+
+
 def _time_left():
     return float("inf") if _DEADLINE is None else _DEADLINE - time.time()
 
@@ -285,11 +289,11 @@ def _start_budget(context, default_s):
 
 
 # ---------------------------------------------------------------- SerpApi Google Flights
-def _serp_get(params):
-    """One SerpApi search. Returns (json, error)."""
+def _serp_get(params, cap=25, attempts=2):
+    """One SerpApi search (a retry on 429/5xx/timeout unless attempts=1). Returns (json, error)."""
     last = None
-    for attempt in range(2):
-        wait = _wait()
+    for attempt in range(attempts):
+        wait = _wait(cap)
         if not wait:
             last = last or _err("upstream_timeout", "Google Flights (SerpApi) did not answer in time", "serpapi")
             break
@@ -308,7 +312,7 @@ def _serp_get(params):
                 if data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
                     return None, _err("no_results", f"Google Flights: {data['error'][:200]}", "serpapi")
                 return data, None
-        if not _pause(attempt):
+        if attempt + 1 >= attempts or not _pause(attempt):
             break
     return None, last
 
@@ -405,11 +409,12 @@ def _call_serpapi(q, key):
     url = (data.get("search_metadata") or {}).get("google_flights_url")
     first = (data.get("best_flights") or []) + (data.get("other_flights") or [])
     nonstop_params = {}   # id(option) -> the params of the nonstop-only search that found it (for its return lookup)
-    if q["cabin"] != "economy":
+    if q["cabin"] != "economy" and _time_left() >= NONSTOP_MIN_LEFT_S:
         # above economy the cheapest fares are often 1-stop or mixed-cabin bundles: one more search, nonstop only
         # (SerpApi stops=1), so a nonstop is in the list when one is sold. Options the first search has are kept from it.
         ns_params = {**params, "stops": 1}
-        ns, ns_err = _serp_get(ns_params)
+        # optional: one short attempt, so a slow SerpApi never leaves the return lookups without time
+        ns, ns_err = _serp_get(ns_params, cap=NONSTOP_WAIT_S, attempts=1)
         if ns_err:
             print("nonstop search failed:", ns_err)
         else:
@@ -430,6 +435,10 @@ def _call_serpapi(q, key):
         if offers and _time_left() < 8:   # enough round trips already; don't risk the timeout
             break
         back, err = _serp_get({**nonstop_params.get(id(out), params), "departure_token": out["departure_token"]})
+        if err and id(out) in nonstop_params and _time_left() >= 8:
+            # the nonstop search's params keep stops=1, so a nonstop outbound with only connecting returns finds
+            # nothing: ask once more for its returns without the stops filter
+            back, err = _serp_get({**params, "departure_token": out["departure_token"]})
         if err:
             print("return lookup failed:", err)
             continue

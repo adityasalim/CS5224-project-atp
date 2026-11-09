@@ -109,6 +109,31 @@ assert len(CALLS) == 2 and {o["maxStops"] for o in r["offers"]} == {0, 1}, (len(
 CALLS.clear()
 fl.lambda_handler({**RT, "returnDate": None, "departDate": "2026-12-22", "cabin": "economy"}, None)
 assert len(CALLS) == 1, CALLS
+# the nonstop search hangs: one short attempt (8 s, no retry), and the return lookups still answer
+CALLS.clear()
+BASE["best_flights"], NS["best_flights"] = [ONESTOP], [NONSTOP]
+waits = []
+def slow_nonstop(url, params, timeout):
+    if params.get("stops") == 1 and not params.get("departure_token"):
+        waits.append(timeout)
+        raise fl.requests.Timeout("hung")
+    return fake_get(url, params, timeout)
+fl.requests.get = slow_nonstop
+r = fl.lambda_handler({**RT, "departDate": "2026-12-10"}, None)
+assert r["ok"] and waits == [8], (waits, r.get("message"))
+# a nonstop outbound whose only returns connect: its lookup (stops=1) finds nothing, so it asks again without stops
+CALLS.clear()
+BASE["best_flights"], NS["best_flights"] = [ONESTOP], [NONSTOP]
+def nonstop_return_missing(url, params, timeout):
+    if params.get("departure_token") == "sq" and params.get("stops") == 1:
+        CALLS.append(dict(params))
+        return R({"error": "Google Flights hasn't returned any results for this query."})
+    return fake_get(url, params, timeout)
+fl.requests.get = nonstop_return_missing
+r = fl.lambda_handler({**RT, "departDate": "2026-12-11"}, None)
+sq = [c for c in CALLS if c.get("departure_token") == "sq"]
+assert [c.get("stops") for c in sq] == [1, None] and any(o["maxStops"] == 0 for o in r["offers"]), (sq, r["offers"])
+fl.requests.get = fake_get
 print("FLIGHT LOOKUPS OK")
 
 # ---------------------------------------------------------------- 2. places: category from the Google primaryType

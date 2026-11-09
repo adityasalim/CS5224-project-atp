@@ -1384,11 +1384,14 @@ def _hotel_focus(spec, places, centre=None):
 
 
 def _call_tool(g, spec, tool, args, relax=False):
-    """One tool call with the traveller's preferences filled in; a Gateway error becomes a failed result."""
+    """One tool call with the traveller's preferences filled in; any failure (a Gateway error, a raw read timeout)
+    becomes a failed result, so one search never ends the whole parallel gather."""
     try:
         return g.call(tool, with_prefs(tool, spec, args, relax=relax))
     except GatewayError as e:
         return {"ok": False, "error": "gateway_error", "message": str(e)}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": "tool_failed", "message": f"{type(e).__name__}: {e}"}
 
 
 def _record(calls, sources, tool, res):
@@ -1469,7 +1472,10 @@ def _gather_searches(spec, gw, flight, cities, hops, pool, calls, sources, relax
     notes = queue.SimpleQueue()
     trips = list(spec.get("dayTrips") or [])
     with ThreadPoolExecutor(max_workers=1 + 2 * len(cities) + len(hops) + len(named) + len(trips)) as ex:
-        sub = lambda fn, *a: ex.submit(fn, copy.copy(gw), spec, *a)
+        # the workers read a snapshot: _apply_named sets spec["pinned"] on this thread while the hotel searches still
+        # rank their sights, and the search point must not depend on which thread runs first
+        frozen = dict(spec)
+        sub = lambda fn, *a: ex.submit(fn, copy.copy(gw), frozen, *a)
         f_places = [sub(_city_places, c["place_args"], c["tag"], c["wanted"], notes, c["where"]) for c in cities]
         f_flight = sub(_call_tool, "search_flights", flight)
         f_hops = [sub(_call_tool, "search_transfers", a) for a in hops]
@@ -1839,7 +1845,7 @@ def food_cap(spec):
     """Google food requests per plan: 2 per trip day (at least GOOGLE_FOOD_CAP), plus 1 per wished cuisine per city
     beyond the first 2 (the cuisine searches come before the zone searches), at most GOOGLE_FOOD_CAP_MAX."""
     cuisines = len([c for c in str(pref_args("find_places", spec).get("cuisine") or "").split("|") if c][:5])
-    cities = len({str(l.get("city")).lower() for l in spec.get("legs") or []}) or 1
+    cities = len({str(l.get("city")).strip().lower() for l in spec.get("legs") or []}) or 1
     return min(GOOGLE_FOOD_CAP_MAX, max(GOOGLE_FOOD_CAP, 2 * trip_days(spec)) + cities * max(0, cuisines - 2))
 
 
