@@ -28,6 +28,7 @@ python3 test_agent_single_city.py | tail -3
 python3 test_agent_multi_city.py | tail -3
 python3 test_agent_personal.py | tail -1
 python3 test_agent_robust.py | tail -1
+python3 test_agent_model_strings.py | tail -1
 python3 ../gateway_smoke_test.py --gateway-url http://127.0.0.1:8765/mcp \
   --token-url http://127.0.0.1:8765/oauth2/token --client-id a --client-secret b | tail -1
 

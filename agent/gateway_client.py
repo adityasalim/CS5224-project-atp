@@ -74,6 +74,8 @@ class Gateway:
             raise GatewayError(f"token request failed {e.code}: {e.read().decode(errors='replace')[:300]}")
         except (OSError, http.client.HTTPException, ValueError) as e:   # unreachable, timeout, not JSON
             raise GatewayError(f"token request failed: {type(e).__name__}: {e}")
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise GatewayError("token reply has no access_token")
         self._token = data["access_token"]
         self._expires = time.time() + int(data.get("expires_in", 3600))
         return self._token
@@ -131,7 +133,10 @@ class Gateway:
             raise GatewayError(f"{method} returned a reply that is not a JSON object")
         if "error" in out:
             raise GatewayError(f"{method} error: {json.dumps(out['error'])[:300]}", out["error"])
-        return out.get("result", {})
+        res = out.get("result", {})
+        if not isinstance(res, dict):   # "result": null or not an object
+            raise GatewayError(f"{method} returned a result that is not a JSON object")
+        return res
 
     def _initialize(self):
         """MCP handshake: offer the newest protocol version; if the Gateway lists the versions it
@@ -186,6 +191,8 @@ class Gateway:
         try:
             data = json.loads(text) if text else {}
         except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):   # not JSON, or JSON that is not an object (a list): callers read a dict
             data = {"ok": False, "error": "non_json_result", "message": text[:300]}
         if res.get("isError") and data.get("ok") is not False:
             data = {"ok": False, "error": "tool_error", "message": text[:300]}

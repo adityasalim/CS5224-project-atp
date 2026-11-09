@@ -196,7 +196,7 @@ def _balance_meals(spec, pool, plan):
     vibe = prefs.get("vibe", "balanced")
     cuisines = [str(x).lower().strip() for x in (spec.get("cuisines") or ([spec["cuisine"]] if spec.get("cuisine") else []))
                 if str(x).strip()]
-    avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    avoid = [str(a).lower().strip() for a in _str_list(prefs.get("avoid")) + _str_list(spec.get("avoid")) if str(a).strip()]
     pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
     swaps = []
 
@@ -984,9 +984,12 @@ def intake(request, previous, usage, carried=False, budget_override=None):
             f"Earlier details (JSON): {_sj(previous)}\nThe traveller now adds: {request}")
     spec = ask_json(EXECUTOR_MODEL, system, text, usage, max_tokens=4000, temperature=0.0, model_role='executor')
     spec["missing"] = _str_list(spec.get("missing"))   # null or one string from the model
-    for k in ("interests", "activities"):   # a single string is one interest, never its characters
+    for k in ("interests", "activities", "avoid"):   # a single string is one interest, never its characters
         if k in spec:
             spec[k] = _str_list(spec[k])
+    for k in ("mustInclude", "dayTrips"):   # one place or trip (a name or an object) is a list of one
+        if isinstance(spec.get(k), (str, dict)):
+            spec[k] = [spec[k]]
     if budget_override is not None:
         spec['budget'] = trip_budget({'budget': budget_override})
         spec.pop('budgetSGD', None)
@@ -2069,8 +2072,8 @@ def _shown_zones(zones, places):
             if any(p.get("zone") == z["id"] for p in places)]
 
 
-# one venue per brand per trip (owner approved). Two names are one brand when, without the trip's city names and
-# bracketed parts, they start with the same words and what follows is a branch or area: (1) they share at least 2
+# one venue per brand per trip (owner approved). Two names are one brand when, without the trip's city names (after
+# the first word) and bracketed parts, they start with the same words and what follows is a branch or area: (1) they share at least 2
 # leading words ("Samurai Ninja Museum Kyoto" / "Samurai Ninja Museum Asakusa Tokyo"), or one name is a single word
 # of 4+ letters that starts the other ("Ichiran" / "Ichiran Ikebukuro"); (2) the shared words include one that is not
 # a venue noun or a branch word, so "Tower" or "Art Museum" alone is no brand; (3) after the shared words each name
@@ -2092,7 +2095,8 @@ _BRANCH_WORDS = {"branch", "store", "shop", "main", "honten", "ten", "annex", "e
 
 def _brand_words(name, cities):
     words = re.findall(r"[^\W_]+", re.sub(r"\([^)]*\)|（[^）]*）", " ", str(name or "")).lower())
-    return [w for w in words if w not in cities]
+    # a leading city word is part of the name ("Tokyo National Museum" is not "Kyoto National Museum")
+    return words[:1] + [w for w in words[1:] if w not in cities]
 
 
 def _same_brand(a, b):
@@ -2794,7 +2798,7 @@ def _place_score(p, spec=None):
         else:
             score -= 2.0
 
-    avoid_terms = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    avoid_terms = [str(a).lower().strip() for a in _str_list(prefs.get("avoid")) + _str_list(spec.get("avoid")) if str(a).strip()]
     if avoid_terms:
         full_blob = f"{meta_text} {name_l}"
         if any(a in full_blob for a in avoid_terms):
@@ -3666,7 +3670,7 @@ def _swap_wished_cuisines(spec, pool, plan):
     pinned = {x.get("placeId") for x in (spec.get("pinned") or []) if isinstance(x, dict)}
     prefs = spec.get("preferences") or {}
     dietary, access = prefs.get("dietary") or [], prefs.get("accessibility") or []
-    avoid = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + (spec.get("avoid") or []) if str(a).strip()]
+    avoid = [str(a).lower().strip() for a in _str_list(prefs.get("avoid")) + _str_list(spec.get("avoid")) if str(a).strip()]
     edge = {spec.get("startDate"), spec.get("endDate")} | {l.get("checkIn") for l in (spec.get("legs") or [])[1:]}
     parkz = {z["id"] for z in pool.get("zones") or [] if z.get("kind") == "park"}
     zoned = bool(pool.get("zones"))
@@ -3795,7 +3799,7 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
     prefs = (spec or {}).get("preferences") or {}
     dietary = [str(d).lower().strip() for d in (prefs.get("dietary") or []) if str(d).strip()]
     access_reqs = [str(a).lower().strip() for a in (prefs.get("accessibility") or []) if str(a).strip()]
-    avoid_terms = [str(a).lower().strip() for a in (prefs.get("avoid") or []) + ((spec or {}).get("avoid") or []) if str(a).strip()]
+    avoid_terms = [str(a).lower().strip() for a in _str_list(prefs.get("avoid")) + _str_list((spec or {}).get("avoid")) if str(a).strip()]
 
     # 1. Check supermarkets, avoid conflicts, mandatory dietary compliance, and accessibility
     verified_diet_pool = [
@@ -4066,9 +4070,12 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
     edge = {sp.get("startDate"), sp.get("endDate")} | {l.get("checkIn") for l in (sp.get("legs") or [])[1:]}
     want_cafes = _cafes_per_day(sp)
     parkz = {z["id"] for z in pool.get("zones") or [] if z.get("kind") == "park"}
+    multi = is_multi(sp)
+    by_leg = {(p.get("leg") or 0, p["placeId"]): p for p in pool.get("places", [])}   # a city visited twice: per-leg copies
     for d in days if pool.get("zones") else []:
-        st = [by_id[i] for i in ([s.get("placeId") for s in d.get("stops") or [] if isinstance(s, dict)]
-                                 or d.get("placeIds") or []) if i in by_id]
+        li = leg_index(sp, d["date"]) if multi and d.get("date") else 0
+        st = [by_leg.get((li, i)) or by_id[i] for i in ([s.get("placeId") for s in d.get("stops") or [] if isinstance(s, dict)]
+                                                        or d.get("placeIds") or []) if i in by_id]
         if not st or d.get("date") in edge:
             continue
         cafes = sum(p.get("category") == "cafe" for p in st)
@@ -6456,9 +6463,14 @@ def route(state, message, usage):
         r["intent"] = "question"
     changes = r.get("specChanges") if isinstance(r.get("specChanges"), dict) else {}   # a list or text is no change
     r["specChanges"] = {k: v for k, v in changes.items() if k in CHANGE_FIELDS}
-    for k in ("interests", "activities"):   # a single string is one item, never its characters
+    for k in ("interests", "activities", "avoid"):   # a single string is one item, never its characters
         if k in r["specChanges"]:
             r["specChanges"][k] = _str_list(r["specChanges"][k])
+    for k in ("mustInclude", "dayTrips"):   # one place or trip (a name or an object) is a list of one
+        if isinstance(r["specChanges"].get(k), (str, dict)):
+            r["specChanges"][k] = [r["specChanges"][k]]
+    if not isinstance(r["specChanges"].get("preferences", {}), dict):   # "vegetarian": not a preferences object
+        r["specChanges"].pop("preferences")
     if "interests" in r["specChanges"]:   # keep only known categories; others become activities
         ints = [str(x).lower().strip() for x in r["specChanges"]["interests"] or []]
         extra = [x for x in ints if x not in PLACE_CATEGORIES]

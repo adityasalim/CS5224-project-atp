@@ -94,6 +94,13 @@ for body, ctype in ((b"<html>502 Bad Gateway</html>", "text/html"), (b"data: {no
         raise AssertionError(f"{body!r} was not mapped")
     except G.GatewayError:
         pass
+for body in (b'{"jsonrpc": "2.0", "id": 1, "result": null}', b'{"jsonrpc": "2.0", "id": 1, "result": [1]}'):
+    G.urllib.request.urlopen = lambda req, timeout=None, b=body: Resp(b)
+    try:
+        quiet(g.call, "find_places", {})
+        raise AssertionError(f"{body!r} was not mapped")
+    except G.GatewayError as e:
+        assert "not a JSON object" in str(e), e
 tok = G.Gateway()
 tok._creds = ("a", "b")
 G.urllib.request.urlopen = lambda req, timeout=None: (_ for _ in ()).throw(TimeoutError("timed out"))
@@ -102,7 +109,16 @@ try:
     raise AssertionError("token timeout was not mapped")
 except G.GatewayError as e:
     assert "token request failed" in str(e), e
+for body in (b'{"token_type": "Bearer"}', b'["tok"]'):
+    G.urllib.request.urlopen = lambda req, timeout=None, b=body: Resp(b)
+    try:
+        tok._get_token()
+        raise AssertionError(f"token reply {body!r} was not mapped")
+    except G.GatewayError as e:
+        assert "no access_token" in str(e), e
 G.urllib.request.urlopen = fake_urlopen
+ROUTE["find_places"] = lambda a: [{"placeId": "p1"}]   # tool text that is a JSON list: the failed-result shape
+assert quiet(g.call, "find_places", {}) == {"ok": False, "error": "non_json_result", "message": '[{"placeId": "p1"}]'}
 ROUTE["find_places"] = lambda a: {"ok": True, "places": []}
 assert quiet(g.call, "find_places", {}) == {"ok": True, "places": []}, "a good reply is unchanged"
 print("GATEWAY ERRORS OK")
@@ -293,6 +309,31 @@ for reply, check in (({"intent": "modify", "specChanges": ["pace"], "instruction
     A.ask_json = lambda *a, rp=reply, **k: json.loads(json.dumps(rp))
     r = A.route(st, "msg", A.Usage())
     assert check(r), r
+# one avoided word, named place or day trip as a string is one item; preferences that are not an object are no change
+A.ask_json = lambda *a, **k: {**json.loads(json.dumps(INTAKE)), "pax": 2, "avoid": "crowds",
+                              "mustInclude": "Tokyo Tower", "dayTrips": "Nikko"}
+s = A.intake("Tokyo", None, A.Usage())
+assert s["avoid"] == ["crowds"] and "crowds" in s["preferences"]["avoid"], s
+assert s["mustInclude"] == [{"name": "Tokyo Tower", "city": ""}], s["mustInclude"]
+assert s["dayTrips"] == [{"place": "Nikko", "date": "", "fromCity": ""}], s["dayTrips"]
+A.ask_json = lambda *a, **k: {**json.loads(json.dumps(INTAKE)), "pax": 2,
+                              "mustInclude": {"name": "Tokyo Tower"}, "dayTrips": {"place": "Nikko"}}
+s = A.intake("Tokyo", None, A.Usage())
+assert [m["name"] for m in s["mustInclude"]] == ["Tokyo Tower"] and [t["place"] for t in s["dayTrips"]] == ["Nikko"], s
+A.ask_json = lambda *a, **k: {"intent": "modify", "specChanges": {
+    "avoid": "crowds", "mustInclude": "Tokyo Tower", "dayTrips": "Nikko", "preferences": "vegetarian"}}
+r = A.route(st, "msg", A.Usage())
+assert r["specChanges"] == {"avoid": ["crowds"], "mustInclude": ["Tokyo Tower"], "dayTrips": ["Nikko"]}, r
+A.ask_json = lambda *a, **k: {"intent": "modify", "specChanges": {"preferences": {"vibe": "classic"}}}
+assert A.route(st, "msg", A.Usage())["specChanges"] == {"preferences": {"vibe": "classic"}}, "an object is kept"
+# a stored spec whose avoid is one string: the meal, cuisine, score and review steps read it as one word
+avs = {**spec1, "avoid": "crowds", "preferences": {**spec1["preferences"], "avoid": "crowds"}}
+crowd = pl("cr", "restaurant", name="Crowds Bar")
+assert A._place_score(crowd, avs) < A._place_score(crowd, spec1), "the avoided word lowers the score"
+quiet(A._balance_meals, avs, pool1, copy.deepcopy(plan1))
+quiet(A._swap_wished_cuisines, avs, pool1, copy.deepcopy(plan1))
+assert any("crowds" in json.dumps(i).lower() for i in quiet(A._deterministic_quality_eval, avs,
+           {**pool1, "places": pool1["places"] + [crowd]}, {"days": [{"date": "2026-12-11", "placeIds": ["cr"]}]})["issues"])
 restore()
 st = {"spec": copy.deepcopy(spec1), "request": "r", "plan": plan1, "pool": pool1}
 events, _ = quiet(drain, A.revise(st, "three of us", {"pax": "three"}, "u1", A.Usage(), {}, time.time()))
@@ -413,6 +454,19 @@ A._clients = lambda: (None, None, g)
 quiet(drain, A.zone_food(specp, poolp, [], set()))
 assert [(p["placeId"], p["zone"]) for p in poolp["places"]] == [("gplace:sweet", "Z2")], poolp["places"]
 restore()
+# the zone-day hint reads each day's own leg copy: the first Tokyo stay's day is one zone, the second stay's day three
+zp = lambda pid, cat, leg, zone: {"placeId": pid, "name": pid, "category": cat, "leg": leg, "city": "Tokyo",
+                                  "zone": zone, "lat": 35.70, "lng": 139.77}
+zpool = {"flights": [], "stays": [], "transfers": [],
+         "zones": [{"id": z, "leg": l, "kind": "walk"} for z, l in (("Z1", 0), ("Z8", 2), ("Z9", 2))],
+         "places": [zp("a", "museum", 0, "Z1"), zp("a", "museum", 2, "Z8"), zp("b", "museum", 0, "Z1"),
+                    zp("b", "museum", 2, "Z9"), zp("c", "temple", 0, "Z1"), zp("r1", "restaurant", 0, "Z1"),
+                    zp("r2", "restaurant", 0, "Z1")]}
+zone_hints = lambda dt: [i["message"] for i in quiet(A._deterministic_quality_eval, specm, zpool, {"days": [
+    {"date": dt, "city": "Tokyo", "stops": [{"placeId": i} for i in ("a", "b", "c", "r1", "r2")]}]})["issues"]
+    if i["status"] == "zones"]
+assert zone_hints("2026-12-16") == [], zone_hints("2026-12-16")
+assert [m.split(":")[0] for m in zone_hints("2026-12-21")] == ["2026-12-21 uses zones Z1, Z8, Z9"], zone_hints("2026-12-21")
 print("ROUTE HOTEL AND LEG PLACES OK")
 
 # ---------------------------------------------------------------- 12. the day-trip line leaves for the first stop on time
@@ -544,8 +598,14 @@ for a, b, brand in (("SAMURAI NINJA MUSEUM Kyoto", "Samurai Ninja Museum Asakusa
                     ("Fushimi Inari Taisha", "Fushimi Momoyama Castle", None), ("Tokyo Tower", "Kyoto Tower", None),
                     ("Imperial Palace", "Imperial Palace East Gardens", None), ("Sample Museum A", "Sample Museum B", None),
                     ("Tokyo National Museum", "National Museum of Nature and Science", None),
-                    ("Kyoto Samurai", "Kyoto Samurai Experience", None), ("Gion Corner", "Gion Shirakawa", None)):
+                    ("Kyoto Samurai", "Kyoto Samurai Experience", None), ("Gion Corner", "Gion Shirakawa", None),
+                    # a leading city word stays part of the name; a city word after it is still dropped
+                    ("Tokyo National Museum", "Kyoto National Museum", None),
+                    ("Tokyo Imperial Palace", "Kyoto Imperial Palace", None),
+                    ("Tokyo National Museum", "Tokyo National Museum Heiseikan", "tokyo national museum"),
+                    ("Samurai Ninja Museum Tokyo", "Samurai Ninja Museum Kyoto", "samurai ninja museum")):
     assert A._same_brand(W(a), W(b)) == brand, (a, b, A._same_brand(W(a), W(b)))
+assert W("Kyoto National Museum") == ["kyoto", "national", "museum"] and W("MAIKOYA Kyoto Gion") == ["maikoya", "gion"]
 place = lambda pid, name, cat, leg=0, rating=4.5, reviews=1000, **k: {
     "placeId": pid, "name": name, "category": cat, "leg": leg, "zone": "Z1", "rating": rating, "reviews": reviews,
     "lat": 35.0, "lng": 135.7, **k}
@@ -574,6 +634,11 @@ assert quiet(A._hide_brand_repeats, specb, {"places": copy.deepcopy(bpool["place
 assert "ichb" not in quiet(A._hide_brand_repeats, specb, copy.deepcopy(bpool), {"days": [{"placeIds": ["ich"]}]})
 # the planner never sees the hidden repeat (it is not a zone member)
 assert "sna" not in [p["placeId"] for p in A._zone_places(b2, specb)]
+# the Tokyo and Kyoto national museums and imperial palaces are four places, none hidden
+cpool = {"zones": [{"id": "Z1"}], "places": [
+    place("tnm", "Tokyo National Museum", "museum", 0, 4.6, 30000), place("knm", "Kyoto National Museum", "museum", 1),
+    place("tip", "Tokyo Imperial Palace", "attraction", 0), place("kip", "Kyoto Imperial Palace", "attraction", 1)]}
+assert quiet(A._hide_brand_repeats, {**specb, "pinned": []}, cpool) == [], "two cities' museums are not one brand"
 print("BRANDS OK")
 
 # ---------------------------------------------------------------- 20. packed pace: add sights from the day's zones
