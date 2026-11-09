@@ -247,7 +247,8 @@ def build_pdf(event, pool, daily_spend):
             gloss = s.get("nameEn")   # the agent's English name for a Japanese-only name
             if isinstance(gloss, str) and gloss.strip():
                 name = f"{name} ({gloss.strip()[:80]})"
-            when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
+            # a day line (park meals, check-out, airport) has no departure: show its time alone, or none
+            when = "-".join(t for t in (s.get("arriveAt") or "", s.get("departAt") or "") if t)
             travel = s.get("travelMinutesFromPrev")
             extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
             if s.get("zoneLabel") and s.get("zone") != zone:

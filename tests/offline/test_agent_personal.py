@@ -236,8 +236,8 @@ for lows, want in (((1, 2), 2), ((2, 2), 1), ((3, 3), 1), ((2, 1), 1)):
     assert logged[0]["scores"] == {c: lows[0] for c in JUDGE_CRITERIA}, logged
 assert A._planner_provider(strict) is None, "configuration 19 keeps one correction"
 
-# hard checks still failing: Claude gets one correction (the plan is not reviewed again, so the lowest review score
-# is not raised and there is no second one) and a "not fully verified" plan; configuration 19 refuses
+# hard checks still failing: Claude gets the approved second correction (whatever the review score did) and a "not
+# fully verified" plan; configuration 19 refuses after one
 b_, m_, g_ = A._clients()
 class FailVerify:
     def __init__(self, gw): self.gw = gw
@@ -248,7 +248,7 @@ class FailVerify:
         return self.gw.call(tool, args)
 saved_clients = A._clients
 A._clients = lambda: (b_, m_, FailVerify(g_))
-for adapter, want in ((claude, 1), (strict.adapter, 1)):
+for adapter, want in ((claude, 2), (strict.adapter, 1)):
     REPAIRS.clear()
     A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(1) or json.loads(json.dumps(plan))
     gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=adapter, trip_id="t-hard"))

@@ -5727,10 +5727,11 @@ def improve(spec, pool, plan, full_request, usage, change=None):
         done = _verified(vres) and judge_ok and not unscheduled and not unpriced
         if LOOP_ENABLED and judge_res is not None and judge_res.get("unavailable"):
             judge_res["status"] = "unavailable"
-        # the second correction (owner approved) runs only when the first one raised the lowest review score
+        # the second correction (owner approved): always when the hard checks still fail; for a review score below 3
+        # only when the first correction raised the lowest review score
         raised = len(round_mins) > 1 and (round_mins[1] or 0) > (round_mins[0] or 0)
-        limit = 2 if strict_mode and claude and raised and (not _verified(best["verify"])
-                                                            or (_judge_min(best["judge"]) or 5) < 3) else round_limit
+        limit = 2 if strict_mode and claude and (not _verified(best["verify"]) or (
+            raised and (_judge_min(best["judge"]) or 5) < 3)) else round_limit
         if done or not LOOP_ENABLED or rounds >= limit:
             stop_reason = STOP_ACCEPTED if done else (STOP_LOOP_DISABLED if not LOOP_ENABLED else STOP_ROUND_LIMIT)
             break
