@@ -1886,7 +1886,7 @@ def gather_specials(spec, pool, calls, sources, only=None):
             near = {}
             if home:   # the trip's city; for an unknown city on a route, the route, wide enough to reach every city
                 c = {"lat": statistics.median(p_["lat"] for p_ in home), "lng": statistics.median(p_["lng"] for p_ in home)}
-                reach = DAY_TRIP_NEAR_KM + (max(_km(c, p_) for p_ in home) if multi and li_t is None else 0)
+                reach = min(1500, DAY_TRIP_NEAR_KM + (max(_km(c, p_) for p_ in home) if multi and li_t is None else 0))
                 near = {"near": c, "maxKm": round(reach)}
             r = call({"city": t["place"], "categories": cats, "radiusKm": DAY_TRIP_RADIUS_KM, "maxPerCategory": 4,
                       **near})   # food: zone_food
@@ -2012,6 +2012,7 @@ def _usable_hours(f, spec):
     knows a 05:55 landing still leaves a full day."""
     slices, prefs, days = f.get("slices") or [{}], spec.get("preferences") or {}, {}
     arr, dep = str(slices[0].get("arriveAt") or "")[:10], str(slices[-1].get("departAt") or "")[:10]
+    dep = dep if len(slices) > 1 and spec.get("flightType") != "oneway" else ""   # a one-way trip has no return
     edges = ({spec["startDate"], arr} if arr else set()) | ({spec.get("endDate", ""), dep} if dep else set())
     # a side whose time is unknown gets no window rather than an invented full day
     for day in sorted(d for d in edges if len(d) == 10 and spec["startDate"] <= d <= spec.get("endDate", "~")):
@@ -3481,11 +3482,11 @@ def _deterministic_quality_eval(spec, pool, plan_or_seq):
         cafes = sum(p.get("category") == "cafe" for p in st)
         if d.get("dayTrip") or any(p.get("zone") in parkz or p.get("category") == "theme_park"
                                    or PARK_RE.search(p.get("name") or "") for p in st):
-            here = {p.get("zone") for p in st} | {p.get("dayTrip") for p in st}
+            here = ({p.get("zone") for p in st} | {p.get("dayTrip") for p in st}) - {None, ""}
             have = sum(1 for p in pool.get("places") or [] if p.get("category") == "cafe"
                        and (p.get("zone") in here or (p.get("dayTrip") and p.get("dayTrip") in here)))
             if cafes < min(want_cafes, have):   # park and day-trip days: only the cafes the pool has nearby
-                msg = f"{d['date']} needs {want_cafes} cafe stops near that day's park or town."
+                msg = f"{d['date']} needs {min(want_cafes, have)} cafe stops near that day's park or town."
                 issues.append({"priority": 6, "day": d.get("date"), "status": "zones", "message": msg})
                 suggestions.append(msg)
             continue
