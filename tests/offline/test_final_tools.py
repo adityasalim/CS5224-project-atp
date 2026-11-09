@@ -49,9 +49,10 @@ OSM = {"type": "node", "id": 7, "lat": 35.69, "lon": 139.77, "tags": {"tourism":
 
 class Geo:
     def __init__(s):
-        s.items, s.made = [], []
+        s.items, s.made, s.delay = [], [], 0
 
     def geocode(s, **k):
+        time.sleep(s.delay)   # a slow geocode
         return {"ResultItems": [{"Position": [139.76, 35.68]}]}
 
     def search_text(s, **k):
@@ -235,12 +236,14 @@ fp._secret_cache = {"GOOGLE_MAPS_KEY": "k"}
 GEO.made.clear()
 fp.TIME_BUDGET_S = 10
 fp.requests.post = replies(R({"places": [GOOD]}))
-t0 = time.time()
+GEO.delay = 2
 r = fp.lambda_handler({"city": "Somewhere Unknown", "categories": ["cafe"]}, None)
+GEO.delay = 0
 assert r["ok"] and GEO.made, r
 c = GEO.made[0]
 assert c["region_name"] == "us-east-1" and c["retries"]["total_max_attempts"] * (c["connect_timeout"] + c["read_timeout"]) <= 10, c
-assert all(k["timeout"] <= 10 for k in fp.requests.post.calls), "Google waits at most the time left"
+# the budget started before the 2 s geocode: Google waits at most the 8 s left, never a fresh 10 s
+assert fp.requests.post.calls and all(k["timeout"] <= 8.1 for k in fp.requests.post.calls), fp.requests.post.calls
 fp.TIME_BUDGET_S = 45
 fp._geo_client(time.time() + 45)   # plenty of time: up to 3 attempts of 4 s + 8 s
 c = GEO.made[-1]
