@@ -48,7 +48,7 @@ from prompts import get_prompt, ZONE_RULES
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
 from package_recommendations import recommend as recommend_packages, MODES as PACKAGE_MODES
-from trip_currency import budget as trip_budget, code as currency_code, budget_amount, prepare_pool, pool_price, daily as trip_daily, money_text, known_price
+from trip_currency import budget as trip_budget, code as currency_code, budget_amount, prepare_pool, pool_price, daily as trip_daily, money_text, known_price, convert as fx_convert, load_quote as load_fx_quote
 from acceptance import (
     JUDGE_CRITERIA,
     STATE_ACCEPTED, STATE_BLOCKED, STATE_BUDGET_WARNING, STATE_CAVEATED,
@@ -1578,6 +1578,12 @@ def assign_zones(places, radius_km=ZONE_RADIUS_KM):
 ZONE_R_KM, ZONE_SPARSE_R_KM, ZONE_ATTACH_KM = 1.2, 1.6, 1.2   # 1.2 km seed radius: members <= 2.4 km apart, 42 min on foot
 ZONE_FOOD_KM, ZONE_FOOD_WIDE_KM, RIDE_MAX_MIN = 1.2, 2.0, 30
 CUISINE_ATTACH_KM = 3.0   # a place of a city-wide cuisine search joins a zone this far away (attachKm)
+# cuisines with a Google restaurant type (G_MEAL_TYPES in tp-find-places, plus steak_house): only these have an area
+# search, since any other cuisine turns it into a plain restaurant search the zone search already made
+G_CUISINE_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining", "french", "greek", "indian",
+                   "indonesian", "italian", "japanese", "korean", "lebanese", "mediterranean", "mexican",
+                   "middle_eastern", "ramen", "seafood", "spanish", "sushi", "thai", "turkish", "vegan", "vegetarian",
+                   "vietnamese", "steak"}
 ZONE_FOOD_WORKERS = int(os.environ.get("ZONE_FOOD_WORKERS", "6"))
 SEQUENCE_WORKERS = 6   # days ordered at the same time (one sequence_day call each)
 GOOGLE_FOOD_CAP = 20   # Google food requests per plan: one Nearby Search per zone plus one coffee Text Search per city
@@ -1740,9 +1746,10 @@ def zone_food(spec, pool, calls, sources):
             "lat": z["lat"], "lng": z["lng"], "categories": cats, "maxPerCategory": 4,
             "foodRadiusKm": ZONE_FOOD_WIDE_KM if z["kind"] == "daytrip" else ZONE_FOOD_KM,
             **({"priceLevel": price} if price else {})})))
-        if wanted and z["kind"] in ("walk", "solo"):   # only the wished cuisines around the zone (cuisineOnly)
+        typed = [c for c in wanted if c in G_CUISINE_TYPES]
+        if typed and z["kind"] in ("walk", "solo"):   # only the wished cuisines around the zone (cuisineOnly)
             area.append(({"leg": z["leg"], "attachKm": ZONE_FOOD_WIDE_KM}, with_prefs("find_places", spec, {
-                "lat": z["lat"], "lng": z["lng"], "categories": ["restaurant"], "cuisine": "|".join(wanted),
+                "lat": z["lat"], "lng": z["lng"], "categories": ["restaurant"], "cuisine": "|".join(typed),
                 "cuisineOnly": True, "maxPerCategory": 4, "foodRadiusKm": ZONE_FOOD_WIDE_KM})))
     coffee = []
     for li in range(len(spec["legs"]) if multi else 1):
@@ -1762,9 +1769,9 @@ def zone_food(spec, pool, calls, sources):
                 extras.append(({"leg": li, "cuisine": cuisine, "attachKm": CUISINE_ATTACH_KM},
                                with_prefs("find_places", spec, {**c, "categories": ["restaurant"], "cuisine": cuisine,
                                                                 "maxPerCategory": 4, "foodRadiusKm": round(reach, 1)})))
-    # priority within the cap: the city coffee searches, every zone's food, park cafes, the area cuisine searches,
-    # then the city-wide cuisine searches
-    jobs = coffee + jobs + [j for j in extras if "id" in j[0]] + area + [j for j in extras if "id" not in j[0]]
+    # priority within the cap (owner order after run 4): the city coffee searches, every zone's food, the city-wide
+    # cuisine searches, park cafes, then the area cuisine searches
+    jobs = coffee + jobs + [j for j in extras if "id" not in j[0]] + [j for j in extras if "id" in j[0]] + area
     skipped = max(0, len(jobs) - GOOGLE_FOOD_CAP)
     jobs = jobs[:GOOGLE_FOOD_CAP]
     used = len(jobs)
@@ -3118,11 +3125,13 @@ def _budget_room(spec):
     Both use the base estimate (DAILY_SPEND), so the larger one of a comfortable trip does not end the room."""
     try:
         nights = max(1, trip_days(spec) - 1)
-        daily = trip_daily(spec, DAILY_SPEND)
-        if "budget" in spec:   # dailySpend holds _daily_spend(spec) in the trip currency (prepare_pool)
-            daily *= DAILY_SPEND / _daily_spend(spec)
+        daily = DAILY_SPEND
+        if "budget" in spec:   # the base figure in the trip currency: dailySpend is unset before the first
+            cur = currency_code(spec)   # prepare_pool and stale while a change is searched again
+            if cur != "SGD":
+                daily = float(fx_convert(DAILY_SPEND, "SGD", cur, spec.get("_fx") or load_fx_quote(cur)))
         return daily > 0 and _bookable(spec, daily) >= ROOMY_NIGHT_SHARE * daily * spec["pax"] * nights
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OSError):
         return False
 
 
@@ -4171,11 +4180,13 @@ def _upgrade_choices(spec, pool, seq, vres):
     out = []
     for st in _stays_of(seq, pool):
         cur = known_price(st)
-        if cur is None or st.get("booked"):
+        wished = set(st.get("matches") or [])   # the style wishes the plan's hotel meets; never offer one losing them
+        if cur is None or st.get("booked") or "requested hotel" in wished:
             continue
         better = [x for x in pool["stays"] if x.get("leg") == st.get("leg") and x.get("stayId") != st.get("stayId")
                   and x.get("name") and known_price(x) is not None and 0 < known_price(x) - cur <= room
-                  and (rev(x) > rev(st) or stars(x) > stars(st))]
+                  and rev(x) >= rev(st) and stars(x) >= stars(st) and (rev(x) > rev(st) or stars(x) > stars(st))
+                  and wished <= set(x.get("matches") or [])]
         if better:
             x = max(better, key=lambda x: (rev(x), stars(x), -known_price(x), str(x.get("stayId"))))
             where = f" in {st['city']}" if is_multi(spec) and st.get("city") else ""
@@ -4204,6 +4215,7 @@ def _upgrade_choices(spec, pool, seq, vres):
 
 
 CABIN_DOWN = {"first": "business", "business": "premium_economy", "premium_economy": "economy"}
+CHEAPER_FLIGHTS_WAIT_S = 20
 CABIN_TEXT = {"economy": "economy", "premium_economy": "premium economy", "business": "business", "first": "first class"}
 
 
@@ -4237,13 +4249,17 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
         return []
     avoid = [str(a).lower() for a in f_pref.get("avoidAirlines") or []]
 
+    def leg_stops(f):   # stops per direction, as maxStops counts them (a 1-stop round trip has 1 each way)
+        sl = [s.get("stops") for s in f.get("slices") or [] if isinstance(s.get("stops"), (int, float))]
+        return max(sl) if sl else int(f.get("maxStops", f.get("stops")) or 0)
+
     def search(alt):
         aspec = copy.deepcopy(spec)
         aspec["preferences"]["flight"].update(alt)
-        try:
-            res = gw.call("search_flights", with_prefs("search_flights", aspec, _flight_args(aspec)))
-        except GatewayError as e:
-            res = {"ok": False, "message": str(e)}
+        try:   # its own Gateway copy per thread, as in sequence() and zone_food()
+            res = copy.copy(gw).call("search_flights", with_prefs("search_flights", aspec, _flight_args(aspec)))
+        except Exception as e:  # noqa: BLE001 -- a chip is never worth failing a delivered plan
+            res = {"ok": False, "message": f"{type(e).__name__}: {e}"}
         if not res.get("ok"):
             print(json.dumps({"stage": "cheaper_flights", "alt": alt, "error": res.get("message") or res.get("error")}))
             return None
@@ -4251,18 +4267,34 @@ def _cheaper_flight_choices(spec, pool, seq, vres, gw):
         fits = [f for f in offers if f.get("airline") and known_price(f) is not None
                 and known_price(f) < known_price(cur)
                 and str(f.get("cabin") or alt["cabin"]) == alt["cabin"]
-                and (_flight_total_stops(f) or 0) <= (alt["maxStops"] if alt["maxStops"] is not None else 9)
+                and leg_stops(f) <= (alt["maxStops"] if alt["maxStops"] is not None else 9)
                 and not any(a in str(f["airline"]).lower() for a in avoid)]
         if not fits:
             return None
         f = min(fits, key=lambda f: (known_price(f), str(f.get("offerId"))))
-        n = _flight_total_stops(f) or 0
-        how = "nonstop" if n == 0 else f"with {n} stop{'s' if n > 1 else ''}"
         saved = round(known_price(cur) - known_price(f), -1)
+        if saved < 10:
+            return None
+        n = leg_stops(f)
+        how = "nonstop" if n == 0 else f"with {n} stop{'s' if n > 1 else ''}"
         return f"Fly {f['airline']} in {CABIN_TEXT[alt['cabin']]} {how}, saves about {currency_code(spec)} {saved:,.0f}"
 
-    with ThreadPoolExecutor(max_workers=len(alts)) as ex:
-        return [c for c in ex.map(search, alts) if c]
+    ex = ThreadPoolExecutor(max_workers=len(alts))
+    jobs = [ex.submit(search, a) for a in alts]
+    done, _ = wait(jobs, timeout=CHEAPER_FLIGHTS_WAIT_S)   # the plan is already shown; a slow search drops its chip
+    ex.shutdown(wait=False)
+    return [c for c in (j.result() for j in jobs if j in done) if c]
+
+
+def _plan_choices(spec, pool, best):
+    """Upgrade choices when the plan has budget left, else cheaper flights when it is over. They come after the plan
+    is delivered, so any failure only drops the choices (it must never roll back the delivered plan)."""
+    try:
+        return _upgrade_choices(spec, pool, best["seq"], best["verify"]) or \
+            _cheaper_flight_choices(spec, pool, best["seq"], best["verify"], _clients()[2])
+    except Exception:  # noqa: BLE001
+        print("plan choices failed:", traceback.format_exc())
+        return []
 
 
 def _route_text(spec):
@@ -5315,8 +5347,7 @@ def new_plan(state, request, user_id, usage, metrics, t0):
     if spec.get("notFound"):
         msg += f" (I couldn't find {', '.join(spec['notFound'])} on the map; tell me the area and I'll add it.)"
     _remember(state, "assistant", msg)
-    choices = _upgrade_choices(spec, pool, best["seq"], best["verify"]) or \
-        _cheaper_flight_choices(spec, pool, best["seq"], best["verify"], _clients()[2])
+    choices = _plan_choices(spec, pool, best)
     yield ev("message", msg, **({"choices": choices} if choices else {}))
     return True
 
@@ -5588,8 +5619,7 @@ def revise(state, instruction, changes, user_id, usage, metrics, t0, search_for=
                 f"the area or full name?"
     msg = f"{note} (This is version {state['version']}; ask for more changes any time.)"
     _remember(state, "assistant", msg)
-    choices = _upgrade_choices(spec, state["pool"], best["seq"], best["verify"]) or \
-        _cheaper_flight_choices(spec, state["pool"], best["seq"], best["verify"], _clients()[2])
+    choices = _plan_choices(spec, state["pool"], best)
     yield ev("message", msg, **({"choices": choices} if choices else {}))
 
 

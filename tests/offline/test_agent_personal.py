@@ -1,5 +1,5 @@
 from stubutil import sys_text, clean_msgs, CACHE_SEEN
-import sys, types, json, os, re
+import sys, types, json, os, re, io, contextlib
 # ---- stub bedrock_agentcore ----
 bac = types.ModuleType("bedrock_agentcore")
 class App:
@@ -139,8 +139,9 @@ assert first_stop >= "10:00", "dayStart not applied"
 assert SEEN.get("repair_wheelchair", 0) > 0, "wheelchair places not found after the change"
 assert "hidden gem" in SEEN["judge"] or "local pick" in SEEN["judge"]
 print("versions:", [i["version"] for i in its])
-# both delivered plans end with a priced upgrade the budget allows (SGD 4,395 + 700 of 6,000)
-assert [m.get("choices") for m in MSGS if m["type"] == "message"] == [["Stay at Sample Skyline Hotel (rated 9), +SGD 700.00"]] * 2, MSGS
+# the budget allows Sample Skyline Hotel (+SGD 700, 5 stars, rated 9.0), but it is not a ryokan and is rated below
+# the plan's 9.3 ryokan, so neither delivered plan offers it
+assert [m.get("choices") for m in MSGS if m["type"] == "message"] == [None] * 2, MSGS
 A.improve = _improve
 
 # ---- form cuisines reach the tools (6 kept); coffee, desserts and per-day cafes are in test_ui_preferences
@@ -326,7 +327,9 @@ tight = {**roomy, "budget": {"amount": "5000", "currency": "SGD"}}
 assert [f["offerId"] for f in A._order_flights(offers, tight)] == ["cheap", "direct"], "no room: cheapest first"
 thrifty = {**roomy, "preferenceScores": {"comfort": 3}}
 assert A._comfort(thrifty) == 3 and A._comfort(roomy) == 8, "budget room never overrides a low comfort wish"
-assert not A._budget_room({**roomy, "dailySpend": {"amount": "0", "currency": "SGD"}}), "a zero daily estimate is no room"
+assert A._budget_room({k: v for k, v in roomy.items() if k != "dailySpend"}), "the first search has no dailySpend yet"
+assert not A._budget_room({**tight, "dailySpend": {"amount": "200", "currency": "SGD"}}) and \
+    not A._budget_room({**tight, "dailySpend": {"amount": "50", "currency": "SGD"}}), "a stale dailySpend changes nothing"
 s0 = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"amount": "5000", "currency": "SGD"},
       "preferences": {}}
 A.normalize_prefs(s0)
@@ -415,13 +418,16 @@ class AltGw:
                 {"offerId": "p1", "airline": "Hop Air", "cabin": "premium_economy", "priceTotalSGD": 3500, "stops": 1},
                 {"offerId": "p0", "airline": "ANA", "cabin": "premium_economy", "priceTotalSGD": 4604, "stops": 0}]}
         return {"ok": True, "offers": [{"offerId": "b1", "airline": "Singapore Airlines", "cabin": "business",
-                                        "priceTotalSGD": 6083, "slices": [{"stops": 1}, {"stops": 0}]}]}
+                                        "priceTotalSGD": 6083, "slices": [{"stops": 1}, {"stops": 1}]},
+                                       {"offerId": "b2", "airline": "Two Stop Air", "cabin": "business",
+                                        "priceTotalSGD": 5000, "slices": [{"stops": 2}, {"stops": 0}]}]}
 bd_pool = {"flights": [{"offerId": "jal", "airline": "JAL", "cabin": "business", "priceTotalSGD": 8000, "stops": 0}]}
 bd_seq = {"flightOfferId": "jal"}
 gw_alt = AltGw()
 assert A._cheaper_flight_choices(bd, bd_pool, bd_seq, {"totals": {"total": "16100"}}, gw_alt) == [
     "Fly ANA in premium economy nonstop, saves about SGD 3,400",
-    "Fly Singapore Airlines in business with 1 stop, saves about SGD 1,920"], "next cabin down, then one stop"
+    "Fly Singapore Airlines in business with 1 stop, saves about SGD 1,920"], \
+    "next cabin down, then one stop per direction (1 stop each way counts as 1, 2 stops one way is out)"
 assert sorted((c.get("cabin"), c.get("maxStops")) for c in gw_alt.calls) == [("business", 1), ("premium_economy", 0)], gw_alt.calls
 assert gw_alt.calls[0]["origin"] == "SIN" and gw_alt.calls[0]["returnDate"] == "2026-12-20"
 gw_alt = AltGw()
@@ -433,6 +439,32 @@ assert A._cheaper_flight_choices(eco, bd_pool, bd_seq, {"totals": {"total": "161
     "economy without direct only: no extra search"
 dear = {"flights": [{"offerId": "jal", "airline": "JAL", "cabin": "business", "priceTotalSGD": 3000, "stops": 0}]}
 assert A._cheaper_flight_choices(bd, dear, bd_seq, {"totals": {"total": "16100"}}, AltGw()) == [], "only fares that save money"
+tiny = {"flights": [{"offerId": "jal", "airline": "JAL", "cabin": "business", "priceTotalSGD": 4608, "stops": 0}]}
+assert A._cheaper_flight_choices(bd, tiny, bd_seq, {"totals": {"total": "16100"}}, AltGw()) == [], "a saving under 10 is no chip"
+no_ana = {**bd, "preferences": json.loads(json.dumps(bd["preferences"]))}
+no_ana["preferences"]["flight"]["avoidAirlines"] = ["ana"]
+assert A._cheaper_flight_choices(no_ana, bd_pool, bd_seq, {"totals": {"total": "16100"}}, AltGw()) == [
+    "Fly Singapore Airlines in business with 1 stop, saves about SGD 1,920"], "an avoided airline is never offered"
+class DownGw:
+    def call(self, tool, args): raise TimeoutError("timed out")
+clients = A._clients
+A._clients = lambda: (None, None, DownGw())
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    assert A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}}) == [], \
+        "a failed search drops the chips, never the delivered plan"
+assert "TimeoutError" in out.getvalue() and "plan choices failed" not in out.getvalue(), out.getvalue()
+A._clients = lambda: (None, None, AltGw())
+assert len(A._plan_choices(bd, {**bd_pool, "stays": []}, {"seq": bd_seq, "verify": {"totals": {"total": "16100"}}})) == 2
+A._clients = clients
+# an upgrade never gives up a style wish the plan's hotel meets, nor a worse review for more stars
+st_pool = {"stays": [{"stayId": "ryo", "name": "Machiya Ryokan", "starRating": 4, "reviewScore": 9.3, "priceTotalSGD": 1000,
+                      "matches": ["ryokan"]},
+                     {"stayId": "sky", "name": "Skyline", "starRating": 5, "reviewScore": 9.0, "priceTotalSGD": 1500},
+                     {"stayId": "ryo5", "name": "Grand Ryokan", "starRating": 5, "reviewScore": 9.5, "priceTotalSGD": 1800,
+                      "matches": ["ryokan"]}], "flights": []}
+assert A._upgrade_choices(spec_h, st_pool, {"stayId": "ryo", "days": []}, {"totals": {"total": "5000"}}) == [
+    "Stay at Grand Ryokan (rated 9.5), +SGD 800.00"]
 
 
 def claude_run(lows):

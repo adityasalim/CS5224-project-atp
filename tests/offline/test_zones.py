@@ -242,10 +242,12 @@ fed = {(round(a["lat"], 5), round(a["lng"], 5)) for a in nearby}
 assert all(((z["lat"], z["lng"]) in fed) == (z["kind"] in ("walk", "solo") or z.get("dayTrip") == "Kawaguchiko")
            for z in zones), "every zone but the parks gets one food search"
 parks = [z for z in zones if z["kind"] == "park" or (z["kind"] == "daytrip" and z.get("dayTrip") != "Kawaguchiko")]
-# 2 coffee + 15 zones + 3 park cafes fill the cap of 20: the cuisine searches come after the park cafes
-assert len(parks) == 3 and sorted((round(a["lat"], 5), round(a["lng"], 5)) for a in park_cafe) \
-    == sorted((z["lat"], z["lng"]) for z in parks), "every theme park gets a cafe search before the cuisine searches"
-assert not city_cuisine and not any(area_job(a) for _, a in SENT), "no request left for the cuisine searches"
+# 2 coffee + 15 zones + 2 city-wide cuisines leave 1 request for the 3 parks and none for the area cuisine searches
+assert len(city_cuisine) == 2 and all(a["cuisine"] == "italian" and a["maxPerCategory"] == 4 for a in city_cuisine), \
+    "one city-wide search per requested cuisine, per city"
+assert len(parks) == 3 and len(park_cafe) == 1 and (round(park_cafe[0]["lat"], 5), round(park_cafe[0]["lng"], 5)) \
+    == (parks[0]["lat"], parks[0]["lng"]), "theme parks get a cafe search with the requests left"
+assert not any(area_job(a) for _, a in SENT), "no request left for the area cuisine searches"
 assert len(SENT) == used == 20, (len(SENT), used)
 assert all(set(a["categories"]) == ({"restaurant", "cafe", "dessert"} if a["foodRadiusKm"] == 1.2 else {"restaurant", "cafe"})
            for a in nearby), "walk zones ask for every wished food kind, day trips skip desserts"
@@ -268,14 +270,20 @@ for s_, cuisine, n_city in ((spec, "italian", 1), (two, "italian|indian", 2)):
                                   and a["foodRadiusKm"] == 2.0 for a in area), area
     city = [a["cuisine"] for _, a in SENT if a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"]]
     assert sorted(city) == sorted(cuisine.split("|")) and not any(a["foodRadiusKm"] > 2 and area_job(a) for _, a in SENT), city
-# priority: 1 coffee + 9 zones + 3 park cafes leave 7 requests for the 9 area searches and none for the city-wide ones
+# priority: 1 coffee + 9 zones + 2 city-wide cuisines + 3 park cafes leave 5 requests for the 9 area searches
 SENT.clear()
 mid = few(9)
 mid["zones"] += [z for z in zones if z in parks]
 assert drain(Z["zone_food"](copy.deepcopy(two), mid, [], set())) == 20
 assert [sum(f(a) for _, a in SENT) for f in (lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["cafe"], area_job,
         lambda a: a["foodRadiusKm"] <= 2 and a["categories"] == ["cafe"],
-        lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"])] == [1, 7, 3, 0], SENT
+        lambda a: a["foodRadiusKm"] > 2 and a["categories"] == ["restaurant"])] == [1, 5, 3, 2], SENT
+# a cuisine with no Google restaurant type gets no area search (it would repeat the zone's plain restaurant search)
+SENT.clear()
+kai = copy.deepcopy(spec)
+kai["cuisines"] = ["Kaiseki"]
+drain(Z["zone_food"](kai, few(3), [], set()))
+assert not any(area_job(a) for _, a in SENT), [a for _, a in SENT if area_job(a)]
 # a city-wide cuisine place joins a zone up to 3 km away (its attachKm), any other place only within 1.2 km
 a_spec, a_pool = copy.deepcopy(spec), copy.deepcopy(pool)
 walks = [z for z in a_pool["zones"] if z["leg"] == 0 and z["kind"] in ("walk", "solo")]
@@ -301,7 +309,7 @@ assert all((a.get("priceLevel") == 2) == (a["foodRadiusKm"] <= 2 and "restaurant
 callers = {f.name for f in top.values() if isinstance(f, ast.FunctionDef)
            for n in ast.walk(f) if isinstance(n, ast.Name) and n.id == "zone_food"}
 assert callers == {"gather", "gather_multi"}, f"chat changes reuse the session pool (0 requests); zone_food in {callers}"
-print("Google food requests for the owner trip: 20 (2 coffee, 15 zones, 3 park cafes; cap 20)")
+print("Google food requests for the owner trip: 20 (17 coffee and zones, 2 cuisines, 1 park cafe; cap 20)")
 
 # the rules the planner sees agree with the verifier's stop cap
 sys.path.insert(0, str(REPO / "agent"))
@@ -341,7 +349,8 @@ A["_balance_meals"]({}, h_pool, plan)
 assert plan["days"][0]["placeIds"] == ["senso", "lunch", "ueno", "dinner"], plan
 h_pool["places"].append(cand)
 E = agent(["_enrich_violations"], {n: lambda *a, **k: 0 for n in ("_acceptance_violation_priority", "currency_code",
-                                                                  "known_price", "budget_amount", "trip_daily")})
+                                                                  "known_price", "budget_amount", "trip_daily",
+                                                                  "fx_convert", "load_fx_quote")})
 hint = E["_enrich_violations"]({}, h_pool, {"days": [{"date": "2026-12-05", "placeIds": ["senso", "ueno"]}]},
                                {"violations": [{"check": "commute", "day": "2026-12-05", "message": "long ride"}]},
                                [])[0]["repairHint"]
