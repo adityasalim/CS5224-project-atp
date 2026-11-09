@@ -111,7 +111,8 @@ Set `MOCK_MODE=false` per function. Fallbacks, all labelled in the `source` fiel
 - flights: **SerpApi Google Flights** (`google_flights`; real airlines, times and SGD prices for all travellers,
   each offer has a `bookingUrl` to Google Flights) → Duffel (`duffel`; test mode = fake "Duffel Airways") →
   error `not_configured` if the secret has neither `SERPAPI_KEY` nor `DUFFEL_TOKEN`. A round trip uses
-  1 + `SERPAPI_RETURN_LOOKUPS` (default 2) SerpApi searches; results are cached 6 h (`google_flights-cache`).
+  1 + `SERPAPI_RETURN_LOOKUPS` (default 3) SerpApi searches, plus one nonstop-only search above economy (one-way:
+  1, or 2 above economy); results are cached 6 h (`google_flights-cache`).
   SerpApi's free plan is 250 searches/month.
 - stays: Duffel Stays → liteAPI → mock (`mock-fallback`)
 - places: Overpass (2 servers) → Amazon Location Places → Google Places → mock (`mock-fallback`); the whole chain finishes within `TIME_BUDGET_SECONDS` (default 40) so it never hits the 60 s Lambda timeout.

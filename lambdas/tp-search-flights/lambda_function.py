@@ -5,8 +5,9 @@ prices in SGD.
 Providers, in order (the "source" field says which one answered):
   1. SerpApi Google Flights (real airlines, times and prices as shown on Google Flights; no booking -
      each offer has a bookingUrl to Google Flights). Needs SERPAPI_KEY in the secret.
-     A round trip or open-jaw search uses 1 + SERPAPI_RETURN_LOOKUPS SerpApi searches (default 1 + 3 = 4);
-     results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
+     SerpApi searches per call: one-way 1; round trip or open-jaw 1 + SERPAPI_RETURN_LOOKUPS (default 1 + 3 = 4).
+     Above economy one more, nonstop-only search is added (one-way 2, round trip default 5, at most 6). A failed
+     request is retried once. Results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
   2. Duffel (test mode returns the fake "Duffel Airways"; live mode returns bookable fares). Needs DUFFEL_TOKEN.
   3. MOCK_MODE=true, or no keys at all: built-in sample data.
 
@@ -14,7 +15,8 @@ Environment variables:
   SECRET_ARN   ARN of the Secrets Manager secret holding {"SERPAPI_KEY": "...", "DUFFEL_TOKEN": "..."}
                (either key may be missing)
   SERPAPI_RETURN_LOOKUPS  optional, default 3 (0-4): outbound options whose return flights are looked up (the
-               cheapest, then the ones with the most different departure and arrival times)
+               cheapest nonstop, the cheapest, then the ones with the most different departure and arrival times;
+               above economy, options with a segment in another cabin are skipped)
   CACHE_TABLE  DynamoDB cache table name (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = return built-in sample data, no API call (default "true")
   CACHE_TTL_SECONDS  optional, default 21600 (6 hours)
@@ -209,7 +211,7 @@ def _apply_prefs(offers, q):
     return offers
 
 def _cache_key(q):
-    return "flights-v5:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v6:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -362,6 +364,26 @@ def _time_gap(a, b):
     return sum(abs((x - y).total_seconds()) / 60 for x, y in gaps if x and y)
 
 
+def _option_key(o):
+    """The same flights (departure time and flight number of every segment), whichever search returned them."""
+    return tuple(((g.get("departure_airport") or {}).get("time"), g.get("flight_number")) for g in o.get("flights") or [])
+
+
+def _pick_lookups(cands, cabin, lookups):
+    """The outbound options (cands: with a departure_token, cheapest first) whose return flights are looked up.
+    Above economy, options with a segment in another cabin ("mixed") are skipped unless every option is mixed. Then
+    the cheapest nonstop, the cheapest, and each time the one (of the cheapest SPREAD_POOL) whose departure and
+    arrival times are furthest from those already picked, so the trips differ in time on the ground."""
+    if cabin != "economy":
+        cands = [o for o in cands if {c for c in (_serp_slice(o) or {}).get("cabins", []) if c} <= {cabin}] or cands
+    picks = [o for o in cands if len(o.get("flights") or []) == 1][:1] + cands[:1]
+    picks = [o for i, o in enumerate(picks) if o not in picks[:i]][:lookups]
+    pool = cands[:SPREAD_POOL]
+    while len(picks) < lookups and any(o not in picks for o in pool):
+        picks.append(max((o for o in pool if o not in picks), key=lambda o: min(_time_gap(o, p) for p in picks)))
+    return picks
+
+
 def _call_serpapi(q, key):
     """Google Flights via SerpApi, prices directly in SGD for all travellers. Round trips and open-jaw trips need
     a second search per outbound option to get the return flights and the combined price."""
@@ -382,22 +404,32 @@ def _call_serpapi(q, key):
         return None, error
     url = (data.get("search_metadata") or {}).get("google_flights_url")
     first = (data.get("best_flights") or []) + (data.get("other_flights") or [])
+    nonstop_params = {}   # id(option) -> the params of the nonstop-only search that found it (for its return lookup)
+    if q["cabin"] != "economy":
+        # above economy the cheapest fares are often 1-stop or mixed-cabin bundles: one more search, nonstop only
+        # (SerpApi stops=1), so a nonstop is in the list when one is sold. Options the first search has are kept from it.
+        ns_params = {**params, "stops": 1}
+        ns, ns_err = _serp_get(ns_params)
+        if ns_err:
+            print("nonstop search failed:", ns_err)
+        else:
+            seen = {_option_key(o) for o in first}
+            for o in (ns.get("best_flights") or []) + (ns.get("other_flights") or []):
+                if _option_key(o) not in seen:
+                    seen.add(_option_key(o))
+                    first.append(o)
+                    nonstop_params[id(o)] = ns_params
     first = sorted((o for o in first if o.get("price")), key=lambda o: o["price"])
     if not q["returnDate"]:
         offers = [_serp_offer([o], o["price"], url, q["cabin"]) for o in first[:40]]
         return [o for o in offers if o], None
     lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "3")), 0), 4)
-    # look up returns for the cheapest outbound, then each time for the one (of the cheapest SPREAD_POOL) whose
-    # departure and arrival times are furthest from those already picked, so the trips differ in time on the ground
-    cands = [o for o in first if o.get("departure_token")][:SPREAD_POOL]
-    picks = cands[:1] if lookups else []
-    while len(picks) < min(lookups, len(cands)):
-        picks.append(max((o for o in cands if o not in picks), key=lambda o: min(_time_gap(o, p) for p in picks)))
+    picks = _pick_lookups([o for o in first if o.get("departure_token")], q["cabin"], lookups)
     offers = []
     for out in picks:
         if offers and _time_left() < 8:   # enough round trips already; don't risk the timeout
             break
-        back, err = _serp_get({**params, "departure_token": out["departure_token"]})
+        back, err = _serp_get({**nonstop_params.get(id(out), params), "departure_token": out["departure_token"]})
         if err:
             print("return lookup failed:", err)
             continue

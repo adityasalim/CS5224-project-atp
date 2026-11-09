@@ -161,9 +161,9 @@ def _default_visit(p):
             return 240
         if any(w in kw for w in ("climb", "boulder")):
             return 150
-    if p.get("category") in ("requested", "attraction") and any(
+    if p.get("category") in ("requested", "attraction", "theme_park") and any(
             w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q")):
-        return 480   # a theme park the traveler named takes the whole day
+        return 480   # a big theme park takes the whole day (Google can list it as an attraction or a theme park)
     return DEFAULT_VISIT.get(p.get("category"), 60)
 
 

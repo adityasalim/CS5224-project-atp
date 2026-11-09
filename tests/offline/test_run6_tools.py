@@ -83,7 +83,7 @@ assert set(text_bodies) == {"tourist attraction", "museum", "specialty coffee"},
 assert text_bodies["tourist attraction"]["maxResultCount"] == 20 and text_bodies["tourist attraction"]["minRating"] == 4.0
 assert text_bodies["specialty coffee"]["maxResultCount"] == 8, "food keeps maxPerCategory results per request"
 assert fp.GOOGLE_SIGHT_MIN_REVIEWS == 200
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v7:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v8:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/0"}, "Google places are never cached"
 
 # warm call: Google is asked for the food and sights again, the chain is not

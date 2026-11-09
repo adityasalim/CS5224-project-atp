@@ -128,6 +128,18 @@ G_MEAL_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining", "
                 "ramen", "seafood", "spanish", "sushi", "thai", "turkish", "vegan", "vegetarian", "vietnamese"}
 G_CAFE_TYPES = ["cafe", "coffee_shop", "coffee_roastery", "tea_house"]
 G_TREAT_TYPES = ["bakery", "dessert_shop"]
+# A Google place's primaryType -> our category, for the sight searches (a "theme park" search also returns zoos and
+# museums). Types not listed keep the category they were searched for.
+G_PRIMARY_CATEGORY = {"amusement_park": "theme_park", "theme_park": "theme_park", "water_park": "theme_park",
+                      "zoo": "zoo", "wildlife_park": "zoo", "aquarium": "aquarium",
+                      "museum": "museum", "art_gallery": "gallery", "tourist_attraction": "attraction",
+                      "park": "park", "garden": "garden", "botanical_garden": "garden",
+                      "buddhist_temple": "temple", "hindu_temple": "temple", "shinto_shrine": "shrine", "church": "church",
+                      "historical_landmark": "historic", "historical_place": "historic", "monument": "historic",
+                      "castle": "historic", "observation_deck": "viewpoint", "market": "market",
+                      "shopping_mall": "shopping", "department_store": "shopping", "book_store": "bookshop",
+                      "playground": "playground", "spa": "spa", "beach": "beach", "hiking_area": "hiking",
+                      "national_park": "nature", "night_club": "nightlife"}
 G_PRICE_LEVELS = {"PRICE_LEVEL_FREE": 0, "PRICE_LEVEL_INEXPENSIVE": 1, "PRICE_LEVEL_MODERATE": 2,
                   "PRICE_LEVEL_EXPENSIVE": 3, "PRICE_LEVEL_VERY_EXPENSIVE": 4}
 
@@ -388,7 +400,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places-v7:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v8:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -430,7 +442,7 @@ def _place(pid, name, cat, lat, lng, q, hours_raw=None, simple=None, cuisine=Non
             else ["well-known"] if (rating or 0) >= 4.6 else [])
     if cat in INDOOR:
         tags.append("indoor")
-    if cat in FAMILY:
+    if cat in FAMILY and (q.get("prefs") or {}).get("audience") == "family":   # a family trip only
         tags.append("family")
     if t.get("wheelchair") in ("yes", "designated"):
         tags.append("wheelchair")
@@ -663,15 +675,30 @@ def _amazon_location(q, deadline):
 
 
 def _g_cuisine(p, cat):
-    """Cuisine of a Google place from its types: the first <x>_restaurant with x in G_MEAL_TYPES ("indian_restaurant"
-    -> "indian"), or "steak" for a steak_house. A PRICE_LEVEL_VERY_EXPENSIVE restaurant also gets "fine_dining"."""
+    """Cuisine of a Google place from its primaryType only (a secondary type is often wrong: a tofu kaiseki place
+    listed as korean_restaurant too): <x>_restaurant with x in G_MEAL_TYPES ("indian_restaurant" -> "indian"), or
+    "steak" for a steak_house. A PRICE_LEVEL_VERY_EXPENSIVE restaurant also gets "fine_dining"."""
     types = [str(t) for t in [p.get("primaryType")] + list(p.get("types") or []) if t]
-    kind = next((t[:-11] for t in types if t.endswith("_restaurant") and t[:-11] in G_MEAL_TYPES), None)
-    kind = kind or ("steak" if "steak_house" in types else None)
+    main = str(p.get("primaryType") or "")
+    kind = main[:-11] if main.endswith("_restaurant") and main[:-11] in G_MEAL_TYPES else None
+    kind = kind or ("steak" if main == "steak_house" else None)
     if (p.get("priceLevel") == "PRICE_LEVEL_VERY_EXPENSIVE" and kind != "fine_dining"
             and (cat == "restaurant" or (cat not in GOOGLE_FIRST and "restaurant" in types))):
         kind = f"{kind} fine_dining" if kind else "fine_dining"
     return kind
+
+
+def _g_name(p, default="Unnamed"):
+    """English name of a Google place. Google falls back to the local name, sometimes mixed with an English one
+    ("Fujisan coffee roastery 百花テラス富士山珈琲焙煎所"): a mixed name keeps its Latin part (at least 3 Latin
+    letters); a name only in another script is kept as it is."""
+    name = (p.get("displayName") or {}).get("text") or default
+    latin = lambda ch: ord(ch) < 0x250 or 0x1E00 <= ord(ch) <= 0x1EFF or 0x2000 <= ord(ch) <= 0x206F
+    if not any(ch.isalpha() and not latin(ch) for ch in name):
+        return name
+    part = re.sub(r"\(\s*\)|\[\s*\]", " ", "".join(ch if latin(ch) else " " for ch in name))
+    part = re.sub(r"\s+", " ", part).strip(" -\u2013\u2014|/,.:;&+")
+    return part if sum(ch.isalpha() for ch in part) >= 3 else name
 
 
 def _google(q, deadline=None, sights_first=False):
@@ -684,7 +711,8 @@ def _google(q, deadline=None, sights_first=False):
     headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
                "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
                                    "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
-                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.types"}
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType,"
+                                   "places.types"}
     out, errs = [], []
     for cat, text, radius_km, kw in _text_targets(q):
         if deadline and deadline - time.time() < 5:
@@ -713,11 +741,14 @@ def _google(q, deadline=None, sights_first=False):
             loc = p.get("location", {})
             days = (p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []
             raw = "; ".join(days) or None
-            out.append(_place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat,
+            # a sight is the category of its Google primaryType when that maps cleanly (food and keywords keep theirs)
+            real = cat if cat in FOOD or kw else G_PRIMARY_CATEGORY.get(str(p.get("primaryType") or ""), cat)
+            out.append(_place("gplace:" + p["id"], _g_name(p), real,
                               loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, activity=kw,
                               website=p.get("websiteUri"), url=p.get("googleMapsUri"), rating=p.get("rating"),
                               fame_known=False, cuisine=_g_cuisine(p, cat)))
-            out[-1].update(reviews=p.get("userRatingCount"), priceLevel=p.get("priceLevel"))
+            out[-1].update(reviews=p.get("userRatingCount"), priceLevel=p.get("priceLevel"),
+                           **({"searchedAs": cat} if real != cat else {}))
     if errs:
         print("google searches failed:", "; ".join(errs))
     return (out, None) if out or not errs else (None, errs[0])
@@ -763,7 +794,7 @@ def _google_zone(q, deadline):
         loc = p.get("location", {})
         raw = "; ".join((p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
         cat = cat_of.get(kind, "restaurant")
-        g = _place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat,
+        g = _place("gplace:" + p["id"], _g_name(p), cat,
                    loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, website=p.get("websiteUri"),
                    url=p.get("googleMapsUri"), rating=rating, fame_known=False,
                    cuisine=_g_cuisine(p, cat) or (kind.replace("_restaurant", "").replace("_", " ")
@@ -854,7 +885,7 @@ def _named(q, deadline):
                         headers={"X-Goog-Api-Key": gkey, "Content-Type": "application/json",
                                  "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
                                                      "places.regularOpeningHours.weekdayDescriptions,places.rating,"
-                                                     "places.types"
+                                                     "places.primaryType,places.types"
                                                      + (",places.userRatingCount,places.priceLevel,places.businessStatus"
                                                         if web else "")})
                     for gp in (r.json().get("places") or []) if r.status_code < 400 else []:
@@ -865,7 +896,7 @@ def _named(q, deadline):
                         loc = gp.get("location", {})
                         if loc and _km(q["lat"], q["lng"], loc["latitude"], loc["longitude"]) <= NAMED_MAX_KM:
                             raw = "; ".join((gp.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
-                            hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), cat,
+                            hit = _place("gplace:" + gp["id"], _g_name(gp, name), cat,
                                          loc["latitude"], loc["longitude"], q, hours_raw=raw,
                                          url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False,
                                          cuisine=_g_cuisine(gp, cat))
@@ -945,8 +976,8 @@ def _rank(places, q):
             group = mixed + famous[len(mixed) // 2:] + local[len(mixed) // 2:]
         return group[:q["maxPerCategory"]]
     out = []
-    for cat in q["categories"]:
-        out.extend(best([p for p in places if p["category"] == cat]))
+    for cat in q["categories"]:   # grouped by the category searched for, so a Google sight of another type stays
+        out.extend(best([p for p in places if (p.get("searchedAs") or p["category"]) == cat]))
     seen = {_dupe_key(p) for p in out}
     for kw in q.get("keywords", []):
         group = best([p for p in places if p["category"] == "activity" and p.get("activity") == kw])
@@ -967,9 +998,10 @@ def _rank(places, q):
 
 
 def _count_by_category(places):
+    """Places per category they were searched for (a Google sight can be another category, see G_PRIMARY_CATEGORY)."""
     counts = {}
     for p in places:
-        key = p.get("category") or "unknown"
+        key = p.get("searchedAs") or p.get("category") or "unknown"
         counts[key] = counts.get(key, 0) + 1
     return counts
 

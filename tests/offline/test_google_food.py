@@ -43,7 +43,7 @@ food = [p for p in r["places"] if p["category"] in ("cafe", "restaurant")]
 assert food and {p["name"] for p in food} == {"Good Roaster"}, "few reviews and closed venues are dropped"
 assert food[0]["reviews"] == 1200 and food[0]["rating"] == 4.7 and food[0]["priceLevel"] == "PRICE_LEVEL_MODERATE"
 assert "Google Maps" in r["attribution"]
-cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v7:")]
+cached = [json.loads(v["payload"]) for k, v in STORE.items() if k.startswith("places-v8:")]
 assert len(cached) == 1 and {p["placeId"] for p in cached[0]["places"]} == {"osm:node/1"}, "Google places are not cached"
 
 # warm call: the cached sights come back without Overpass, the food is asked from Google again
@@ -61,7 +61,7 @@ assert warm < cold / 2
 STORE.clear(); SIGHTS.clear()
 fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestException("down"))
 fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
-assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v7:") for k in STORE), (SIGHTS, list(STORE))
+assert SIGHTS == [["cafe", "temple"]] and not any(k.startswith("places-v8:") for k in STORE), (SIGHTS, list(STORE))
 
 # warm call while Google is down: one Google attempt, then the chain finds the food
 fp.requests.post = fake_post
@@ -103,12 +103,12 @@ fp._amazon_location = _amazon_location
 STORE.clear()
 fp.requests.post = fake_post
 k = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"], "keywords": ["pour-over coffee"]}, None)
-assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v7:") for s in STORE), (k["source"], list(STORE))
+assert k["source"] == "google+overpass+google-keywords" and not any(s.startswith("places-v8:") for s in STORE), (k["source"], list(STORE))
 fp._overpass = lambda q, deadline: ([], None)
 g = fp.lambda_handler({"city": "Kyoto", "categories": ["temple", "cafe"]}, None)
 # the temple was already asked from Google (with the review floor), so the chain's Google step does not ask again
 assert g["source"] == "google" and "google skipped: already searched" in g.get("fallbacksTried", []), g
-stored = [json.loads(v["payload"]) for s, v in STORE.items() if s.startswith("places-v7:")]
+stored = [json.loads(v["payload"]) for s, v in STORE.items() if s.startswith("places-v8:")]
 assert all(not p["placeId"].startswith("gplace:") for c in stored for p in c["places"]), "Google places are never cached"
 fp._overpass = _overpass
 
@@ -143,13 +143,13 @@ fresh._amazon_location(q_en, time.time() + 30)
 assert GEO and all(lang == "en" for _, lang in GEO), GEO
 fp.boto3.client = saved_client
 
-# Google types become the cuisine (text searches and keyword searches alike); a very expensive restaurant is also
+# The Google primaryType becomes the cuisine (text searches and keyword searches alike); a very expensive restaurant is also
 # fine dining, a very expensive cafe is not
-TYPED = [{**GOOD, "id": "curry", "displayName": {"text": "Spice Route"}, "types": ["indian_restaurant", "restaurant"]},
+TYPED = [{**GOOD, "id": "curry", "displayName": {"text": "Spice Route"}, "primaryType": "indian_restaurant", "types": ["indian_restaurant", "restaurant"]},
          {**GOOD, "id": "gala", "displayName": {"text": "Gala"}, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE",
-          "types": ["italian_restaurant", "restaurant"]},
-         {**GOOD, "id": "chef", "displayName": {"text": "Chef's Table"}, "types": ["fine_dining_restaurant", "restaurant"]},
-         {**GOOD, "id": "grill", "displayName": {"text": "Grill"}, "types": ["steak_house", "restaurant"]},
+          "primaryType": "italian_restaurant", "types": ["italian_restaurant", "restaurant"]},
+         {**GOOD, "id": "chef", "displayName": {"text": "Chef's Table"}, "primaryType": "fine_dining_restaurant", "types": ["fine_dining_restaurant", "restaurant"]},
+         {**GOOD, "id": "grill", "displayName": {"text": "Grill"}, "primaryType": "steak_house", "types": ["steak_house", "restaurant"]},
          {**GOOD, "id": "plain", "displayName": {"text": "Plain"}, "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE",
           "types": ["restaurant"]}]
 fp.requests.post = lambda url, headers=None, json=None, timeout=None: Resp({"places": TYPED})

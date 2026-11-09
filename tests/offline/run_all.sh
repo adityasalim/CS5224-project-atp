@@ -13,6 +13,7 @@ python3 test_robust_tools.py | tail -1
 python3 test_pinned_places.py | tail -1
 python3 test_serpapi_flights.py | grep " OK"
 python3 test_run6_tools.py | grep " OK$"
+python3 test_run7_tools.py | grep " OK$"
 python3 test_rail_hops.py | tail -1
 python3 test_model_selection.py | tail -1
 python3 fake_gateway.py & GW=$!

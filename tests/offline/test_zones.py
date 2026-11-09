@@ -498,7 +498,7 @@ assert {p["name"]: p["category"] for p in r["places"]} == {"solid": "restaurant"
                                                            "bun": "dessert"}
 solid = next(p for p in r["places"] if p["name"] == "solid")
 assert solid["cuisine"] == "ramen" and solid["reviews"] == 900
-assert not any(k.startswith("places-v7:") for k in STORE), "zone answers are never cached"
+assert not any(k.startswith("places-v8:") for k in STORE), "zone answers are never cached"
 POSTS.clear()
 fp.lambda_handler({**ev, "categories": ["restaurant"], "cuisine": "", "dietary": []}, None)
 assert sorted(POSTS[0]["includedPrimaryTypes"]) == ["restaurant"], POSTS[0]["includedPrimaryTypes"]
@@ -520,9 +520,9 @@ fp.requests.post = lambda *a, **k: (_ for _ in ()).throw(fp.requests.RequestExce
 fp._amazon_location = lambda q, d: ([fp._place("aloc:1", "Corner Diner", "restaurant", 35.001, 135.77, q)], None)
 r = fp.lambda_handler(ev, None)
 assert r["source"] == "amazon_location-zone" and [p["name"] for p in r["places"]] == ["Corner Diner"], r
-# restaurants of a wished cuisine come first (cuisine from the Google types; very expensive counts as fine dining),
+# restaurants of a wished cuisine come first (cuisine from the Google primaryType; very expensive counts as fine dining),
 # then the Bayesian order; the per-category cap still holds
-typed = [g("top", 4.9, 900, "restaurant"), {**g("curry", 4.2, 300, "restaurant"), "types": ["indian_restaurant", "restaurant"]},
+typed = [g("top", 4.9, 900, "restaurant"), {**g("curry", 4.2, 300, "indian_restaurant"), "types": ["indian_restaurant", "restaurant"]},
          {**g("gala", 4.5, 500, "italian_restaurant"), "priceLevel": "PRICE_LEVEL_VERY_EXPENSIVE"},
          g("grill", 4.6, 400, "steak_house"), g("pasta", 4.3, 200, "italian_restaurant")]
 POSTS.clear()
