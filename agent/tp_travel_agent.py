@@ -1263,15 +1263,13 @@ def pref_args(tool, spec):
         # Only what the traveller asked for is sent. The comfort score no longer forces star/review floors:
         # tp-search-stays uses it to weight its ranking, and relaxes any filter that would leave too few hotels.
         a = {"style": h["style"], "minStars": h["minStars"], "minReviewScore": h["minReviewScore"],
-             "sortBy": "rating" if h["sortBy"] == "price" and _budget_room(spec) else h["sortBy"],
-             "comfort": (spec.get("preferenceScores") or {}).get("comfort", 5),
+             "sortBy": h["sortBy"], "comfort": _comfort(spec),
              "minKeep": 1 if h["minStars"] else 0}   # stars the traveler chose are kept unless no hotel has them
     elif tool == "search_flights":
         f = p["flight"]
         a = {k: f[k] for k in ("maxStops", "departAfter", "departBefore", "returnDepartAfter", "returnDepartBefore",
                                "preferredAirlines", "avoidAirlines", "sortBy", "cabin")}
-        if a["sortBy"] == "price" and _budget_room(spec):
-            a["sortBy"] = "best"
+        a["sortBy"] = _flight_sort(f, spec)
     elif tool == "search_transfers":
         a = dict(p["transfer"])
     else:
@@ -2535,7 +2533,7 @@ def _order_flights(flights, spec=None):
     dep_before = _hm(f_pref["departBefore"]) if _HHMM.match(str(f_pref.get("departBefore") or "")) else None
     ret_after = _hm(f_pref["returnDepartAfter"]) if _HHMM.match(str(f_pref.get("returnDepartAfter") or "")) else None
     ret_before = _hm(f_pref["returnDepartBefore"]) if _HHMM.match(str(f_pref.get("returnDepartBefore") or "")) else None
-    sort_by = str(f_pref.get("sortBy") or "price").lower().strip()
+    sort_by = _flight_sort(f_pref, spec)
     is_oneway = isinstance(spec, dict) and spec.get("flightType") == "oneway"
 
     def flight_key(f):
@@ -2703,7 +2701,7 @@ def _order_stays(stays, spec=None, flights=None, other_cost=0.0):
         except Exception:  # noqa: BLE001
             rem_stay_budget = None
 
-    comfort = int((spec.get("preferenceScores") or {}).get("comfort", 5))
+    comfort = _comfort(spec)
     h_pref = ((spec.get("preferences") or {}).get("hotel") or {})
     want_styles = {str(s).lower() for s in (h_pref.get("style") or []) if str(s).strip()}
     want_name = str(h_pref.get("name") or "").strip().lower()
@@ -3033,12 +3031,25 @@ def _bookable(spec):
 
 def _budget_room(spec):
     """True when the bookable budget leaves at least ROOMY_NIGHT_SHARE x the daily-spend estimate per traveler per
-    night (about SGD 500): then hotels rank by rating and flights by price and travel time, not price alone."""
+    night (about SGD 500): then hotels weigh comfort higher and flights rank by price and travel time, not price alone."""
     try:
-        nights = max(1, trip_days(spec) - 1)
-        return _bookable(spec) >= ROOMY_NIGHT_SHARE * trip_daily(spec, DAILY_SPEND) * spec["pax"] * nights
+        nights, daily = max(1, trip_days(spec) - 1), trip_daily(spec, DAILY_SPEND)
+        return daily > 0 and _bookable(spec) >= ROOMY_NIGHT_SHARE * daily * spec["pax"] * nights
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _comfort(spec):
+    """The traveler's comfort score (1-10), at least 8 when the budget has room, for both hotel rankings."""
+    comfort = int((spec.get("preferenceScores") or {}).get("comfort", 5))
+    return max(comfort, 8) if _budget_room(spec) else comfort
+
+
+def _flight_sort(f_pref, spec):
+    """The flight order for the search and the planner: "best" (price and travel time) when the budget has room and
+    the traveler kept the default "price"."""
+    sort_by = str(f_pref.get("sortBy") or "price").lower().strip()
+    return "best" if sort_by == "price" and _budget_room(spec) else sort_by
 
 
 def planning_context(spec, pool):

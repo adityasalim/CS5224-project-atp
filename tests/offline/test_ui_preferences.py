@@ -155,6 +155,15 @@ assert ("Day route in Google Maps", web["days"][0]["routeUrl"]) in texts
 assert ("Kurasu Kyoto", "https://maps.google.com/?cid=1") in texts
 assert not any(t.startswith("rated 4.5") for t in lines), "no chips on sights"
 assert any("Ratings and hours from Google Maps." in t for t in lines)
+assert A._stop_display({**places[1], "rating": 4.66}, spec_w, {})["rating"] == 4.7
+cells, multis = [], []
+fakes.FPDF.cell = lambda self, w=0, h=0, text="", **k: cells.append(text)
+fakes.FPDF.multi_cell = lambda self, w=0, h=0, text="", **k: multis.append(text)
+fakes.FPDF.get_string_width, fakes.FPDF.get_x = (lambda self, s: 4 * len(s)), (lambda self: 58)
+pdf_mod.build_pdf({**event, "itinerary": {"days": [{"date": "2026-12-11", "dayTrip": {"place": "Nikko"}, "stops": []}]}}, {}, 100)
+del fakes.FPDF.cell, fakes.FPDF.multi_cell, fakes.FPDF.get_string_width, fakes.FPDF.get_x
+assert any(t.startswith("Budget") and t.endswith("...") and 4 * len(t) <= 210 - 18 - 58 - 4 * len("200.00") - 4 for t in cells), cells
+assert any(t.startswith("Day trip to Nikko") for t in multis), multis
 
 # ---- one combined preference question, asked once, with "Use defaults" as a one-tap answer
 calls = []

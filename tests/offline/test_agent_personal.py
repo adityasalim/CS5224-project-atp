@@ -222,8 +222,38 @@ def prefs_for(amount):
     A.normalize_prefs(s)
     return A.pref_args("search_stays", s), A.pref_args("search_flights", s)
 stays, flights = prefs_for(12995)
-assert stays["sortBy"] == "rating" and stays["minStars"] == 5 and stays["minKeep"] == 1, stays
+assert stays["comfort"] == 8 and "sortBy" not in stays and stays["minStars"] == 5 and stays["minKeep"] == 1, stays
 assert flights["sortBy"] == "best" and flights["cabin"] == "premium_economy", flights
 stays, flights = prefs_for(5000)   # SGD 3,800 bookable for 2 travelers x 5 nights is under SGD 500 each per night
-assert "sortBy" not in stays and stays["minKeep"] == 1 and "sortBy" not in flights, (stays, flights)
+assert stays["comfort"] == 5 and stays["minKeep"] == 1 and "sortBy" not in flights, (stays, flights)
+assert prefs_for(6200)[0]["comfort"] == 8 and prefs_for(6199)[0]["comfort"] == 5   # bookable 5000 = 5 x 100 x 2 x 5 nights
+roomy = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"amount": "12995", "currency": "SGD"},
+         "dailySpend": {"amount": "100", "currency": "SGD"}, "preferences": {}}
+A.normalize_prefs(roomy)
+assert A._flight_sort(roomy["preferences"]["flight"], roomy) == "best", "the planner's flight order follows the search"
+assert not A._budget_room({**roomy, "dailySpend": {"amount": "0", "currency": "SGD"}}), "a zero daily estimate is no room"
+s0 = {"startDate": "2026-12-15", "endDate": "2026-12-20", "pax": 2, "budget": {"amount": "5000", "currency": "SGD"},
+      "preferences": {}}
+A.normalize_prefs(s0)
+assert not A.pref_args("search_stays", s0).get("minKeep"), A.pref_args("search_stays", s0)
+
+
+def claude_run(lows):
+    it = iter(lows); REPAIRS.clear(); sig = A._quality_signature
+    A._quality_signature = lambda *a, **k: None   # no judge cache: each round is reviewed
+    A.judge = lambda *a, **k: (lambda s: {"scores": {c: s for c in JUDGE_CRITERIA}, "rationale": "r", "suggestions": []})(next(it))
+    A.repair = lambda spec, pool, plan, *a, **k: REPAIRS.append(plan.get("_r")) or {**json.loads(json.dumps(plan)), "_r": len(REPAIRS)}
+    gen = A.improve(spec_r, pool_r, plan_r, request_r, A.Usage(adapter=claude, trip_id="t-best"))
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        A.judge, A.repair, A._quality_signature = *saved, sig
+        return stop.value
+
+
+best = claude_run([3, 2])   # the corrected plan scores worse: the first one is kept, and no second correction
+assert REPAIRS == [None] and min(best["judge"]["scores"].values()) == 3, (REPAIRS, best["judge"])
+best = claude_run([2, 1, 1])   # still below 3: the second correction starts from the best plan
+assert REPAIRS == [None, None] and min(best["judge"]["scores"].values()) == 2, (REPAIRS, best["judge"])
 print("PERSONALISATION OK")

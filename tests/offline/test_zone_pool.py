@@ -103,6 +103,7 @@ for limit, kept in (("none", []), ("1", ["Nara"])):
 # a listed trip without the park flag still counts toward the limit
 assert [t["place"] for t in A.normalize_special({"dayTrips": [{"place": "Nara", "park": "yes"}, "Kobe"],
         "preferences": {"days": {"dayTripLimit": "1"}}})["dayTrips"]] == ["Nara"]
+assert len(A.normalize_special({"dayTrips": ["Nara", "Kobe", "Uji", "Otsu", {"place": "USJ", "park": True}]})["dayTrips"]) == 4
 print("PARK DAY TRIP LIMIT OK")
 
 # ---- the zone day check skips park days by park zone or theme_park category, not only by name

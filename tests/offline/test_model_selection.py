@@ -478,6 +478,7 @@ assert gw.calls == [{"city": "Kyoto", "names": ["Kurasu Kyoto Station"], "namesC
 by = {p["placeId"]: p.get("webSource") for p in pool["places"]}
 assert by == {"gplace:p": None, "gplace:kurasu": "https://Kyoto.Sprudge.com/kurasu"}, by
 assert A._web_source(None) is None and A._web_source("https://guide.michelin.com/jp/en/kyoto") == "https://guide.michelin.com/jp/en/kyoto"
+assert "eater.com" not in A.WEB_PICK_DOMAINS + list(A.WEB_PUBLISHERS) and len(A.WEB_PICK_DOMAINS) == 7
 
 # the cited source must be a page the search returned (host and path; www. and a trailing slash do not matter): an
 # invented URL on an allowed publisher drops the pick, and a search error block adds no page
