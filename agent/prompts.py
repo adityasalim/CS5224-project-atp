@@ -1,7 +1,7 @@
 """
 System prompts for each LLM step. Kept in one place so they can be versioned.
 
-Roles: INTAKE, ROUTER, CHAT, NARRATIVE and GATHER run on the executor model, PLANNER/REPAIR (and the multi-city
+Roles: INTAKE, ROUTER, CHAT, NARRATIVE, GLOSS and GATHER run on the executor model, PLANNER/REPAIR (and the multi-city
 variants) on the planner model, JUDGE on the reviewer model (see public-model-config.json).
 
 Phase 7.2: to load a prompt from Bedrock Prompt Management instead, set an environment
@@ -36,7 +36,9 @@ SCORE_RULES = """- Priority order: (1) Mandatory constraints (budget, dates, kno
   comfort: well-reviewed, comfortable stays balanced with cost inside the remaining budget.
   intensity: controls daily activity density (pace), not attraction importance.
 - Respect all trip.cuisines across meals; never exceed the bookable budget or pick a disproportionately expensive hotel
-  merely because comfort or food is rated high."""
+  merely because comfort or food is rated high. When the plan uses well under the bookable budget, spend the spare on
+  the traveler's stated comfort wishes (hotel stars, cabin, fewer stops): pick the better-rated stay or flight that
+  still fits the budget."""
 
 PERSONALISE_RULES = """- Personalise using verified candidate metadata ("category", "activity", "about", "cuisine", "matches", "tags"),
   not superficial names: for hiking or specific activities, prefer candidates with explicit trail/activity evidence over
@@ -51,8 +53,10 @@ PERSONALISE_RULES_MULTI = PERSONALISE_RULES.replace(
     "stays, flights and transfers whose \"matches\"/\"style\" fit within budget")
 
 TIMING_RULES = """- Flight and transfer timing: respect the chosen flight's arrival on day 1 (~2h buffer after landing) and departure
-  on the last day (~3h buffer before departure), plus inter-city transfer arrivals (~1h buffer). Keep arrival,
-  departure and moving days light (0-2 stops, or 0 if landing late / departing early).
+  on the last day (~3h buffer before departure), plus inter-city transfer arrivals (~1h buffer). Each flight lists
+  "usableHours" for its first and last dates and its arrival and departure dates ("none" = no time). A date with 8 or
+  more usable hours is a full day even when the flight lands that morning: plan it like any other day. Keep dates
+  with fewer usable hours, and moving days, light (0-2 stops).
 - Opening hours: respect known "hours" (openSimple); never pick a place closed on that day, and schedule evening-only
   places (opening >= 16:00, bars, nightlife) late in the day, never in the morning. Treat omitted "hours" as unknown;
   never invent operating hours or travel durations.
@@ -95,7 +99,8 @@ Rules:
   (e.g. "bouldering gym", "cooking class", "kayaking"). Empty list if none.
 - mustInclude: SPECIFIC named places, restaurants, shows or sights they want ("teamLab Planets", "dinner at Ichiran
   Shibuya", "Fushimi Inari at sunrise"), as [{{"name": "teamLab Planets", "city": ""}}] (city only for multi-city
-  trips). Generic wishes ("a sushi dinner") go in interests/activities instead.
+  trips). Generic wishes ("a sushi dinner") go in interests/activities instead. A place they want as a day trip (a
+  town or landmark far from the city, e.g. Mount Fuji from Tokyo) goes only in dayTrips, never also in mustInclude.
 - pace: "relaxed" (2-3 stops/day), "moderate" (3-4) or "packed" (5-6). "some free time" means relaxed.
 - packageMode: compare by default; custom_only when the traveller asks to skip agency packages; packages_only when they prefer agency packages. Never force an unsuitable package.
 - flightType: "round" when the traveller returns to their origin, including an open-jaw
@@ -122,18 +127,29 @@ Rules:
   avoid: short words for dislikes or exclusions ("seafood", "casino", "zoo", "nightclub").
   dayStart/dayEnd: "HH:MM" when they say "late riser" (10:00), "not morning people" (10:30), "early birds" (07:30),
         "early nights" (dayEnd 19:30), "night owls" (dayEnd 23:00); else "".
-  hotel: style from hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin; minStars (honeymoon
-        or "luxury" -> 4, "nice" -> 3); minReviewScore; area (neighbourhood or landmark to stay near, e.g. "Gion");
-        sortBy "rating" for special occasions or "best hotel", "value" for "good value", else "price";
+  hotel: style from hotel, ryokan, boutique, hostel, capsule, apartment, guesthouse, resort, cabin ("business hotel" ->
+        hotel); minStars (honeymoon or "luxury" -> 4, "nice" -> 3); minReviewScore; area (neighbourhood or landmark to
+        stay near, e.g. "Gion"); sortBy "rating" for special occasions or "best hotel", "value" for "good value", else
+        "price"; programs: hotel loyalty programs or hotel brands they name, as written ("Marriott Bonvoy",
+        "Hilton Honors", "Hyatt"), else [];
         name: a SPECIFIC hotel they want or already have ("Park Hyatt Tokyo"), else ""; booked: true only if they say
         they have ALREADY booked it; bookedPriceSGD: what the booking cost in SGD, only if they give an SGD amount and want
         it counted, else 0.
-        Multi-city: put a named hotel on its leg instead: {{"city": "...", "hotel": {{"name": "...", "booked": true}}}}.
-  flight: maxStops (0 for "direct"/"non-stop", else null); departAfter/departBefore/returnDepartAfter/
+        Multi-city: put a named hotel or a city's hotel area on its leg instead:
+        {{"city": "...", "hotel": {{"name": "...", "booked": true, "area": "..."}}}}.
+  flight: maxStops (0 for "direct"/"non-stop", 1 for "at most 1 stop", else null); departAfter/departBefore/returnDepartAfter/
         returnDepartBefore as "HH:MM" ("no red-eye" -> departAfter "07:00" and departBefore "21:00"; "make the most of
-        the last day" -> returnDepartAfter "17:00"); preferredAirlines/avoidAirlines; sortBy "duration" with kids or
-        elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
+        the last day" -> returnDepartAfter "17:00"); preferredAirlines/avoidAirlines; alliances from "Star Alliance",
+        "oneworld", "SkyTeam" when they name one, else []; bags "checked" for a checked bag, else "carry_on"; sortBy
+        "duration" with kids or elderly, "best" for "not too long", else "price"; cabin (economy unless they ask).
   transfer: prefer "ground" for "scenic train"/"no flying", "fastest" for "quickest", else "cheapest".
+  food: coffee, tea, bakery, dessert: true when they are into specialty coffee, matcha or tea, bakeries, desserts;
+        perDay: coffee or tea stops they want each day, 0-2 ("two coffees a day" -> 2); coffeeStyle "pour_over",
+        "espresso" or "either"; priceLevel 1-4 for a meal price level "$" to "$$$$", else 0.
+  days: transport "transit" (walk and public transport), "taxi" (taxis are fine) or "car" (rental car);
+        rideMaxMin: the longest ride between areas they accept, 15, 30 or 45 minutes (default 30); dayTripLimit "none",
+        "1", "2" or "listed" (only the day trips they list; the default). Their pace goes in pace and their day start
+        and end times in dayStart/dayEnd.
   notes: anything else personal in one sentence (an occasion, photography, a surprise, a pace detail).
 - missing: list the REQUIRED fields you could not determine: destination, startDate, endDate, pax, budget.
   Do not guess dates or budget. If pax is unclear but the trip is a honeymoon or couple trip, pax is 2.
@@ -153,10 +169,14 @@ to replace with the traveller's real value; it is NOT a default. Use "" or null 
   "preferences": {{"vibe": "balanced", "dietary": [], "accessibility": [], "audience": "any",
     "indoorPreferred": false, "freeOnly": false, "avoid": [], "dayStart": "", "dayEnd": "",
     "hotel": {{"style": [], "minStars": 0, "minReviewScore": 0, "area": "", "sortBy": "price", "name": "",
-      "booked": false, "bookedPriceSGD": 0}},
+      "programs": [], "booked": false, "bookedPriceSGD": 0}},
     "flight": {{"maxStops": null, "departAfter": "", "departBefore": "", "returnDepartAfter": "",
-      "returnDepartBefore": "", "preferredAirlines": [], "avoidAirlines": [], "sortBy": "price", "cabin": "economy"}},
-    "transfer": {{"prefer": "cheapest"}}, "notes": ""}},
+      "returnDepartBefore": "", "preferredAirlines": [], "avoidAirlines": [], "alliances": [], "bags": "carry_on",
+      "sortBy": "price", "cabin": "economy"}},
+    "transfer": {{"prefer": "cheapest"}},
+    "food": {{"coffee": false, "tea": false, "bakery": false, "dessert": false, "perDay": 0, "coffeeStyle": "either",
+      "priceLevel": 0}},
+    "days": {{"transport": "transit", "rideMaxMin": 30, "dayTripLimit": "listed"}}, "notes": ""}},
   "missing": [], "question": ""}}"""
 
 # Used only by the legacy GATHER_MODE=model path; the role adapter does not support tool calling.
@@ -209,14 +229,43 @@ Candidate pool, grouped by city in travel order (the only valid IDs):
 {pool}
 """
 
+# Appended after the filled-in pool context whenever the pool has zones (tp_travel_agent.planning_context), so it is
+# always the built-in text and str.format never sees it. The stop counts match trip_spec_for_tools' maxStopsPerDay.
+ZONE_RULES = """
+Zones (built by the system from walking and taxi times; they take precedence over older zone rules):
+- Every place has a "zone". The places of one zone lie within about 1.2 km of its center, so they are a walk apart.
+  "zones" lists each zone's "kind" (walk, solo, park or daytrip), "label", how many "sights" and "food" places
+  (restaurants) it has, "rideMin" (estimated taxi minutes to the other zones of the same city, only pairs within the
+  traveler's longest ride, or the single nearest zone when none is that close) and "hotelMin" (estimated minutes
+  from the first listed stays).
+- A full city day uses one or two zones: a morning zone, then one ride (a pair listed in rideMin) to an afternoon
+  zone. Prefer zones within 30 minutes of the chosen stay (hotelMin). Use a zone on a second day only if it still
+  has unused sights.
+- Dates with fewer than 8 usableHours and moving days use 0-2 stops in one zone close to that night's stay.
+- A "park" zone fills a full day on its own (meals are inside the park; the requested cafe stops come from the park
+  zone's cafes), never a date with fewer than 8 usableHours or a moving day.
+  A "daytrip" zone is a day-trip town or a far theme park, never on the trip's first or last date: on that full day
+  use only its places and set "dayTrip"
+  to the zone's "dayTrip" value.
+- Every full city day has a lunch and a dinner: on a two-zone day one meal from each zone, on a one-zone day both
+  from it. When preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every
+  full day, park and day-trip days included, from that day's zones. Dessert, tea and bakery stops also come from that day's zones. A zone with
+  "food": 0 takes its meals from the day's other zone.
+- The sights of a full city day follow the pace (relaxed 2-3, moderate 3-4, packed 5-6) and come from its zones.
+  Lunch, dinner and the requested cafe stops come on top of them, so a day has at most 5 (relaxed), 6 (moderate)
+  or 8 (packed) stops, plus preferences.food.perDay.
+"""
+
 # POSITIONAL: tp_travel_agent._special_rules() splits this text on "\n- " and keeps the rule at index i only when
 # flag i is true (0 pinned places, 1 named hotel, 2 day trips). Keep exactly these three rules, in this order, and
 # do not add another line that starts with "- ".
 SPECIAL_RULES = """- pinned: places the traveller asked for BY NAME (pool items with "requested"). Every pinned placeId MUST be in
-  the plan, on a full day that fits its city and opening hours. Never drop one to fix another problem.
+  the plan, on a day with enough usable time for it that fits its city and opening hours (a full day only for a
+  theme park). Never drop one to fix another problem.
 - A hotel with matches "requested hotel" or "already booked" is the traveller's own choice: use it.
-- dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (not the arrival,
-  departure or a moving day): set "dayTrip": "<town>" on that day and use only that town's places (2-3 incl. food).
+- dayTrips: pool places with "dayTrip": "<town>" are in that town. Spend a FULL day there (8 or more usableHours,
+  never the trip's first or last date or a moving day): set "dayTrip": "<town>" on that day and use only that
+  town's places (2-3 sights, plus lunch, dinner and the requested cafes).
   Never mix day-trip places into other days."""
 
 PLANNER = """ROLE: itinerary planner. Build a day-by-day plan using ONLY IDs from the candidate pool above.
@@ -226,10 +275,13 @@ Rules:
 <<SCORES>>
 - Choose one flightOfferId and one stayId whose combined price fits the money left, balancing cost, comfort and preferences.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order. Never repeat a placeId.
-- Full-day stops by pace (dining/cafes count): relaxed 2-3, moderate 3-4, packed 5-6. Give days with a major hike or
-  outdoor excursion at most 1-2 other stops.
-- Include an authentic restaurant, street_food, market or requested cafe/dessert on full days, varying across
-  trip.cuisines; never use supermarkets or convenience stores as food or sightseeing stops.
+- Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
+  days with a theme park, Mount Fuji or another major hike or outdoor excursion at most 1-2 other stops, all near it.
+  Put a theme park on a full day (8 or more usableHours), never a moving day.
+- Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
+  needs; never use supermarkets or convenience stores as food or sightseeing stops. When
+  preferences.food.perDay asks for cafe or coffee stops per day, add that many "cafe" stops on every full day,
+  theme-park and day-trip days included.
 - Diversify categories across the trip and within each day; respect rememberedPreferences unless overridden. Give each
   day a coherent 3-6 word theme.
 <<POOL>>
@@ -247,13 +299,20 @@ PLANNER_MULTI = """ROLE: itinerary planner for a MULTI-CITY trip. Use ONLY IDs f
 
 Rules:
 <<SCORES>>
-- Choose one international flightOfferId, one stayId per city, and one transferId per hop (prefer ground for short hops,
-  flight for long hops, avoid overnight) whose total combined cost fits the money left.
+- Choose one international flightOfferId, one stayId per city, and one transferId per hop (take the transfer marked
+  recommended, the fastest door to door, unless the traveler's transfer preference or the budget rules it out; never
+  a flight when a ground option is recommended and under 4 hours; avoid overnight) whose total combined cost fits the
+  money left.
 - Return one entry in "days" for EVERY date from startDate to endDate, in order, with that day's "city" (on moving days,
   the arrival city). Use ONLY placeIds belonging to that day's city. Never repeat a placeId.
-- Full-day stops by pace (dining/cafes count): relaxed 2-3, moderate 3-4, packed 5-6.
-- Include authentic dining/cafes on full days matching trip.cuisines and dietary needs (never supermarkets), diversify
-  categories across days, and respect rememberedPreferences. Give each day a coherent 3-6 word theme.
+- Full-day sights by pace: relaxed 2-3, moderate 3-4, packed 5-6; lunch, dinner and requested cafes come on top. Give
+  days with a theme park, Mount Fuji or another major outdoor excursion at most 1-2 other stops, all near it. Put a
+  theme park on a full day (8 or more usableHours), never a moving day.
+- Every full day has a lunch and a dinner stop near that day's other stops, varying across trip.cuisines and dietary
+  needs (never supermarkets). When preferences.food.perDay asks for cafe or coffee stops per day,
+  add that many "cafe" stops on every full day, theme-park and day-trip days included. Keep at least half of each
+  city's full days in that city, diversify categories across days and respect rememberedPreferences. Give each day a
+  coherent 3-6 word theme.
 <<POOL>>
 <<TIMING>>
 <<PERSONALISE_MULTI>>
@@ -363,8 +422,12 @@ Score each criterion as an integer from 1 (poor) to 5 (excellent):
   classic = "well-known"), and budget-aware hotel comfort. Score 2 or lower for any confirmed conflict, supermarket used
   as a food stop, or missing high-priority (8-10) experience.
 - theme: coherent daily themes, logical geographic grouping, and meaningful alignment with traveller interests.
-- pacing: matches requested pace/intensity, light arrival/departure/transfer days, realistic hike/activity density, and
-  no evening-only stops scheduled in the morning.
+- pacing: matches requested pace/intensity on full sightseeing days; a
+  full-day theme park (Disney, Universal Studios, Fuji-Q) is a complete
+  day on its own, and days with little time after landing or before
+  departure and transfer days are meant to be light, so none of these
+  count against a packed pace; realistic hike/activity density, and no
+  evening-only stops scheduled in the morning.
 - variety: diverse categories and dining across days without repetitive attractions or filler stops.
 
 Scale: 4 or 5 requires meaningful satisfaction of all important preferences and explicit requests (5 = no fixable
@@ -411,6 +474,16 @@ Classify the traveller's NEW message:
 - "question": asks about the current plan or the destination and does not ask for a change.
 - "new_trip": wants a separate, additional trip ("also plan a trip to Bali in March") or explicitly a fresh start.
 - "smalltalk": thanks, greetings, or anything else.
+- A choice I offered, repeated back ("Stay at <hotel> (rated <n>), +<price>" or
+  "Fly <airline> in <cabin> nonstop / with <n> stop(s), saves about <price>"),
+  is "modify". The price is information, never a budget change.
+  "Stay at X" -> preferences {{"hotel": {{"name": "X"}}}}; with "in <city>" on a
+  multi-city trip, that city's legs entry gets "hotel": {{"name": "X"}};
+  with "for <d1>-<d2> <Mon>" or "for <d1> <Mon>-<d2> <Mon>", the legs
+  entry whose checkIn-checkOut are those dates gets "hotel": {{"name": "X"}}
+  (write the full legs list, unchanged except that hotel).
+  "Fly <airline> in <cabin> ..." -> preferences {{"flight": {{"preferredAirlines":
+  ["<airline>"], "cabin": "<cabin>", "maxStops": 0 for nonstop, else <n>}}}}.
 
 For "modify":
 - specChanges: ONLY trip-detail fields that change, using these keys:
@@ -451,6 +524,15 @@ Recent conversation:
 {history}
 
 Reply in at most 120 words of plain text. If natural, end with one short example of a change they could ask for."""
+
+# English names for planned stops written only in Japanese (small-jobs model, one call per delivery). Sent as is,
+# never through str.format(): the braces below are literal.
+GLOSS = """ROLE: place-name translator for a travel itinerary.
+For each place name below that is written only in Japanese, give the
+name an English-speaking traveller would recognise: the brand's usual
+Latin spelling (ブルーボトルコーヒー -> Blue Bottle Coffee) and the
+branch or area words in plain English. If unsure, transliterate.
+Return JSON only: {"<placeId>": "<English name>"}."""
 
 # Insert the shared rule blocks (they contain no braces, so str.format() on the prompts still works).
 _SHARED = {"<<GUARD>>": DATA_GUARD, "<<SCORES>>": SCORE_RULES, "<<TIMING>>": TIMING_RULES,

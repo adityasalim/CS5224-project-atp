@@ -33,6 +33,19 @@ class TestBudget(unittest.TestCase):
         reservation.settle(self.row(inputTokens=None,outputTokens=None,success=False))
         self.assertIn(reservation.identifier,ledger.store.state['reservations'])
         self.assertTrue(ledger.store.state['reservations'][reservation.identifier]['usageUnknown'])
+    def test_fallback_turn_is_priced_at_the_serving_model(self):
+        opus55=quote(provider='anthropic',modelId='claude-opus-5-5',source='https://platform.claude.com/docs/en/about-claude/pricing',inputPerMillionUSD='4',outputPerMillionUSD='20',inputIncludesCache=False)
+        opus5=quote(provider='anthropic',modelId='claude-opus-5',source='https://platform.claude.com/docs/en/about-claude/pricing',inputPerMillionUSD='5',outputPerMillionUSD='25',inputIncludesCache=False)
+        ledger=BudgetLedger(MemoryStore(),cap_usd='1',provider_caps={'anthropic':'1'},quotes=[opus55,opus5],today=lambda:date(2026,11,2))
+        def settle(served):
+            reservation=ledger.authorize(N(provider='anthropic',model_id='claude-opus-5-5'),'System',[{'role':'user','content':[{'text':'Hi'}]}],1000)
+            row=self.row(provider='anthropic',modelId='claude-opus-5-5',responseModelId=served,inputTokens=1000000,outputTokens=0)
+            reservation.settle(row);return reservation,row
+        self.assertEqual(float(settle('claude-opus-5-5')[1]['estimatedPaidTierCostUSD']),4)
+        self.assertEqual(float(settle('claude-opus-5')[1]['estimatedPaidTierCostUSD']),5)
+        reservation,row=settle('claude-opus-9')
+        self.assertIsNone(row['estimatedPaidTierCostUSD'])
+        self.assertTrue(ledger.store.state['reservations'][reservation.identifier]['usageUnknown'])
     def test_cap_blocks_before_call(self):
         ledger=self.ledger(cap='.000001')
         with self.assertRaises(BudgetError):self.reserve(ledger)

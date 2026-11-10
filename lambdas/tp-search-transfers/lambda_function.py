@@ -5,9 +5,14 @@ Returns two kinds of option, each with a stable transferId saved to the candidat
   - "flight": real one-way flights when both airports are given and the cities are more than ~250 km apart:
     Google Flights via SerpApi first (needs SERPAPI_KEY; 1 SerpApi search per hop, cached 6 h, each option
     has a bookingUrl to Google Flights), then Duffel (needs DUFFEL_TOKEN; test mode = fake airline).
-  - "ground": a train / bus / ferry ESTIMATE (duration and price from distance) with a link to
-    search real timetables. There is no free API with real rail/bus prices for most countries,
-    so these are clearly marked "estimate": true. Mention this in the report.
+    Not searched when both cities are in a country with a rail profile and the train takes 3 h or less.
+  - "ground": a train / bus / ferry ESTIMATE (duration and price from the country rail model, or from
+    distance elsewhere) with a link to search real timetables. There is no free API with real rail/bus
+    prices for most countries, so these are clearly marked "estimate": true. Mention this in the report.
+Options carry doorToDoorMinutes; the fastest door-to-door option that is not overnight is "recommended": true.
+Results are cached 6 h, except an estimate-only answer after a flight search that failed for a passing reason
+(429/5xx, timeout, an unreadable reply): the next call searches again. City geocodes (Amazon Location, us-east-1) and
+the flight searches share one time budget (45 s, at most the Lambda's remaining time - 6 s).
 
 Environment variables:
   SECRET_ARN   Secrets Manager secret with {"SERPAPI_KEY": "...", "DUFFEL_TOKEN": "..."} (either may be missing)
@@ -41,28 +46,80 @@ MAX_FLIGHTS = 3
 FLIGHT_MIN_KM = 250
 GROUND_MAX_KM = 1600
 FX_TO_SGD = {"SGD": 1.0, "USD": 1.35, "EUR": 1.45, "GBP": 1.70, "JPY": 0.0090, "AUD": 0.88,
-             "DKK": 0.195, "NOK": 0.125, "SEK": 0.128}
+             "DKK": 0.195, "NOK": 0.125, "SEK": 0.128, "CNY": 0.19, "KRW": 0.00096, "TWD": 0.042, "CHF": 1.68,
+             "INR": 0.0157}
 FX_AS_OF = "2026-10-01"
 # Ground estimate: road/rail distance ~1.3x straight line; average 70 km/h door to door incl. changes;
 # price per person ~SGD 0.22 per km + SGD 10. Rough, labelled as an estimate everywhere.
 DETOUR, GROUND_KMH, SGD_PER_KM, SGD_BASE = 1.3, 70.0, 0.22, 10.0
 GROUND_DEPART = "09:00"
-KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osaka": (34.6937, 135.5023),
-                "singapore": (1.2903, 103.8520), "seoul": (37.5665, 126.9780), "bangkok": (13.7563, 100.5018),
-                "bali": (-8.6500, 115.2167), "hong kong": (22.3193, 114.1694), "taipei": (25.0330, 121.5654),
-                "copenhagen": (55.6761, 12.5683), "denmark": (55.6761, 12.5683),
-                "oslo": (59.9139, 10.7522), "norway": (59.9139, 10.7522), "bergen": (60.3913, 5.3221),
-                "tromso": (69.6492, 18.9553), "tromsø": (69.6492, 18.9553),
-                "lofoten": (68.2342, 14.5683), "lofoten islands": (68.2342, 14.5683), "svolvaer": (68.2342, 14.5683),
-                "svolvær": (68.2342, 14.5683), "reine": (67.9324, 13.0896), "bodo": (67.2804, 14.4049),
-                "bodø": (67.2804, 14.4049),
-                "stockholm": (59.3293, 18.0686), "sweden": (59.3293, 18.0686),
-                "abisko": (68.3495, 18.8312), "kiruna": (67.8558, 20.2253),
+# Rail model for hops inside one country: rail_km = 1.25 x straight line, in-train minutes = 15 + rail_km / v x 60,
+# fare per adult = base + rate x rail_km in local currency. Each row is calibrated on one flagship corridor (source in
+# the comment). Europe and the US price dynamically, so their rate is a mid-range advance second-class fare.
+# Door to door adds 50 min to rail (to the station, boarding, onward) and 185 min to a flight (to the airport, 75 min
+# before departure, exit, airport to city). Flights are not searched when the train takes 180 min or less.
+RAIL_FACTOR, RAIL_FIX_MIN, STATION_MIN, AIRPORT_MIN, RAIL_SKIP_FLIGHT_MIN = 1.25, 15, 50, 185, 180
+RAIL = {  # country (ISO 3166 alpha-2): (km/h, base, rate per rail km, currency, estimateBasis)
+    # Tokyo-Hakata 4h45 (https://en.wikipedia.org/wiki/Nozomi_(train)); smartEX JPY 23,610 / Shin-Osaka 14,520
+    # (https://smart-ex.jp/en/product/plan/service/pdf/service_fares_reserved.pdf)
+    "JP": (245, 6976, 15.02, "JPY", "JP rail fare table, smartEX 2025-04-01"),
+    # Beijing-Shanghai 4h28 (https://en.wikipedia.org/wiki/Beijing–Shanghai_high-speed_railway); CNY 553 second class
+    # (https://www.chinavigators.com/beijing-to-shanghai-train/)
+    "CN": (315, 0, 0.41, "CNY", "CN high-speed second-class fare table"),
+    # Seoul-Busan 2h18 (https://en.wikipedia.org/wiki/Gyeongbu_high-speed_railway); KRW 59,800
+    # (https://www.asiae.co.kr/en/article/2025102112570543076)
+    "KR": (200, 0, 147, "KRW", "KR KTX fare table"),
+    # Taipei-Zuoying 1h36, TWD 1,490 reserved (https://www.baolau.com/en/transport/taiwan/trains/)
+    "TW": (270, 0, 4.1, "TWD", "TW THSR fare table"),
+    # Paris-Marseille 3h03, EUR 16-120, use 60 (https://www.sncf-connect.com/en-en/train/route/paris/marseille)
+    "FR": (295, 0, 0.073, "EUR", "FR mid-range advance fare, indicative"),
+    # Madrid-Barcelona 2h30, EUR 25-80, use 50 (https://www.andybtravels.com/?p=34472)
+    "ES": (280, 0, 0.079, "EUR", "ES mid-range advance fare, indicative"),
+    # Milan-Rome 2h59 non-stop (https://www.trenitalia.com/it/frecciarossa/collegamenti-frecciarossa/viaggia-tra-roma-e-milano-con-frecciarossa.app.html);
+    # use EUR 50 (https://artofthetravel-com.pages.dev/posts/rome-to-milan-train)
+    "IT": (220, 0, 0.084, "EUR", "IT mid-range advance fare, indicative"),
+    # Berlin-Munich 3h55 Sprinter, from EUR 17.99, use 60 (https://www.bahndampf.de/deutsche-bahn/ice-sprinter)
+    "DE": (170, 0, 0.095, "EUR", "DE mid-range advance fare, indicative"),
+    # London-Manchester 2h15, from GBP 14, use 60 (https://everyrail.com/trains/london-to-manchester/)
+    "GB": (165, 0, 0.18, "GBP", "GB mid-range advance fare, indicative"),
+    # Amsterdam-Rotterdam 71 min, EUR 19 (https://everyrail.com/trains/amsterdam-to-rotterdam/)
+    "NL": (75, 0, 0.27, "EUR", "NL standard fare, indicative"),
+    # Zurich-Geneva 2h53, CHF 88 full fare (https://www.newlyswissed.com/from-geneva-to-zurich-by-train/)
+    "CH": (105, 0, 0.31, "CHF", "CH full fare, indicative"),
+    # Vienna-Salzburg 2h22 (https://seat61.com/trains-and-routes/vienna-to-salzburg-by-train.htm); Sparschiene
+    # from EUR 19.90, use 40 (https://www.salzburgerland.com/de/bahn-anreise/)
+    "AT": (150, 0, 0.13, "EUR", "AT mid-range advance fare, indicative"),
+    # Stockholm-Gothenburg 3h15, use SEK 400 (https://loudavymkrokem.cz/en/sweden-train-guide/)
+    "SE": (165, 0, 0.81, "SEK", "SE mid-range fare, indicative"),
+    # Delhi-Varanasi Vande Bharat 8h, INR 1,795 chair car (https://www.indiatvnews.com/business/news/india-s-first-20-coach-vande-bharat-express-begins-operation-check-schedule-route-ticket-fare-2024-09-20-953228)
+    "IN": (110, 0, 2.1, "INR", "IN Vande Bharat chair-car fare"),
+    # NY-Washington Acela about 2h50, USD 100-500, use 150
+    # (https://6abc.com/post/what-know-amtraks-new-high-speed-nextgen-acela-train/17671294/)
+    "US": (160, 0, 0.37, "USD", "US mid-range advance fare, indicative"),
+}
+# A hop between two of these countries averages the two rows' v, base and rate (in SGD), with v at most XB_MAX_KMH
+# because border lines are rarely full high-speed (Paris-Amsterdam 217 min against Eurostar's 3h18, Paris-Zurich
+# 243 against TGV Lyria's 4h04). CH is not EU but is on the mainland rail network; GB to the continent keeps the
+# generic estimate.
+RAIL_EU = {"FR", "ES", "IT", "DE", "NL", "AT", "SE", "CH"}
+XB_MAX_KMH = 160
+
+KNOWN_CITIES = {"tokyo": (35.6812, 139.7671, "JP"), "kyoto": (35.0116, 135.7681, "JP"), "osaka": (34.6937, 135.5023, "JP"),
+                "singapore": (1.2903, 103.8520, "SG"), "seoul": (37.5665, 126.9780, "KR"), "bangkok": (13.7563, 100.5018, "TH"),
+                "bali": (-8.6500, 115.2167, "ID"), "hong kong": (22.3193, 114.1694, "HK"), "taipei": (25.0330, 121.5654, "TW"),
+                "copenhagen": (55.6761, 12.5683, "DK"), "denmark": (55.6761, 12.5683, "DK"),
+                "oslo": (59.9139, 10.7522, "NO"), "norway": (59.9139, 10.7522, "NO"), "bergen": (60.3913, 5.3221, "NO"),
+                "tromso": (69.6492, 18.9553, "NO"), "tromsø": (69.6492, 18.9553, "NO"),
+                "lofoten": (68.2342, 14.5683, "NO"), "lofoten islands": (68.2342, 14.5683, "NO"),
+                "svolvaer": (68.2342, 14.5683, "NO"), "svolvær": (68.2342, 14.5683, "NO"), "reine": (67.9324, 13.0896, "NO"),
+                "bodo": (67.2804, 14.4049, "NO"), "bodø": (67.2804, 14.4049, "NO"),
+                "stockholm": (59.3293, 18.0686, "SE"), "sweden": (59.3293, 18.0686, "SE"),
+                "abisko": (68.3495, 18.8312, "SE"), "kiruna": (67.8558, 20.2253, "SE"),
                 # popular day-trip towns
-                "nikko": (36.7199, 139.6982), "kamakura": (35.3192, 139.5467), "hakone": (35.2324, 139.1069),
-                "nara": (34.6851, 135.8048), "kobe": (34.6901, 135.1955), "busan": (35.1796, 129.0756),
-                "ayutthaya": (14.3532, 100.5689), "sapporo": (43.0618, 141.3545), "fukuoka": (33.5902, 130.4017)}
-_GEO_CFG = Config(connect_timeout=4, read_timeout=8, retries={"max_attempts": 2})
+                "nikko": (36.7199, 139.6982, "JP"), "kamakura": (35.3192, 139.5467, "JP"), "hakone": (35.2324, 139.1069, "JP"),
+                "nara": (34.6851, 135.8048, "JP"), "kobe": (34.6901, 135.1955, "JP"), "busan": (35.1796, 129.0756, "KR"),
+                "ayutthaya": (14.3532, 100.5689, "TH"), "sapporo": (43.0618, 141.3545, "JP"),
+                "fukuoka": (33.5902, 130.4017, "JP")}
 _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
 
@@ -136,19 +193,35 @@ def _km(a, b):
     return 2 * r * math.asin(math.sqrt(h))
 
 
+def _geo_client():
+    """An Amazon Location (geo-places, us-east-1 as in find-places and stays) client whose worst case (every attempt
+    timing out) ends within the time budget: up to 3 attempts of 4 s connect + 8 s read while the budget allows, else
+    one shorter attempt. None when less than 3 s are left."""
+    left = min(_time_left(), 1e6) - 1
+    if left < 3:
+        return None
+    tries = max(1, min(3, int(left // 12)))
+    connect = min(4.0, left / 3)
+    return boto3.client("geo-places", config=Config(region_name="us-east-1", connect_timeout=connect,
+                                                    read_timeout=min(8.0, left / tries - connect),
+                                                    retries={"total_max_attempts": tries}))
+
+
 def _coords(place):
-    if place.get("lat") is not None and place.get("lng") is not None:
-        return float(place["lat"]), float(place["lng"])
+    """(lat, lng, country code or None) for a city; the geocode counts against the time budget."""
     city = str(place.get("city", "")).strip()
-    known = KNOWN_CITIES.get(city.lower())
+    known = KNOWN_CITIES.get(city.split(",")[0].strip().lower())
+    if place.get("lat") is not None and place.get("lng") is not None:
+        return float(place["lat"]), float(place["lng"]), known[2] if known else None
     if _mock_mode() or not city:
         return known
     try:
-        r = boto3.client("geo-places", config=_GEO_CFG).geocode(QueryText=city, MaxResults=1)
-        items = r.get("ResultItems", [])
+        client = _geo_client()
+        r = client.geocode(QueryText=city, MaxResults=1) if client else {}
+        items = r.get("ResultItems") or []
         if items:
             lng, lat = items[0]["Position"]
-            return lat, lng
+            return lat, lng, ((items[0].get("Address") or {}).get("Country") or {}).get("Code2")
     except Exception as e:  # noqa: BLE001
         print("geocode failed:", e)
     return known
@@ -160,14 +233,20 @@ def _validate(event):
         return None, _err("bad_input", "from and to need a city, e.g. {\"city\": \"Oslo\", \"airport\": \"OSL\"}")
     try:
         d = date.fromisoformat(event["date"])
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None, _err("bad_input", "date must be YYYY-MM-DD")
     if d < date.today():
         return None, _err("bad_input", "date is in the past")
-    pax = int(event.get("pax", 1))
+    try:
+        pax = int(event.get("pax", 1))
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "pax must be a whole number 1-9")
     if not 1 <= pax <= 9:
         return None, _err("bad_input", "pax must be 1-9")
-    a, b = _coords(frm), _coords(to)
+    try:
+        a, b = _coords(frm), _coords(to)
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "lat and lng in from and to must be numbers")
     if not a or not b:
         missing = frm["city"] if not a else to["city"]
         return None, _err("unknown_location", f"could not find '{missing}'; pass lat and lng")
@@ -176,7 +255,8 @@ def _validate(event):
     return {"fromCity": frm["city"], "toCity": to["city"], "fromAirport": fa if iata.match(fa) else None,
             "toAirport": ta if iata.match(ta) else None, "date": d.isoformat(), "pax": pax,
             "from": [round(a[0], 4), round(a[1], 4)], "to": [round(b[0], 4), round(b[1], 4)],
-            "km": round(_km(a, b), 1),
+            "km": round(_km(a, b), 1), "cc": a[2] if a[2] == b[2] else None,
+            **({"ccPair": [a[2], b[2]]} if a[2] != b[2] and {a[2], b[2]} <= RAIL_EU else {}),
             "prefer": prefer if (prefer := str(event.get("prefer") or "cheapest").lower()) in
             ("cheapest", "fastest", "ground", "flight") else "cheapest",
             "avoidOvernight": event.get("avoidOvernight") is not False}, None
@@ -187,21 +267,44 @@ def _to_sgd(amount, currency):
     return round(float(amount) * rate, 2) if rate else None
 
 
+def _rail(q):
+    """(in-train minutes, fare per adult in local currency, currency, basis) from the country profile, or None."""
+    p = RAIL.get(q.get("cc"))
+    if not p and q.get("ccPair"):
+        r1, r2 = (RAIL[c] for c in q["ccPair"])
+        p = (min(XB_MAX_KMH, (r1[0] + r2[0]) / 2), (r1[1] * FX_TO_SGD[r1[3]] + r2[1] * FX_TO_SGD[r2[3]]) / 2,
+             (r1[2] * FX_TO_SGD[r1[3]] + r2[2] * FX_TO_SGD[r2[3]]) / 2, "SGD",
+             "-".join(q["ccPair"]) + f" cross-border, average of the two country rows (at most {XB_MAX_KMH} km/h)")
+    if not p:
+        return None
+    v, base, rate, cur, basis = p
+    rail_km = q["km"] * RAIL_FACTOR
+    return round(RAIL_FIX_MIN + rail_km / v * 60), base + rate * rail_km, cur, basis
+
+
 def _ground(q):
     road_km = q["km"] * DETOUR
-    minutes = int(road_km / GROUND_KMH * 60 + 30)
+    rail = _rail(q)
+    minutes = rail[0] if rail else int(road_km / GROUND_KMH * 60 + 30)
     depart = datetime.fromisoformat(f"{q['date']}T{GROUND_DEPART}:00")
     arrive = depart + timedelta(minutes=minutes)
-    price = round((SGD_BASE + SGD_PER_KM * road_km) * q["pax"], 2)
+    price = round(rail[1] * FX_TO_SGD[rail[2]] * q["pax"], 2) if rail else round((SGD_BASE + SGD_PER_KM * road_km) * q["pax"], 2)
     tid = "tgr:" + hashlib.sha256(json.dumps([q["fromCity"], q["toCity"], q["date"], q["pax"]]).encode()).hexdigest()[:16]
-    return {"transferId": tid, "mode": "ground", "estimate": True,
-            "summary": f"Train / bus / ferry {q['fromCity']} → {q['toCity']} (estimated)",
-            "fromCity": q["fromCity"], "toCity": q["toCity"], "date": q["date"],
-            "departAt": depart.isoformat(timespec="minutes"), "arriveAt": arrive.isoformat(timespec="minutes"),
-            "durationMinutes": minutes, "overnight": arrive.date() > depart.date() or arrive.hour >= 22,
-            "priceTotalSGD": price, "currency": "SGD", "distanceKm": round(road_km),
-            "bookingUrl": f"https://www.rome2rio.com/map/{quote(q['fromCity'])}/{quote(q['toCity'])}",
-            "note": "Estimate from distance; check real timetables and prices with the link."}
+    out = {"transferId": tid, "mode": "ground", "estimate": True,
+           "summary": (f"Train {q['fromCity']} → {q['toCity']} (fare estimate)" if rail
+                       else f"Train / bus / ferry {q['fromCity']} → {q['toCity']} (estimated)"),
+           "fromCity": q["fromCity"], "toCity": q["toCity"], "date": q["date"],
+           "departAt": depart.isoformat(timespec="minutes"), "arriveAt": arrive.isoformat(timespec="minutes"),
+           # the generic estimate already averages 70 km/h door to door
+           "durationMinutes": minutes, "doorToDoorMinutes": minutes + STATION_MIN if rail else minutes,
+           "overnight": arrive.date() > depart.date() or arrive.hour >= 22,
+           "priceTotalSGD": price, "currency": "SGD", "distanceKm": round(q["km"] * RAIL_FACTOR if rail else road_km),
+           "bookingUrl": f"https://www.rome2rio.com/map/{quote(q['fromCity'])}/{quote(q['toCity'])}",
+           "note": ("Fare estimate from the country rail model; check timetables and the current price with the link."
+                    if rail else "Estimate from distance; check real timetables and prices with the link.")}
+    if rail:
+        out["estimateBasis"] = rail[3]
+    return out
 
 
 def _flight_option(offer, q):
@@ -222,11 +325,26 @@ def _flight_option(offer, q):
                               for g in segs]}
 
 
+def _price(v):
+    """A fare as a float: a number, or text such as "150" or "$1,234"; None when there is no usable price."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        p = float(re.sub(r"[^\d.]", "", str(v)))
+    except ValueError:
+        return None
+    return p if p > 0 else None
+
+
 def _google_flights(q):
-    """One-way flights for this hop from Google Flights (SerpApi), prices in SGD for all travellers."""
+    """One-way flights for this hop from Google Flights (SerpApi), prices in SGD for all travellers.
+    Returns (options, error, transient): transient is True when the search failed for a reason that can pass
+    (429/5xx, timeout, an unreadable reply, no time left), so an estimate-only answer is not cached."""
     key = _secret("SERPAPI_KEY")
     if not key:
-        return [], "no SERPAPI_KEY in secret"
+        return [], "no SERPAPI_KEY in secret", False
     params = {"engine": "google_flights", "api_key": key, "type": 2, "departure_id": q["fromAirport"],
               "arrival_id": q["toAirport"], "outbound_date": q["date"], "adults": q["pax"], "currency": "SGD",
               "hl": "en", "gl": "sg", "travel_class": 1}
@@ -244,14 +362,23 @@ def _google_flights(q):
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"serpapi http {r.status_code}"
             elif r.status_code >= 400:
-                return [], f"serpapi http {r.status_code}: {r.text[:200]}"
+                return [], f"serpapi http {r.status_code}: {r.text[:200]}", False
             else:
-                data = r.json()
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict):   # an HTML error page with status 200: retried like a 5xx
+                    last = "serpapi sent a reply that is not JSON"
+                    if not _pause(attempt):
+                        break
+                    continue
                 url = (data.get("search_metadata") or {}).get("google_flights_url")
                 out = []
                 for o in (data.get("best_flights") or []) + (data.get("other_flights") or []):
-                    segs = o.get("flights") or []
-                    if not segs or not o.get("price"):
+                    segs = (o.get("flights") or []) if isinstance(o, dict) else []
+                    price = _price(o.get("price")) if segs else None
+                    if price is None or not all(isinstance(g, dict) for g in segs):
                         continue
                     dep = ((segs[0].get("departure_airport") or {}).get("time") or "").replace(" ", "T")[:16]
                     arr = ((segs[-1].get("arrival_airport") or {}).get("time") or "").replace(" ", "T")[:16]
@@ -264,23 +391,24 @@ def _google_flights(q):
                                            + (f", {stops} stop{'s' if stops > 1 else ''}" if stops else "") + ")",
                                 "airline": airlines, "fromCity": q["fromCity"], "toCity": q["toCity"],
                                 "date": q["date"], "departAt": dep, "arriveAt": arr,
-                                "durationMinutes": o.get("total_duration"), "stops": stops,
+                                "durationMinutes": o.get("total_duration") if isinstance(o.get("total_duration"), (int, float))
+                                and not isinstance(o.get("total_duration"), bool) else None, "stops": stops,
                                 "overnight": bool(arr and dep and arr[:10] > dep[:10]),
-                                "priceTotal": float(o["price"]), "currency": "SGD",
-                                "priceTotalSGD": round(float(o["price"]), 2), "flightNumbers": nums,
+                                "priceTotal": price, "currency": "SGD",
+                                "priceTotalSGD": round(price, 2), "flightNumbers": nums,
                                 "bookingUrl": url, "provider": "google_flights"})
                 if not out and data.get("error"):
-                    return [], f"google flights: {str(data['error'])[:200]}"
-                return sorted(out, key=lambda x: x["priceTotalSGD"])[:MAX_FLIGHTS], None
+                    return [], f"google flights: {str(data['error'])[:200]}", False
+                return sorted(out, key=lambda x: x["priceTotalSGD"])[:MAX_FLIGHTS], None, False
         if not _pause(attempt):
             break
-    return [], last
+    return [], last, True
 
 
 def _duffel(q):
     tok = _token()
     if not tok:
-        return [], "no DUFFEL_TOKEN in secret"
+        return [], "no DUFFEL_TOKEN in secret", False
     body = {"data": {"slices": [{"origin": q["fromAirport"], "destination": q["toAirport"], "departure_date": q["date"]}],
                      "passengers": [{"type": "adult"}] * q["pax"], "cabin_class": "economy"}}
     headers = {"Authorization": f"Bearer {tok}", "Duffel-Version": "v2", "Accept": "application/json",
@@ -300,14 +428,14 @@ def _duffel(q):
             if r.status_code in (429, 500, 502, 503, 504):
                 last = f"duffel http {r.status_code}"
             elif r.status_code >= 400:
-                return [], f"duffel http {r.status_code}: {r.text[:200]}"
+                return [], f"duffel http {r.status_code}: {r.text[:200]}", False
             else:
                 offers = [_flight_option(o, q) for o in r.json()["data"].get("offers", [])]
                 offers = [o for o in offers if o["priceTotalSGD"] is not None]
-                return sorted(offers, key=lambda o: o["priceTotalSGD"])[:MAX_FLIGHTS], None
+                return sorted(offers, key=lambda o: o["priceTotalSGD"])[:MAX_FLIGHTS], None, False
         if not _pause(attempt):
             break
-    return [], last
+    return [], last, True
 
 
 def _mock_flight(q):
@@ -355,27 +483,57 @@ def _order(options, q):
     for o in options:
         o["matches"] = [m for m, ok in (("ground", o["mode"] == "ground"), ("flight", o["mode"] == "flight"))
                         if ok and pref == m]
-    key = {"fastest": lambda o: (o.get("durationMinutes") or 10 ** 6, price(o)),
+    key = {"fastest": lambda o: (o.get("doorToDoorMinutes") or 10 ** 6, price(o)),
            "ground": lambda o: (o["mode"] != "ground", price(o)),
            "flight": lambda o: (o["mode"] != "flight", price(o))}.get(pref, price)
     late = (lambda o: bool(o.get("overnight"))) if q.get("avoidOvernight", True) else (lambda o: False)
     return sorted(options, key=lambda o: (late(o), key(o)))
 
 
+def _recommend(options, q):
+    """Mark the fastest door-to-door option (ties: cheaper), avoiding overnight ones and keeping a ground/flight
+    preference."""
+    price = lambda o: o["priceTotalSGD"] if o["priceTotalSGD"] is not None else 1e9
+    pool = [o for o in options if o.get("doorToDoorMinutes")]
+    pool = [o for o in pool if not o.get("overnight")] or pool
+    pool = [o for o in pool if o["mode"] == q.get("prefer")] or pool
+    best = min(pool, key=lambda o: (o["doorToDoorMinutes"], price(o)), default=None)
+    for o in options:
+        o["recommended"] = o is best
+
+
+def _flight_search(provider, q):
+    """(options, error, transient) of one flight provider; an unreadable reply is a passing error of that provider."""
+    try:
+        return provider(q)
+    except Exception as e:  # noqa: BLE001
+        return [], f"{provider.__name__.strip('_')} reply could not be read: {type(e).__name__}: {str(e)[:120]}", True
+
+
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event, context)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event, context):
     _start_budget(context, 45)
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})
     if error:
         return error
+    rail = _rail(q)
     want_flight = bool(q["fromAirport"] and q["toAirport"] and q["fromAirport"] != q["toAirport"]
-                       and q["km"] >= FLIGHT_MIN_KM)
+                       and q["km"] >= FLIGHT_MIN_KM
+                       and not (rail and rail[0] <= RAIL_SKIP_FLIGHT_MIN and q["prefer"] != "flight"))
     notes = []
     if _mock_mode():
         options, source = (_mock_flight(q) if want_flight else []), "mock"
     else:
-        key = "transfers:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+        key = "transfers-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
         cached = _cache(key)
         if cached and _secret("SERPAPI_KEY") and not str(cached.get("source", "")).startswith("google_flights") \
                 and any(o.get("mode") == "flight" for o in cached.get("options", [])):
@@ -383,16 +541,17 @@ def lambda_handler(event, context):
         if cached:
             _pool_put(cached.get("options", []), q)
             return {**cached, "source": cached.get("source", "") + "-cache"}
-        options, source = [], "estimate"
+        options, source, transient = [], "estimate", False
         if want_flight:
-            options, err = _google_flights(q)
+            options, err, transient = _flight_search(_google_flights, q)
             if err:
                 notes.append(err)
                 print("google flights failed:", err)
             if options:
                 source = "google_flights+estimate"
             else:
-                options, err = _duffel(q)
+                options, err, duffel_transient = _flight_search(_duffel, q)
+                transient = transient or duffel_transient
                 if err:
                     notes.append(err)
                     print("duffel failed:", err)
@@ -403,13 +562,19 @@ def lambda_handler(event, context):
     if not options:
         return _err("no_options", f"No flights found and {q['fromCity']} → {q['toCity']} is too far for ground "
                                   f"transport ({q['km']:.0f} km). Try a different date.", tried=notes)
+    for o in options:
+        if o["mode"] == "flight" and o.get("durationMinutes"):
+            o["doorToDoorMinutes"] = o["durationMinutes"] + AIRPORT_MIN
+    _recommend(options, q)
     options = _order(options, q)
     result = {"ok": True, "source": source, "query": {k: q[k] for k in ("fromCity", "toCity", "fromAirport",
                                                                           "toAirport", "date", "pax", "km")},
               "options": options, "fxAsOf": FX_AS_OF}
     if notes:
         result["fallbacksTried"] = notes
-    if not _mock_mode():
+    # only real results are cached: an estimate-only answer after a passing flight-search failure (429/5xx, timeout,
+    # an unreadable reply) is searched again on the next call instead of being reused for CACHE_TTL_SECONDS
+    if not _mock_mode() and not (want_flight and transient and not any(o["mode"] == "flight" for o in options)):
         _cache(key, result)
     _pool_put(options, q)
     return result

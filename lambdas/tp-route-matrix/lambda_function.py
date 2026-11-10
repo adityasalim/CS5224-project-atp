@@ -90,12 +90,16 @@ def _location(points, mode):
                     if i == j:
                         out[i][j] = 0
                         continue
-                    cell = matrix[ri][ci] if matrix else None
-                    if not cell or cell.get("Error") or cell.get("Duration") is None:
+                    try:   # a short row, a cell that is not an object or a Duration that is not a number: estimate
+                        cell = matrix[ri][ci] if matrix else None
+                        seconds = float(cell["Duration"]) if cell and not cell.get("Error") else None
+                    except (IndexError, KeyError, TypeError, ValueError, AttributeError):
+                        seconds = None
+                    if seconds is None:
                         out[i][j] = est[i][j]   # fill gaps with the estimate
                         filled += 1
                     else:
-                        out[i][j] = math.ceil(cell["Duration"] / 60) + (CAR_OVERHEAD_MIN if mode == "car" else 0)
+                        out[i][j] = math.ceil(seconds / 60) + (CAR_OVERHEAD_MIN if mode == "car" else 0)
     return out, filled, requests_made, errors
 
 
@@ -151,6 +155,14 @@ def _cache_put(key, payload):
 
 
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     if isinstance(event, str):
         event = json.loads(event)
     q, error = _validate(event or {})

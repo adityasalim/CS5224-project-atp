@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import json
 
 ROLES = ('planner', 'executor', 'reviewer', 'independent_evaluator')
-PROVIDERS = {'bedrock', 'google', 'alibaba'}
+PROVIDERS = {'bedrock', 'google', 'alibaba', 'anthropic'}
 
 # Single source of truth for Alibaba (DashScope) models.
 ALIBABA_MODELS = {
@@ -106,9 +106,13 @@ class ModelConfiguration:
                     'thinkingBudget',
                     'temperature',
                     'reasoningEffort',
+                    'speed',
                 }
             ):
                 raise ValueError('Unsupported provider options')
+            if 'speed' in options and (provider != 'anthropic' or options['speed'] != 'fast'
+                                       or row.get('model') not in ('claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8')):
+                raise ValueError('speed "fast" is only for Claude Opus on the Anthropic API')
 
             if (
                 'temperature' in options
@@ -217,6 +221,9 @@ class ModelConfiguration:
 
                     elif model == 'glm-5.3':
                         supported = REASONING_EFFORTS['glm53']
+
+                elif provider == 'anthropic':
+                    supported = {'low', 'medium', 'high', 'xhigh', 'max'}
 
                 if options['reasoningEffort'] not in supported:
                     raise ValueError(

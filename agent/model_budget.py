@@ -88,7 +88,7 @@ class PriceQuote:
     def parse(cls,data):
         source=data['source']
         host=urlparse(source).hostname or ''
-        if urlparse(source).scheme!='https' or not any(host==h or host.endswith('.'+h) for h in ('amazonaws.com','aws.amazon.com','ai.google.dev','alibabacloud.com','anthropic.com')):
+        if urlparse(source).scheme!='https' or not any(host==h or host.endswith('.'+h) for h in ('amazonaws.com','aws.amazon.com','ai.google.dev','alibabacloud.com','anthropic.com','claude.com')):
             raise ValueError('A primary-provider pricing source is required')
         if data.get('verified') is not True:raise ValueError('Pricing must be verified before use')
         first=date.fromisoformat(data['verifiedOn']);last=date.fromisoformat(data['validUntil'])
@@ -118,14 +118,16 @@ class PriceQuote:
         if row.get('inputTokens') is None or row.get('outputTokens') is None:return None,'unknown usage'
         inp=money(row['inputTokens']);out=money(row['outputTokens'])
         read=money(row.get('cacheReadTokens') or 0);write=money(row.get('cacheWriteTokens') or 0)
+        search=money(row.get('webSearchRequests') or 0)*Decimal('0.01')   # Anthropic web search: USD 10 per 1,000 searches
         if write and self.cache_write_per_million is None:return None,'cache-write rate not verified'
         if self.input_includes_cache and read>inp:raise BudgetError('Invalid cache token accounting')
         if read and self.cache_read_per_million is None:
             if not self.input_includes_cache:inp+=read
-            return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000),'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
+            return (inp*self.input_per_million+out*self.output_per_million+write*(self.cache_write_per_million or 0))/Decimal(1000000)+search,'uncached upper estimate; cache-read price unavailable; '+self.rate_basis
         uncached=inp-read if self.input_includes_cache else inp
         amount=(uncached*self.input_per_million+read*(self.cache_read_per_million or 0)+write*(self.cache_write_per_million or 0)+out*self.output_per_million)/Decimal(1000000)
-        return amount,self.rate_basis
+        if row.get('speed')=='fast':return amount*2+search,'fast mode at 2x the standard rates; '+self.rate_basis
+        return amount+search,self.rate_basis
 
 class BudgetLedger:
     def __init__(self,store,*,cap_usd,provider_caps,quotes,today=None,enforce_spending_caps=False):
@@ -148,7 +150,7 @@ class BudgetLedger:
         quote=self.quotes.get((selection.provider,selection.model_id))
         if quote is None:raise BudgetError('No verified pricing quote for selected model')
         quote.validate_date(self.today())
-        maximum=quote.reserve_cost(system,messages,max_tokens)
+        maximum=quote.reserve_cost(system,messages,max_tokens)*(2 if (getattr(selection,'options',None) or {}).get('speed')=='fast' else 1)   # fast mode: 2x
         identifier=uuid.uuid4().hex
         def reserve(state):
             if self.enforce_spending_caps and state['halted']:
@@ -183,10 +185,16 @@ class BudgetReservation:
         self.ledger,self.identifier,self.quote,self.maximum=ledger,identifier,quote,maximum
 
     def settle(self,row):
-        estimate,basis=self.quote.estimate(row)
+        quote=self.quote
+        served=row.get('responseModelId')
+        # an Anthropic refusal re-run on a fallback model bills at that model's rates (other providers echo aliases)
+        if quote.provider=='anthropic' and served and served!=quote.model_id:
+            quote=self.ledger.quotes.get((quote.provider,served))
+        estimate,basis=quote.estimate(row) if quote else (None,'no verified quote for fallback model '+served)
+        quote=quote or self.quote
         if row.get('requestStarted') is False:estimate,basis=Decimal(0),'provider request never started'
         row.update(estimatedPaidTierCostUSD=str(estimate) if estimate is not None else None,
-                   costEstimateBasis=basis,pricingSource=self.quote.source,pricingVerifiedOn=self.quote.verified_on,
+                   costEstimateBasis=basis,pricingSource=quote.source,pricingVerifiedOn=quote.verified_on,
                    budgetReservationUSD=str(self.maximum),budgetReservationId=self.identifier)
         self.ledger.store.put_record(row)
         def finish(state):

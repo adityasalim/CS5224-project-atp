@@ -138,6 +138,40 @@
                       },
                       "travelBy": {
                         "type": "string"
+                      },
+                      "zone": {
+                        "type": "string",
+                        "description": "Zone id, e.g. Z3"
+                      },
+                      "zoneLabel": {
+                        "type": "string",
+                        "description": "Zone name shown as a header, e.g. near Senso-ji"
+                      },
+                      "googleMapsUri": {
+                        "type": "string",
+                        "description": "Google Maps link for the stop"
+                      },
+                      "nameEn": {
+                        "type": "string",
+                        "description": "English name for a Japanese-only place name, shown after it in brackets"
+                      },
+                      "rating": {
+                        "type": "number"
+                      },
+                      "reviews": {
+                        "type": "integer"
+                      },
+                      "priceLevel": {
+                        "type": "string",
+                        "description": "$ to $$$$"
+                      },
+                      "why": {
+                        "type": "string",
+                        "description": "Why a food or coffee stop was picked"
+                      },
+                      "webSource": {
+                        "type": "string",
+                        "description": "Publisher that featured the venue"
                       }
                     },
                     "required": [
@@ -172,6 +206,10 @@
                 "city": {
                   "type": "string",
                   "description": "City for this day (multi-city)"
+                },
+                "routeUrl": {
+                  "type": "string",
+                  "description": "Google Maps directions for the day (shown as a link)"
                 }
               },
               "required": [

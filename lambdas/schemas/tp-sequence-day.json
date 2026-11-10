@@ -1,6 +1,6 @@
 {
   "name": "sequence_day",
-  "description": "Order one day's chosen places into a feasible timed schedule starting from the hotel, respecting opening hours and real travel times. Returns stops with arriveAt/departAt, travel minutes, free time and any places that did not fit. Call once per day after choosing that day's placeIds.",
+  "description": "Order one day's chosen places into a feasible timed schedule starting from the hotel, respecting opening hours and real travel times. Returns stops with arriveAt/departAt, travel minutes, free time, any places that did not fit and mealGaps ([\"lunch\"] when the day has meal stops but none could start as a lunch by 14:30; that first meal became the dinner). Call once per day after choosing that day's placeIds.",
   "inputSchema": {
     "type": "object",
     "properties": {
@@ -18,6 +18,17 @@
           "type": "string"
         },
         "description": "2-8 placeIds from find_places for this day"
+      },
+      "pinned": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional placeIds the traveler named (must-visit). The day keeps these over other stops when not everything fits. Default: places with category requested"
+      },
+      "zones": {
+        "type": "object",
+        "description": "Optional zone id per placeId, e.g. {\"<placeId>\": \"Z1\"}: the day finishes one zone, takes one ride, then does the next"
       },
       "dayStart": {
         "type": "string",

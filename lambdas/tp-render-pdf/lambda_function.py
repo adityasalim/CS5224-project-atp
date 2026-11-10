@@ -3,7 +3,8 @@ from trip_currency import normalize_cached_pool, code as currency_code, budget_a
 tp-render-pdf — Lambda tool: turn a final (verified) itinerary into a PDF travel plan with
 clickable links, save it to S3 and return a short-lived download link.
 
-Names, prices and links are read from the candidate pool by ID (not from model text).
+Names, prices and links are read from the candidate pool by ID (not from model text); a stop's optional "nameEn"
+(the agent's English name for a Japanese-only name) is shown after it in brackets.
 Optional narrative text from the agent (already checked by Guardrails) can be included.
 
 Environment variables:
@@ -41,6 +42,7 @@ def _err(code, message, **extra):
     return {"ok": False, "error": code, "message": message, "source": "render-pdf", **extra}
 
 
+_FOOD = {"restaurant", "cafe", "dessert", "street_food", "market"}   # the agent's food categories
 _FAMILY = "Helvetica"   # switched to "TPSans" by _setup_fonts() when the Unicode fonts are present
 _SANS = {"": "DejaVuSans.ttf", "B": "DejaVuSans-Bold.ttf", "I": "DejaVuSans-Oblique.ttf",
          "BI": "DejaVuSans-BoldOblique.ttf"}
@@ -109,6 +111,11 @@ class PlanPDF(FPDF):
                            f"Page {self.page_no()}"), align="C")
 
 
+def _when(s):
+    """A stop's time cell: arrival-departure; a day line (park meals, check-out, airport) shows its time alone."""
+    return "-".join(t for t in (s.get("arriveAt") or "", s.get("departAt") or "") if t)
+
+
 def build_pdf(event, pool, daily_spend):
     spec, it = event["tripSpec"], event["itinerary"]
     pool = normalize_cached_pool(spec, pool)
@@ -122,7 +129,8 @@ def build_pdf(event, pool, daily_spend):
     stays = [pool[s_["stayId"]] for s_ in stay_refs if s_.get("stayId") in pool]
     transfers = [pool[t["transferId"]] for t in it.get("transfers") or [] if t.get("transferId") in pool]
     transfer_on = {t.get("date"): t for t in transfers}
-    narrative = event.get("narrative") or {}
+    narrative = event.get("narrative") if isinstance(event.get("narrative"), dict) else {}
+    day_notes = narrative.get("dayNotes") if isinstance(narrative.get("dayNotes"), dict) else {}   # a list or text: none
 
     pdf = PlanPDF(format="A4")
     _setup_fonts(pdf)
@@ -168,12 +176,17 @@ def build_pdf(event, pool, daily_spend):
     def cost_row(label, detail, amount, bold=False, link=None):
         pdf.set_font(_FAMILY, "B" if bold else "", 10.5)
         pdf.cell(40, 6.5, _t(label))
+        detail, room = _t(detail), pdf.w - pdf.r_margin - pdf.get_x() - pdf.get_string_width(_t(amount)) - 4
+        if pdf.get_string_width(detail) > room:   # keep long text clear of the amount
+            while detail and pdf.get_string_width(detail + "...") > room:
+                detail = detail[:-1]
+            detail = detail.rstrip() + "..."
         if link:
             pdf.set_text_color(30, 90, 170)
-            pdf.cell(95, 6.5, _t(detail), link=link)
+            pdf.cell(95, 6.5, detail, link=link)
             pdf.set_text_color(30, 30, 30)
         else:
-            pdf.cell(95, 6.5, _t(detail))
+            pdf.cell(95, 6.5, detail)
         pdf.cell(0, 6.5, _t(amount), align="R", new_x="LMARGIN", new_y="NEXT")
 
     section(f"Costs ({currency})")
@@ -219,10 +232,10 @@ def build_pdf(event, pool, daily_spend):
             pdf.set_text_color(30, 90, 170)
             mins = trip.get("travelMinutes")
             how = f' ({trip.get("travelBy") or "train/bus"}, about {mins} min each way)' if mins else ""
-            pdf.cell(0, 6, _t(f'Day trip to {trip["place"]}{how}, back to the hotel in the evening'),
-                     new_x="LMARGIN", new_y="NEXT")
+            pdf.multi_cell(0, 6, _t(f'Day trip to {trip["place"]}{how}, back to the hotel in the evening'),
+                           new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
-        note = (narrative.get("dayNotes") or {}).get(d["date"])
+        note = day_notes.get(d["date"])
         if note:
             pdf.set_font(_FAMILY, "I", 10)
             pdf.set_text_color(90, 90, 90)
@@ -232,24 +245,50 @@ def build_pdf(event, pool, daily_spend):
         if not stops and not t:
             pdf.set_font(_FAMILY, "", 10)
             pdf.cell(0, 6, "Free day", new_x="LMARGIN", new_y="NEXT")
+        zone = None
         for s in stops:
             p = pool.get(s.get("placeId"), {})
             name = p.get("name") or s.get("name") or s.get("placeId")
-            when = f'{s.get("arriveAt", "")}-{s.get("departAt", "")}'
+            gloss = s.get("nameEn")   # the agent's English name for a Japanese-only name
+            if isinstance(gloss, str) and gloss.strip():
+                name = f"{name} ({gloss.strip()[:80]})"
+            when = _when(s)
             travel = s.get("travelMinutesFromPrev")
+            extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
+            if s.get("zoneLabel") and s.get("zone") != zone:
+                pdf.set_font(_FAMILY, "B", 10)
+                pdf.set_text_color(*accent)
+                pdf.cell(0, 6, _t(s["zoneLabel"] + (f"  ({extra} from the previous area)" if zone and extra else "")),
+                         new_x="LMARGIN", new_y="NEXT")
+                zone = s["zone"]
             pdf.set_font(_FAMILY, "", 10)
             pdf.set_text_color(110, 110, 110)
             pdf.cell(26, 6, _t(when))
             pdf.set_text_color(30, 90, 170)
-            link = p.get("url") or p.get("mapsUrl")
-            pdf.cell(110, 6, _t(name), link=link or "")
+            link = s.get("googleMapsUri") or p.get("url") or p.get("mapsUrl")
+            shown = _t(name)   # a longer (glossed) name widens its cell up to the travel time, never over it
+            room = pdf.w - pdf.r_margin - pdf.get_x() - pdf.get_string_width(_t(extra)) - 2
+            pdf.cell(max(110, min(pdf.get_string_width(shown) + 1, room)), 6, shown, link=link or "")
             pdf.set_text_color(110, 110, 110)
-            extra = f'{travel} min {s.get("travelBy", "")}'.strip() if travel else ""
             pdf.cell(0, 6, _t(extra), align="R", new_x="LMARGIN", new_y="NEXT")
+            rating, reviews = s.get("rating", p.get("rating")), s.get("reviews", p.get("reviews"))
+            chips = [f"rated {rating}" + (f" ({reviews:,} reviews)" if isinstance(reviews, int) else "") if rating else "",
+                     s.get("priceLevel") or "", s.get("why") or "",
+                     f'Featured by {s["webSource"]}' if s.get("webSource") else ""]
+            if any(chips) and (p.get("category") in _FOOD or "rating" in s or "why" in s):
+                pdf.set_font(_FAMILY, "", 8.5)
+                pdf.cell(26, 4.5, "")
+                pdf.cell(0, 4.5, _t("  |  ".join(c for c in chips if c)), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(30, 30, 30)
+        if d.get("routeUrl"):
+            pdf.set_font(_FAMILY, "", 9)
+            pdf.set_text_color(30, 90, 170)
+            pdf.cell(0, 5.5, _t("Day route in Google Maps"), link=d["routeUrl"], new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(30, 30, 30)
         pdf.ln(2)
 
     caveats = event.get("caveats") or []
+    caveats = [caveats] if isinstance(caveats, str) else caveats   # one caveat as text is one line, not letters
     if caveats:
         section("Notes")
         pdf.set_font(_FAMILY, "", 10)
@@ -259,8 +298,10 @@ def build_pdf(event, pool, daily_spend):
     pdf.ln(3)
     pdf.set_font(_FAMILY, "I", 8.5)
     pdf.set_text_color(120, 120, 120)
+    google = any(str(s.get("placeId", "")).startswith("gplace:") for d in it.get("days") or [] for s in d.get("stops") or [])
     pdf.multi_cell(0, 4.5, _t(f"Generated {datetime.utcnow():%d %b %Y %H:%M} UTC. Place data may include "
-                              f"OpenStreetMap contributors' data. Check opening hours before you go."),
+                              f"OpenStreetMap contributors' data.{' Ratings and hours from Google Maps.' if google else ''} "
+                              f"Check opening hours before you go."),
                    new_x="LMARGIN", new_y="NEXT")
     return bytes(pdf.output()), round(total, 2)
 
@@ -269,22 +310,23 @@ def lambda_handler(event, context):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
-    if not isinstance(event.get("tripSpec"), dict) or not isinstance(event.get("itinerary"), dict):
+    if (not isinstance(event, dict) or not isinstance(event.get("tripSpec"), dict)
+            or not isinstance(event.get("itinerary"), dict)):
         return _err("bad_input", "need tripSpec and itinerary objects")
     bucket = os.environ.get("PLANS_BUCKET")
     if not bucket:
         return _err("config", "PLANS_BUCKET environment variable is not set")
 
     it = event["itinerary"]
-    ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
-    ids += [s_.get("stayId") for s_ in it.get("stays") or [] if s_.get("stayId")]
-    ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
-    ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
-    pool = _pool_get(ids)
     try:
+        ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
+        ids += [s_.get("stayId") for s_ in it.get("stays") or [] if s_.get("stayId")]
+        ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
+        ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
+        pool = _pool_get(ids)
         pdf_bytes, total = build_pdf(event, pool, float(os.environ.get("DAILY_SPEND_SGD_PER_PERSON", "100")))
-    except (KeyError, ValueError) as e:
-        return _err("bad_input", f"could not build PDF: {e}")
+    except (KeyError, ValueError, TypeError, AttributeError, IndexError) as e:   # e.g. stays as ids, a null date
+        return _err("bad_input", f"could not build PDF: {type(e).__name__}: {e}")
 
     trip_id = str(event.get("tripId") or f"trip_{int(time.time())}")
     key = f"plans/{trip_id}/{datetime.utcnow():%Y%m%dT%H%M%S}.pdf"

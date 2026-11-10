@@ -40,6 +40,8 @@ DEPARTURE_BUFFER_MIN = 180   # leave for the airport this long before take-off
 TRANSFER_BUFFER_MIN = 60     # after a transfer arrives: get to the hotel / drop bags
 MAX_DAY_TRAVEL_MIN = int(os.environ.get("MAX_DAY_TRAVEL_MIN", "180"))   # travel between stops per day
 MAX_HOP_MIN = int(os.environ.get("MAX_HOP_MIN", "50"))                   # longest single hop
+MAX_RIDES_PER_DAY = int(os.environ.get("MAX_RIDES_PER_DAY", "1"))        # taxi rides between stops (between zones)
+MAX_RIDE_MIN = int(os.environ.get("MAX_RIDE_MIN", "30"))                 # longest taxi ride between stops
 MAX_KM_FROM_BASE = int(os.environ.get("MAX_KM_FROM_BASE", "120"))         # was 120
 DAY_TRIP_MAX_KM = 450        # a day trip further than this from the hotel is not a day trip
 DAY_TRIP_MAX_ONE_WAY_MIN = 210  # more than 3.5 h each way leaves no time to see anything
@@ -67,6 +69,12 @@ def _km(a, b):
     dp, dl = p2 - p1, math.radians(b["lng"] - a["lng"])
     h = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return 2 * r * math.asin(math.sqrt(h))
+
+
+def _full_day_park(p):
+    """A big theme park that takes the whole day (the same rule as tp-sequence-day)."""
+    return p.get("category") in ("requested", "attraction", "theme_park") and any(
+        w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q"))
 
 
 def _pool_get(ids):
@@ -111,6 +119,7 @@ def verify(spec, it, pool, daily_spend):
     hc = spec.get("hardConstraints") or {}
     max_stops = int(hc.get("maxStopsPerDay", 6))
     min_free = int(hc.get("minFreeMinutesPerDay", 0))
+    ride_cap = int(hc.get("maxRideMinutes") or MAX_RIDE_MIN)
     day_start, day_end = _hm(spec.get("dayStart", "09:00")), _hm(spec.get("dayEnd", "21:00"))
     n_days = (end - start).days + 1
     days = it.get("days") or []
@@ -324,7 +333,7 @@ def verify(spec, it, pool, daily_spend):
         base = base_stay(dt) if dt else None
         base_pt = base if base and base.get("lat") is not None else None
         hotel_pt, trip_min, busy = base_pt, 0, 0
-        travel_total, max_hop = 0, 0
+        travel_total, max_hop, rides, max_ride = 0, 0, 0, 0
         dtrip = d.get("dayTrip") if isinstance(d.get("dayTrip"), dict) else None
         if dtrip and dtrip.get("lat") is not None and dtrip.get("lng") is not None:
             tp = {"lat": float(dtrip["lat"]), "lng": float(dtrip["lng"]), "name": dtrip.get("place", "day trip")}
@@ -382,6 +391,9 @@ def verify(spec, it, pool, daily_spend):
                 busy += int(need)
                 travel_total += int(need)
                 max_hop = max(max_hop, int(need))
+                if idx > 0 and s_.get("travelBy") == "taxi":   # the ride from the hotel to the first stop is not counted
+                    rides += 1
+                    max_ride = max(max_ride, int(need))
             if idx == 0 and trip_min and a < day_start + trip_min:
                 rep.fail("day_trip", f"{dt}: {name} at {s_['arriveAt']} is before you can reach "
                                      f"{dtrip.get('place')} ({trip_min} min from the hotel)",
@@ -419,10 +431,14 @@ def verify(spec, it, pool, daily_spend):
                 and prev_place is not hotel_pt:
             busy += math.floor(_km(prev_place, hotel_pt) / FASTEST_CITY_KMH * 60)   # the trip back to the hotel
 
-        if stops and not trip_min:
-            if travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN:
+        # the ride limits are for city days: a day trip (dayTrip set) or a day at a full-day park shows no warning
+        park_day = any(_full_day_park(pool.get(s_.get("placeId"), {})) for s_ in stops)
+        if stops and not trip_min and not d.get("dayTrip") and not park_day:
+            if (travel_total > MAX_DAY_TRAVEL_MIN or max_hop > MAX_HOP_MIN or rides > MAX_RIDES_PER_DAY
+                    or max_ride > ride_cap):
                 rep.warn("commute", f"{dt}: {travel_total} min of travel between stops, longest hop {max_hop} min "
-                                    f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN})",
+                                    f"(limits {MAX_DAY_TRAVEL_MIN} / {MAX_HOP_MIN}), {rides} taxi rides between stops "
+                                    f"(limit {MAX_RIDES_PER_DAY}), longest ride {max_ride} min (limit {ride_cap})",
                          "Replace the stop farthest from the others with a place near them, or move it to a day "
                          "in the same area.", day=dt)
         free = (day_end - day_start) - busy
@@ -437,7 +453,51 @@ def verify(spec, it, pool, daily_spend):
     return {"ok": True, "passed": all(c["passed"] for c in checks), "checks": checks,
             "violations": rep.violations, "warnings": rep.warnings, "totals": totals}
 
+def _input_problem(spec, it):
+    """What makes the request unreadable (a bad_input message), or None. Checked before verify(), whose own
+    KeyError/TypeError/ValueError mean prices that cannot be read in the selected currency."""
+    def number(v):   # missing, or what verify() reads with int() / float()
+        if v is None:
+            return True
+        try:
+            int(v) if isinstance(v, str) else float(v)
+        except (TypeError, ValueError):
+            return False
+        return not isinstance(v, bool)
+    try:
+        int(spec.get("pax", 1))
+    except (TypeError, ValueError):
+        return "tripSpec.pax must be a whole number"
+    lists = {k: it.get(k) for k in ("days", "stays", "transfers") if it.get(k) is not None}
+    for k, v in lists.items():
+        if not isinstance(v, list) or not all(isinstance(x, dict) for x in v):
+            return f"itinerary.{k} must be a list of objects"
+    for d in it.get("days") or []:
+        try:   # a missing date fails the dates check instead
+            d.get("date") is None or date.fromisoformat(str(d["date"])[:10])
+        except ValueError:
+            return f"every day needs date as YYYY-MM-DD (got {d.get('date')!r})"
+        stops = d.get("stops")
+        if stops is not None and (not isinstance(stops, list) or not all(isinstance(s, dict) for s in stops)):
+            return f"{d['date']}: stops must be a list of objects"
+        if any(not number(s.get("travelMinutesFromPrev")) for s in stops or []):
+            return f"{d['date']}: travelMinutesFromPrev must be a number of minutes"
+        trip = d.get("dayTrip")
+        if isinstance(trip, dict) and (not number(trip.get("lat")) or not number(trip.get("lng"))
+                                       or not number(trip.get("travelMinutes"))):
+            return f"{d['date']}: dayTrip lat, lng and travelMinutes must be numbers"
+    return None
+
+
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
@@ -451,11 +511,17 @@ def lambda_handler(event, context):
         return _err("bad_input", "tripSpec needs startDate, endDate (YYYY-MM-DD) and budgetSGD")
     if end < start:
         return _err("bad_input", "endDate is before startDate")
+    problem = _input_problem(spec, it)
+    if problem:
+        return _err("bad_input", problem)
+    if isinstance(spec.get("mustVisit"), str):   # one placeId as text, not a list of letters
+        spec = {**spec, "mustVisit": [spec["mustVisit"]]}
 
     ids = [x for x in (it.get("flightOfferId"), it.get("stayId")) if x]
     ids += [st.get("stayId") for st in it.get("stays") or [] if st.get("stayId")]
     ids += [t.get("transferId") for t in it.get("transfers") or [] if t.get("transferId")]
     ids += [s.get("placeId") for d in it.get("days") or [] for s in d.get("stops") or [] if s.get("placeId")]
+    ids += [x for x in spec.get("mustVisit") or [] if isinstance(x, str)]   # so a missing one is named
     pool = _pool_get(ids)
     try:
         pool = normalize_cached_pool(spec, pool)

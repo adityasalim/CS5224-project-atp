@@ -12,6 +12,7 @@ Environment variables:
   GATEWAY_SCOPE       optional OAuth scope
 """
 import base64
+import http.client
 import json
 import os
 import time
@@ -71,6 +72,10 @@ class Gateway:
                 data = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             raise GatewayError(f"token request failed {e.code}: {e.read().decode(errors='replace')[:300]}")
+        except (OSError, http.client.HTTPException, ValueError) as e:   # unreachable, timeout, not JSON
+            raise GatewayError(f"token request failed: {type(e).__name__}: {e}")
+        if not isinstance(data, dict) or not data.get("access_token"):
+            raise GatewayError("token reply has no access_token")
         self._token = data["access_token"]
         self._expires = time.time() + int(data.get("expires_in", 3600))
         return self._token
@@ -105,6 +110,8 @@ class Gateway:
             raise GatewayError(f"{msg.get('method')} failed {e.code}: {body[:300]}", err)
         except urllib.error.URLError as e:
             raise GatewayError(f"cannot reach gateway: {e.reason}")
+        except (OSError, http.client.HTTPException, UnicodeDecodeError) as e:   # read timeout, reset, cut-off body
+            raise GatewayError(f"{msg.get('method')} failed: {type(e).__name__}: {e}")
 
     def _rpc(self, method, params=None):
         if self.version is None and method != "initialize":
@@ -114,14 +121,22 @@ class Gateway:
         if params is not None:
             msg["params"] = params
         ctype, body = self._post(msg)
-        if "text/event-stream" in ctype or body.lstrip().startswith(("event:", "data:")):
-            msgs = [json.loads(l[5:].strip()) for l in body.splitlines() if l.startswith("data:") and l[5:].strip()]
-            out = next((m for m in reversed(msgs) if "result" in m or "error" in m), {})
-        else:
-            out = json.loads(body) if body.strip() else {}
+        try:
+            if "text/event-stream" in ctype or body.lstrip().startswith(("event:", "data:")):
+                msgs = [json.loads(l[5:].strip()) for l in body.splitlines() if l.startswith("data:") and l[5:].strip()]
+                out = next((m for m in reversed(msgs) if isinstance(m, dict) and ("result" in m or "error" in m)), {})
+            else:
+                out = json.loads(body) if body.strip() else {}
+        except ValueError as e:   # an HTML error page or a cut-off reply
+            raise GatewayError(f"{method} returned a reply that is not JSON: {e}")
+        if not isinstance(out, dict):
+            raise GatewayError(f"{method} returned a reply that is not a JSON object")
         if "error" in out:
             raise GatewayError(f"{method} error: {json.dumps(out['error'])[:300]}", out["error"])
-        return out.get("result", {})
+        res = out.get("result", {})
+        if not isinstance(res, dict):   # "result": null or not an object
+            raise GatewayError(f"{method} returned a result that is not a JSON object")
+        return res
 
     def _initialize(self):
         """MCP handshake: offer the newest protocol version; if the Gateway lists the versions it
@@ -166,11 +181,18 @@ class Gateway:
     def call(self, short_or_full, arguments):
         """Calls a tool and returns the Lambda's JSON output as a dict."""
         name = short_or_full if "___" in short_or_full else self.full_name(short_or_full)
-        res = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        t0, res = time.monotonic(), None
+        try:
+            res = self._rpc("tools/call", {"name": name, "arguments": arguments})
+        finally:   # per-tool timing for latency work (also when the call fails)
+            print(json.dumps({"stage": "tool", "tool": name.split("___")[-1], "ms": round((time.monotonic() - t0) * 1000),
+                              "failed": res is None}))
         text = "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
         try:
             data = json.loads(text) if text else {}
         except json.JSONDecodeError:
+            data = None
+        if not isinstance(data, dict):   # not JSON, or JSON that is not an object (a list): callers read a dict
             data = {"ok": False, "error": "non_json_result", "message": text[:300]}
         if res.get("isError") and data.get("ok") is not False:
             data = {"ok": False, "error": "tool_error", "message": text[:300]}

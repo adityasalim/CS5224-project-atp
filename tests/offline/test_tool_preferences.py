@@ -1,6 +1,6 @@
 """Offline checks that the search tools honour the personal-preference parameters in their schemas,
 plus the search-size, ranking and fallback behaviour added for longer trips and big cities."""
-import os, sys, time
+import json, os, sys, time
 sys.path.insert(0, os.path.dirname(__file__))
 from fakes import load
 
@@ -15,6 +15,34 @@ assert "vegetarian" in food[0]["matches"] and "hidden gem" in food[0]["matches"]
 r = fp.lambda_handler({"city": "Tokyo", "categories": ["museum", "park"], "indoorOnly": True, "freeOnly": True,
                        "accessibility": ["wheelchair"]}, None)
 assert r["query"]["categories"] == ["museum"] and all("paid entry" not in p["tags"] for p in r["places"])
+
+# ---------------------------------------------------------------- find_places: geocode near the destination
+GEOCODES = []
+
+
+class FarFirst:
+    def geocode(self, **k):
+        GEOCODES.append(k)
+        return {"ResultItems": [{"Position": [121.18, 14.59]},      # Antipolo, Philippines
+                                {"Position": [138.73, 35.36]}]}     # Fujinomiya, about 100 km from Tokyo
+
+
+near_tokyo = {"lat": 35.68, "lng": 139.77}
+saved = fp._mock_mode, fp.boto3.client
+try:
+    fp._mock_mode, fp.boto3.client = (lambda: False), (lambda name, **k: FarFirst())
+    # a name that is not a landmark (LANDMARKS answers Mount Fuji before any geocode, tested in test_run6_tools)
+    q, error = fp._validate({"city": "Fujinomiya", "near": near_tokyo, "categories": ["viewpoint"]})
+    assert error is None and (q["lat"], q["lng"]) == (35.36, 138.73), q
+    assert GEOCODES[-1]["BiasPosition"] == [139.77, 35.68] and GEOCODES[-1]["MaxResults"] > 1, GEOCODES[-1]
+    r = fp.lambda_handler({"city": "Fujinomiya", "near": near_tokyo, "maxKm": 50, "categories": ["viewpoint"]}, None)
+    assert r["error"] == "unknown_location" and "within 50 km" in r["message"], r
+    q, error = fp._validate({"city": "Fujinomiya", "categories": ["viewpoint"]})
+    assert (q["lat"], q["lng"]) == (14.59, 121.18) and GEOCODES[-1] == {"QueryText": "Fujinomiya", "MaxResults": 1}
+finally:
+    fp._mock_mode, fp.boto3.client = saved
+assert fp._validate({"city": "Tokyo", "near": {"lat": 55.68, "lng": 12.57}})[1]["error"] == "unknown_location"
+assert fp._validate({"city": "Nikko", "near": near_tokyo})[0]["lat"] == 36.7199, "a known town near the point is kept"
 
 # ---------------------------------------------------------------- find_places: sizes and radii
 q, error = fp._validate({"city": "Tokyo", "categories": ["restaurant", "museum"]})
@@ -133,9 +161,108 @@ r = fl.lambda_handler({**base, "preferredAirlines": ["Test Jet"]}, None)
 assert r["offers"][0]["airline"] == "Test Jet"
 assert fl.lambda_handler({**base, "departAfter": "9am"}, None)["error"] == "bad_input"
 
+# sortBy "best" adds usable hours on the ground (return departure minus outbound arrival) at SGD 40 per hour per
+# traveller; an offer with an unknown time gets no bonus
+qb, _ = fl._validate({**base, "sortBy": "best"})
+
+
+def trip(i, price, arrive, leave):
+    return {"offerId": f"b{i}", "airline": "X", "priceTotalSGD": price, "slices": [
+        {"departAt": "2026-12-10T08:00:00", "arriveAt": arrive, "duration": "PT6H", "stops": 0, "flightNumbers": []},
+        {"departAt": leave, "arriveAt": "2026-12-15T23:00:00", "duration": "PT6H", "stops": 0, "flightNumbers": []}]}
+
+
+late_early = trip(1, 1000, "2026-12-10T22:00:00", "2026-12-15T08:00:00")     # 106 h on the ground
+early_late = trip(2, 1500, "2026-12-10T14:00:00", "2026-12-15T20:00:00")     # 126 h: 20 h x 2 pax x 40 > SGD 500
+unknown = trip(3, 1000, None, "2026-12-15T20:00:00")
+assert fl._ground_hours(late_early) == 106 and fl._ground_hours(unknown) == 0
+assert fl._ground_hours({"slices": late_early["slices"][:1]}) == 0, "one-way: no ground term"
+assert [o["offerId"] for o in fl._apply_prefs([dict(o) for o in (late_early, early_late, unknown)], qb)] == ["b2", "b1", "b3"]
+assert [o["offerId"] for o in fl._apply_prefs([dict(o) for o in (late_early, early_late, unknown)],
+                                                 {**qb, "sortBy": "price"})] == ["b1", "b3", "b2"]
+
+# return lookups (3 by default) go to the cheapest outbound and then to the ones with the most different times
+def serp_seg(dep, arr):
+    return {"departure_airport": {"id": "SIN", "time": dep}, "arrival_airport": {"id": "HND", "time": arr},
+            "airline": "X", "flight_number": "XX 1"}
+
+
+OUTS = [{"flights": [serp_seg(f"2026-12-10 {d}", a)], "price": p, "total_duration": 360, "departure_token": tok}
+        for tok, d, a, p in (("t1", "08:00", "2026-12-10 14:00", 500), ("t2", "08:30", "2026-12-10 14:30", 510),
+                             ("t3", "09:00", "2026-12-10 15:00", 520), ("t5", "13:00", "2026-12-10 19:00", 600),
+                             ("t4", "20:00", "2026-12-11 02:00", 700))]
+LOOKED = []
+
+
+def fake_serp(params):
+    if not params.get("departure_token"):
+        return {"other_flights": OUTS}, None
+    LOOKED.append(params["departure_token"])
+    return {"best_flights": [{"flights": [serp_seg("2026-12-15 10:00", "2026-12-15 16:00")], "price": 900}]}, None
+
+
+saved = fl._serp_get, os.environ.pop("SERPAPI_RETURN_LOOKUPS", None)
+try:
+    fl._serp_get, fl._DEADLINE = fake_serp, None
+    found, err = fl._call_serpapi(fl._api_query(fl._validate(base)[0]), "test-key")
+    assert err is None and LOOKED == ["t1", "t4", "t5"], LOOKED     # not the three cheapest morning flights
+finally:
+    fl._serp_get = saved[0]
+    if saved[1] is not None:
+        os.environ["SERPAPI_RETURN_LOOKUPS"] = saved[1]
+
 hop = {"from": {"city": "Copenhagen", "airport": "CPH"}, "to": {"city": "Lofoten", "airport": "BOO"},
        "date": "2026-12-13", "pax": 2}
 assert tr.lambda_handler({**hop, "prefer": "ground", "avoidOvernight": False}, None)["options"][0]["mode"] == "ground"
+
+# Tokyo -> Kyoto uses the JP rail profile: one rail option and no flight search (more in test_rail_hops.py)
+r = tr.lambda_handler({"from": {"city": "Tokyo", "airport": "HND"}, "to": {"city": "Kyoto", "airport": "KIX"},
+                       "date": "2026-12-17", "pax": 3}, None)
+assert [o["mode"] for o in r["options"]] == ["ground"], r["options"]
+o = r["options"][0]
+assert (o["durationMinutes"], o["priceTotalSGD"], o["departAt"][11:], o["arriveAt"][11:]) == (128, 376.02, "09:00", "11:08"), o
+assert o["summary"] == "Train Tokyo → Kyoto (fare estimate)" and o["estimate"] and "rome2rio" in o["bookingUrl"]
+assert tr.lambda_handler({"from": {"city": "Osaka, Japan", "lat": 34.69, "lng": 135.50}, "to": {"city": "Tokyo"}, "date": "2026-12-17", "pax": 1},
+                         None)["options"][0]["summary"] == "Train Osaka, Japan → Tokyo (fare estimate)"
+
+# a named theme park takes the day; other named places keep 90 minutes
+sd = load("tp-sequence-day")
+assert sd._default_visit({"category": "requested", "name": "Tokyo DisneySea"}) == 480
+assert sd._default_visit({"category": "requested", "name": "teamLab Planets"}) == 90
+
+# nature uses the 20 km outdoor floor; hiking still searches 40 km out
+qn, _ = fp._validate({"city": "Kyoto", "categories": ["nature", "hiking"]})
+assert fp._radius_km("nature", qn) == 20.0 and fp._radius_km("hiking", qn) == 40.0
+
+# a coffee keyword comes back as a cafe, a restaurant keyword as a restaurant
+qk, _ = fp._validate({"city": "Kyoto", "keywords": ["pour-over coffee", "halal restaurant"]})
+kw_places = [fp._place(f"t:{i}", f"Place {i}", "activity", 35.0 + i / 100, 135.76, qk, activity=k)
+             for i, k in enumerate(["pour-over coffee", "halal restaurant"])]
+assert [p["category"] for p in fp._rank(kw_places, qk)] == ["cafe", "restaurant"]
+
+# "Cafés & desserts" and "Fine dining" from the form: the chip becomes the cafe and dessert categories, the cap is 6
+qc, _ = fp._validate({"city": "Kyoto", "categories": ["temple"],
+                      "cuisine": "japanese|italian|french|turkish|middle_eastern|cafés_&_desserts|fine_dining|american"})
+assert qc["categories"] == ["cafe", "dessert", "temple"], qc["categories"]
+assert qc["cuisine"] == "japanese|italian|french|turkish|middle_eastern|fine_dining|american", qc["cuisine"]
+qr, _ = fp._validate({"city": "Kyoto", "categories": ["restaurant"], "cuisine": qc["cuisine"]})
+assert [t[1] for t in fp._text_targets(qr)][-1] == "fine dining restaurant" and len(fp._text_targets(qr)) == 6
+assert fp._validate({"city": "Kyoto", "keywords": ["specialty coffee"]})[0]["categories"] == ["cafe"]
+
+# web-searched names are looked up as ordinary cafes or restaurants; names the traveler gave stay requested
+w = fp.lambda_handler({"city": "Kyoto", "names": ["Weekenders Coffee"], "namesCategory": "cafe"}, None)["places"][0]
+assert w["category"] == "cafe" and "requested by user" not in w["tags"] and w.get("matches") != ["requested"], w
+n = fp.lambda_handler({"city": "Kyoto", "names": ["teamLab Planets"], "namesCategory": "bar"}, None)["places"][0]
+assert n["category"] == "requested" and "requested by user" in n["tags"], n
+
+# the PDF footer credits Google Maps only when a stop came from Google (mock places here; see test_ui_preferences)
+import fakes
+pdf_text = []
+fakes.FPDF.multi_cell = lambda self, w, h, text="", **k: pdf_text.append(text)
+pdf_event = json.load(open(fakes.REPO / "lambdas" / "test-events" / "tp-render-pdf.json"))
+assert load("tp-render-pdf").lambda_handler(pdf_event, None)["ok"]
+assert pdf_text and not any("Google Maps" in t for t in pdf_text)
+del fakes.FPDF.multi_cell
 print("TOOL PREFERENCES OK")
 
 
@@ -206,3 +333,21 @@ try:
 finally:
     os.environ.pop("STAYS_PROVIDERS", None)
 print("STAYS PROVIDER ORDER OK")
+
+# ---------------------------------------------------------------- Gateway tool schemas use only keys the Gateway accepts
+import pathlib
+SCHEMA_KEYS = {"type", "properties", "required", "items", "description"}   # the Gateway's SchemaDefinition
+
+
+def bad_keys(node, path):
+    if isinstance(node, dict):
+        out = [f"{path}.{k}" for k in node if k not in SCHEMA_KEYS]
+        out += [p for k, v in (node.get("properties") or {}).items() for p in bad_keys(v, f"{path}.properties.{k}")]
+        return out + (bad_keys(node["items"], path + ".items") if "items" in node else [])
+    return []
+
+
+for f in sorted((pathlib.Path(__file__).resolve().parents[2] / "lambdas" / "schemas").glob("*.json")):
+    tool = json.loads(f.read_text(encoding="utf-8"))
+    assert not bad_keys(tool["inputSchema"], f.name + ".inputSchema"), bad_keys(tool["inputSchema"], f.name)
+print("SCHEMA KEYS OK")

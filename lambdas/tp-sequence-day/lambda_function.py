@@ -8,10 +8,16 @@ ROUTE_MATRIX_FUNCTION is set; otherwise from the same distance estimate it uses.
 Opening hours are read for the planned date (hours_util): weekday rules, lunch breaks and closed days are
 respected, and a place that is closed that day is returned in "unscheduled".
 
-Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day starts no earlier
-than 11:30 and is nudged into the 12:00-14:00 window; any later restaurant or street-food stop starts no earlier
-than 17:30 (dinner). A keyword result such as "halal restaurant" (category "activity") counts as a restaurant.
-Cafes and desserts have no time floor, so a morning coffee is possible.
+Meals (when "lunch" is true, the default): the first restaurant or street-food stop of the day is lunch when it can
+start between 11:30 and 14:30 (nudged into the 12:00-14:00 window); when it cannot start by 14:30 it is dinner (no
+earlier than 17:30) and the response says "mealGaps": ["lunch"] (also when no meal stop fits at all), so the agent can
+add a lunch. Any later restaurant or street-food stop starts no earlier than 17:30 (dinner). A keyword result such as
+"halal restaurant" (category "activity") counts as a restaurant. Cafes and desserts have no time floor, so a morning
+coffee is possible.
+
+Full-day parks (_full_day_park: Disney, Universal Studios, Fuji-Q) use their pool opening hours, or 09:00-21:00 when
+the pool has none, and the visit runs from arrival to closing (at least 480 min, home by dayEnd); stops after it fit
+in what is left of the day or are unscheduled. A visitMinutes override for the park keeps that length.
 
 Optional limits (0 or missing = no limit): "maxStops" and "minFreeMinutes" keep the day within the verifier's
 pacing and free-time rules; stops that do not fit are returned in "unscheduled".
@@ -24,16 +30,19 @@ Input event (places can be given by ID only; details are read from the pool):
   {"date": "2026-12-11", "stayId": "mock:stay_1",
    "placeIds": ["osm:way/123", "osm:node/456"],
    "visitMinutes": {"osm:way/123": 90},          # optional overrides
+   "zones": {"osm:way/123": "Z1"},               # optional zone id per place: the day finishes a zone, then rides on
    "dayStart": "09:00", "dayEnd": "21:00", "mode": "walk", "lunch": true,
-   "maxStops": 6, "minFreeMinutes": 60}
+   "maxStops": 6, "minFreeMinutes": 60,
+   "pinned": ["osm:way/123"]}                    # optional: places the traveler named; default = category "requested"
   Instead of stayId/placeIds you can pass full objects:
   "start": {"id": "hotel", "lat": .., "lng": ..},
   "stops": [{"placeId": "..", "name": "..", "lat": .., "lng": .., "visitMinutes": 90,
-             "openSimple": {"open": "09:00", "close": "17:00"}}]
+             "openSimple": {"open": "09:00", "close": "17:00"}, "zone": "Z1"}]
 """
 import json
 import math
 import os
+from datetime import date
 
 import boto3
 
@@ -54,10 +63,17 @@ MEAL_CATEGORIES = ("restaurant", "street_food")
 # are not in this list on purpose: they stay long activities.
 FOOD_KEYWORDS = ("restaurant", "eatery", "dining")
 LUNCH_FLOOR = 11 * 60 + 30
+LUNCH_LATEST = 14 * 60 + 30   # a first meal that cannot start by then is the dinner
 DINNER_FLOOR = 17 * 60 + 30
+PARK_STOP_GAP_MIN = 15   # a full-day park leaves this much travel time per other planned stop after it
+PARK_HOURS = (9 * 60, 21 * 60)   # a full-day park's opening hours when the pool has none
 WALK_KMH, WALK_DETOUR = 4.5, 1.3
 CAR_KMH, CAR_DETOUR, CAR_OVERHEAD_MIN = 22.0, 1.4, 5
-MAX_WALK_MINUTES = 30  # longer walks switch to the car/taxi time for that hop (mode "walk")
+# Longer walks switch to the car/taxi time for that hop (mode "walk"). 45 keeps a planner zone (1.2 km radius, so
+# members at most 2.4 km apart: ceil(2.4 x 1.3 / 4.5 x 60) = 42 min) on foot; pairs of a sparse 1.6 km zone more
+# than about 2.6 km apart take a short taxi.
+MAX_WALK_MINUTES = 45
+LOCK_MAX_WAIT_MIN = 45   # leave a walkable group early only if its next stop would wait longer
 
 _dynamodb = boto3.resource("dynamodb")
 
@@ -120,9 +136,12 @@ def _matrix(points, mode):
             resp = boto3.client("lambda").invoke(
                 FunctionName=fn, Payload=json.dumps({"points": points, "mode": mode}).encode())
             data = json.loads(resp["Payload"].read())
-            if data.get("ok"):
-                return data["minutes"], data.get("source", "route-matrix")
-            print("route matrix error:", data)
+            m = data.get("minutes") if isinstance(data, dict) and data.get("ok") else None
+            n = len(points)
+            if (isinstance(m, list) and len(m) == n and all(isinstance(r, list) and len(r) == n for r in m)
+                    and all(isinstance(x, (int, float)) and not isinstance(x, bool) for r in m for x in r)):
+                return m, data.get("source", "route-matrix")
+            print("route matrix error:", str(data)[:300])
         except Exception as e:  # noqa: BLE001
             print("route matrix invoke failed:", e)
     return [[_estimate(a, b, mode) for b in points] for a in points], "estimate"
@@ -155,46 +174,74 @@ def _default_visit(p):
             return 240
         if any(w in kw for w in ("climb", "boulder")):
             return 150
+    if _full_day_park(p):
+        return 480
     return DEFAULT_VISIT.get(p.get("category"), 60)
+
+
+def _full_day_park(p):
+    """A big theme park that takes the whole day (Google can list it as an attraction or a theme park)."""
+    return p.get("category") in ("requested", "attraction", "theme_park") and any(
+        w in (p.get("name") or "").lower() for w in ("disney", "universal studios", "fuji-q"))
 
 
 def _resolve(event):
     """Builds start + stops from IDs (via the pool) and/or full objects."""
-    ids = list(event.get("placeIds") or [])
+    place_ids = [event["placeIds"]] if isinstance(event.get("placeIds"), str) else list(event.get("placeIds") or [])
+    ids = list(place_ids)
     if event.get("stayId"):
         ids.append(event["stayId"])
     pool = _pool_get(ids)
 
     if event.get("start"):
         s = event["start"]
-        start = {"id": str(s.get("id", "start")), "name": s.get("name", "Hotel"),
-                 "lat": float(s["lat"]), "lng": float(s["lng"])}
+        try:
+            start = {"id": str(s.get("id", "start")), "name": s.get("name", "Hotel"),
+                     "lat": float(s["lat"]), "lng": float(s["lng"])}
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return None, None, _err("bad_input", "start needs numeric lat and lng")
     elif event.get("stayId"):
         st = pool.get(event["stayId"])
-        if not st or st.get("lat") is None:
-            return None, None, _err("not_in_pool", f"stayId {event['stayId']} not found; search stays again")
+        if not st or st.get("lat") is None or st.get("lng") is None:
+            return None, None, _err("not_in_pool", f"stayId {event['stayId']} not found or without a location; "
+                                                   f"search stays again")
         start = {"id": st["id"], "name": st["name"], "lat": st["lat"], "lng": st["lng"]}
     else:
         return None, None, _err("bad_input", "give stayId or start {lat, lng}")
 
+    def park_hours(hours):
+        """A full-day park without opening hours in the pool is open PARK_HOURS."""
+        return {"known": True, "closed": False, "intervals": [PARK_HOURS]} if not hours["known"] else hours
+
     overrides = event.get("visitMinutes") or {}
+    zones = event.get("zones") or {}
     stops, missing = [], []
-    for pid in event.get("placeIds") or []:
+    for pid in place_ids:
         p = pool.get(pid)
-        if not p:
+        if not p or p.get("lat") is None or p.get("lng") is None:
             missing.append(pid)
             continue
+        park = _full_day_park(p)
+        hours = hours_for(p, event.get("date"))
         stops.append({"placeId": pid, "name": p["name"], "category": p.get("category"),
-                      "activity": p.get("activity"),
+                      "activity": p.get("activity"), "zone": zones.get(pid),
                       "lat": p["lat"], "lng": p["lng"],
-                      "hours": hours_for(p, event.get("date")),
-                      "visitMinutes": int(overrides.get(pid, _default_visit(p)))})
+                      "hours": park_hours(hours) if park else hours,
+                      "visitMinutes": int(overrides.get(pid, _default_visit(p))),
+                      **({"toClose": True} if park and pid not in overrides else {})})
     for s in event.get("stops") or []:
+        try:
+            lat, lng = float(s["lat"]), float(s["lng"])
+        except (KeyError, TypeError, ValueError):
+            return None, None, _err("bad_input", f"stop {s.get('placeId')} needs numeric lat and lng")
+        park = _full_day_park(s)
+        hours = hours_for({"openSimple": s.get("openSimple")})
         stops.append({"placeId": str(s["placeId"]), "name": s.get("name", s["placeId"]),
-                      "category": s.get("category"), "activity": s.get("activity"),
-                      "lat": float(s["lat"]), "lng": float(s["lng"]),
-                      "hours": hours_for({"openSimple": s.get("openSimple")}),
-                      "visitMinutes": int(s.get("visitMinutes") or _default_visit(s))})
+                      "category": s.get("category"), "activity": s.get("activity"), "zone": s.get("zone"),
+                      "lat": lat, "lng": lng,
+                      "hours": park_hours(hours) if park else hours,
+                      "visitMinutes": int(s.get("visitMinutes") or _default_visit(s)),
+                      **({"toClose": True} if park and not s.get("visitMinutes") else {})})
     if missing:
         return None, None, _err("not_in_pool", f"placeIds not found (expired or never searched): {missing}",
                                 missing=missing)
@@ -205,35 +252,94 @@ def _resolve(event):
     return start, stops, None
 
 
+def _walk_groups(walk_m, n):
+    """Group id per matrix index (0 = start): stops joined by a chain of walks of MAX_WALK_MINUTES or less."""
+    g = list(range(n + 1))
+
+    def root(i):
+        while g[i] != i:
+            i = g[i]
+        return i
+    for i in range(1, n + 1):
+        for j in range(i + 1, n + 1):
+            if max(walk_m[i][j], walk_m[j][i]) <= MAX_WALK_MINUTES:
+                g[root(j)] = root(i)
+    return [root(i) for i in range(n + 1)]
+
+
+def _zone_groups(stops):
+    """Group id per matrix index (0 = start): stops that share a zone id; a stop without one is a group of its own."""
+    first = {}
+    return [0] + [first.setdefault(s["zone"], i) if s.get("zone") else i for i, s in enumerate(stops, 1)]
+
+
 def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=False,
-             max_stops=0, min_free=0):
+             max_stops=0, min_free=0, first=None, park_first=False):
     """Greedy: from the current spot, pick the stop that can be finished earliest (waiting for
     opening time if needed). With lunch on, the first restaurant / street-food stop is the lunch (not before
     11:30, preferred around 12:00-14:00) and a later one is dinner (not before 17:30); cafes are unrestricted.
-    max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules."""
+    max_stops / min_free (0 = no limit) keep the day within the verifier's pacing and free-time rules.
+    In walk mode the day starts in the walkable group farthest from the hotel and finishes a group before it takes a
+    ride to the next one, unless the group's best next stop would wait more than LOCK_MAX_WAIT_MIN. A group is a zone
+    when the stops carry zone ids, else a chain of walks of MAX_WALK_MINUTES or less. first (a group id) starts the
+    day in that group instead. park_first starts the day with a full-day park (_full_day_park) when one fits."""
     t, cur = day_start, 0                       # index 0 = start (hotel)
     remaining = list(range(1, len(stops) + 1))  # matrix index i -> stops[i-1]
     out = []
     meals_done = 0                              # meal stops (restaurant / street food) already scheduled
     busy = 0                                    # visit + travel minutes used so far
-    while remaining:
-        if max_stops and len(out) >= max_stops:
-            break
+
+    def _park_last(s, i, begin, back, busy, travel):
+        """When a full-day park visit must end so that the day's other planned stops still fit after it: only the
+        stops still open late enough after the park's minimum visit count (each with its visit and
+        PARK_STOP_GAP_MIN to get there), at most as many as max_stops leaves room for, and the park ends no later
+        than each such stop's closing time minus the time of the stops closing no later than it."""
+        floor_end = begin + s["visitMinutes"]
+        later = []
+        for j in remaining:
+            if j == i:
+                continue
+            o = stops[j - 1]
+            need = o["visitMinutes"] + PARK_STOP_GAP_MIN
+            if not o["hours"]["known"]:
+                later.append((need, day_end - back))
+            elif not o["hours"]["closed"]:
+                c = max((c for _, c in o["hours"]["intervals"] if c >= floor_end + need), default=None)
+                if c is not None:
+                    later.append((need, min(c, day_end - back)))
+        if max_stops:
+            later = sorted(later, key=lambda x: x[0])[:max(0, max_stops - len(out) - 1)]
+        rest = sum(n for n, _ in later)
+        # earliest deadline first: each stop must fit, with the ones closing no later than it, before it closes
+        last = min((c - sum(n2 for n2, c2 in later if c2 <= c) for _, c in later), default=day_end - back)
+        if min_free:
+            last = min(last, begin + (day_end - day_start) - min_free - busy - travel - back - rest)
+        return last
+
+    def pick(cands):
         best = None
-        for i in remaining:
+        for i in cands:
             s = stops[i - 1]
             travel, how = _hop(walk_m, car_m, cur, i, mode)
             arrive = t + travel
             is_meal = lunch and _is_meal(s)
-            floor = (DINNER_FLOOR if meals_done else LUNCH_FLOOR) if is_meal else 0
-            begin = fit_visit(s["hours"], max(arrive, floor), s["visitMinutes"])
+            begin = None
+            if is_meal and not meals_done:      # the first meal is lunch only when it can start by LUNCH_LATEST
+                begin = fit_visit(s["hours"], max(arrive, LUNCH_FLOOR), s["visitMinutes"])
+                begin = begin if begin is not None and begin <= LUNCH_LATEST else None
+            if begin is None:                   # else a meal is dinner
+                begin = fit_visit(s["hours"], max(arrive, DINNER_FLOOR if is_meal else 0), s["visitMinutes"])
             if begin is None:                   # closed that day, or never fits an opening interval
                 continue
-            end = begin + s["visitMinutes"]
             back, _ = _hop(walk_m, car_m, i, 0, mode)
+            visit = s["visitMinutes"]
+            if s.get("toClose"):   # a full-day park: from arrival to closing, home by the day's end, free time kept
+                close = next(c for o, c in sorted(s["hours"]["intervals"]) if o <= begin and begin + visit <= c)
+                visit = max(visit, min(close, _park_last(s, i, begin, back, busy, travel)) - begin)
+            end = begin + visit
             if end + back > day_end:
                 continue
-            if min_free and busy + travel + s["visitMinutes"] + back > (day_end - day_start) - min_free:
+            if min_free and busy + travel + visit + back > (day_end - day_start) - min_free:
                 continue                        # would leave less free time than required
             score = end
             if long_first and s["visitMinutes"] >= 120:
@@ -242,6 +348,25 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
                 score -= 60                     # nudge the lunch into the lunch window
             if best is None or score < best[0]:
                 best = (score, i, travel, how, arrive, begin, end)
+        return best
+
+    group = None if mode != "walk" else (_zone_groups(stops) if any(s.get("zone") for s in stops)
+                                         else _walk_groups(walk_m, len(stops)))
+    while remaining:
+        if max_stops and len(out) >= max_stops:
+            break
+        parks = [i for i in remaining if park_first and not out and _full_day_park(stops[i - 1])]
+        best = pick(parks) if parks else None   # the park opens the day, the other stops come after it
+        if best is None:
+            if group and not out:   # start in the walkable group farthest from the hotel: one longer ride in, a short one home
+                far = first if first is not None else max(
+                    {group[i] for i in remaining}, key=lambda g_: (min(car_m[0][i] for i in remaining if group[i] == g_), -g_))
+                here = [i for i in remaining if group[i] == far]
+            else:
+                here = [i for i in remaining if group and group[i] == group[cur]]
+            best = pick(here) if here else None
+            if best is None or best[5] - best[4] > LOCK_MAX_WAIT_MIN:   # nothing in this walkable group fits now
+                best = pick(remaining)
         if best is None:
             break
         _, i, travel, how, arrive, begin, end = best
@@ -249,10 +374,10 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
         out.append({"placeId": s["placeId"], "name": s["name"], "category": s.get("category"),
                     "lat": s["lat"], "lng": s["lng"], "travelMinutesFromPrev": travel, "travelBy": how,
                     "arriveAt": _fmt(begin), "departAt": _fmt(end),
-                    "waitMinutes": max(begin - arrive, 0), "visitMinutes": s["visitMinutes"]})
+                    "waitMinutes": max(begin - arrive, 0), "visitMinutes": end - begin})
         if lunch and _is_meal(s):
             meals_done += 1
-        busy += travel + s["visitMinutes"]
+        busy += travel + end - begin
         t, cur = end, i
         remaining.remove(i)
     back_minutes = _hop(walk_m, car_m, cur, 0, mode)[0] if out else 0
@@ -265,6 +390,14 @@ def schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_
 
 
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     if isinstance(event, str):
         event = json.loads(event)
     event = event or {}
@@ -272,6 +405,11 @@ def lambda_handler(event, context):
         day_start, day_end = _hm(event.get("dayStart", "09:00")), _hm(event.get("dayEnd", "21:00"))
     except ValueError:
         return _err("bad_input", "dayStart/dayEnd must be HH:MM")
+    if event.get("date") is not None:
+        try:
+            date.fromisoformat(str(event["date"])[:10])   # as hours_util reads it
+        except ValueError:
+            return _err("bad_input", "date must be YYYY-MM-DD")
     if day_end - day_start < 60:
         return _err("bad_input", "day window must be at least 1 hour")
     mode = str(event.get("mode", "walk")).lower()
@@ -294,13 +432,32 @@ def lambda_handler(event, context):
     lunch = bool(event.get("lunch", True))
     max_stops = int(event.get("maxStops") or 0)
     min_free = int(event.get("minFreeMinutes") or 0)
-    # Try "earliest finish first" and "long activities first"; keep the one that fits the most stops,
-    # then the one with the least waiting.
-    options = [schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
-                        max_stops=max_stops, min_free=min_free)
-               for lf in (False, True)]
-    ordered, unscheduled, back, free = max(
-        options, key=lambda o: (len(o[0]), -sum(x["waitMinutes"] for x in o[0]), o[3]))
+    # Try "earliest finish first" and "long activities first", and with zone ids each zone as the first one (on a day
+    # with a theme park each of these also with the park first); keep the one that fits the most pinned
+    # places, then opens with the park, then the most stops, then never goes back to a zone it left, then starts in the
+    # farther zone, then has the least waiting.
+    pinned = ({x for x in event["pinned"] if isinstance(x, str)} if isinstance(event.get("pinned"), list)
+              else {s["placeId"] for s in stops if s.get("category") == "requested"})
+    firsts = [None] + (sorted(set(_zone_groups(stops)[1:])) if mode == "walk" and any(s.get("zone") for s in stops)
+                       else [])
+    zone_of = {s["placeId"]: s.get("zone") or s["placeId"] for s in stops}
+
+    def returns(o):
+        z = [zone_of[x["placeId"]] for x in o[0]]
+        runs = [a for k, a in enumerate(z) if k == 0 or a != z[k - 1]]
+        return len(runs) - len(set(runs))
+    parks = {s["placeId"] for s in stops if _full_day_park(s)}   # a full-day park opens the day; a small one need not
+    options = [(f, schedule(start, stops, walk_m, car_m, day_start, day_end, mode, lunch, long_first=lf,
+                            max_stops=max_stops, min_free=min_free, first=f, park_first=pf))
+               for pf in ((False, True) if parks else (False,)) for lf in (False, True) for f in firsts]
+    ordered, unscheduled, back, free = max(options, key=lambda fo: (
+        sum(x["placeId"] in pinned for x in fo[1][0]), bool(fo[1][0]) and fo[1][0][0]["placeId"] in parks,
+        len(fo[1][0]), -returns(fo[1]), fo[0] is None,
+        -sum(x["waitMinutes"] for x in fo[1][0]), fo[1][3]))[1]
+    # a day with meal stops but no lunch (its first meal could not start by LUNCH_LATEST): the agent can add one
+    meal_ids = {s["placeId"] for s in stops if _is_meal(s)}
+    lunch_had = any(o["placeId"] in meal_ids and _hm(o["arriveAt"]) <= LUNCH_LATEST for o in ordered)
     return {"ok": True, "date": event.get("date"), "start": start, "stops": ordered,
             "returnToStartMinutes": back, "freeTimeMinutes": free, "unscheduled": unscheduled,
+            "mealGaps": ["lunch"] if lunch and meal_ids and not lunch_had else [],
             "dayStart": _fmt(day_start), "dayEnd": _fmt(day_end), "travelTimeSource": src}

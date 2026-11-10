@@ -5,15 +5,18 @@ prices in SGD.
 Providers, in order (the "source" field says which one answered):
   1. SerpApi Google Flights (real airlines, times and prices as shown on Google Flights; no booking -
      each offer has a bookingUrl to Google Flights). Needs SERPAPI_KEY in the secret.
-     A round trip or open-jaw search uses 1 + SERPAPI_RETURN_LOOKUPS SerpApi searches (default 1 + 2 = 3);
-     results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
+     SerpApi searches per call: one-way 1; round trip or open-jaw 1 + SERPAPI_RETURN_LOOKUPS (default 1 + 3 = 4).
+     Above economy one more, nonstop-only search runs beside the main one (one-way 2, round trip default 5, at most 6). A failed
+     request is retried once. Results are cached for CACHE_TTL_SECONDS, so repeated searches cost nothing.
   2. Duffel (test mode returns the fake "Duffel Airways"; live mode returns bookable fares). Needs DUFFEL_TOKEN.
   3. MOCK_MODE=true, or no keys at all: built-in sample data.
 
 Environment variables:
   SECRET_ARN   ARN of the Secrets Manager secret holding {"SERPAPI_KEY": "...", "DUFFEL_TOKEN": "..."}
                (either key may be missing)
-  SERPAPI_RETURN_LOOKUPS  optional, default 2 (0-4): outbound options whose return flights are looked up
+  SERPAPI_RETURN_LOOKUPS  optional, default 3 (0-4): outbound options whose return flights are looked up (the
+               cheapest nonstop, the cheapest, then the ones with the most different departure and arrival times;
+               above economy, options with a segment in another cabin are skipped)
   CACHE_TABLE  DynamoDB cache table name (e.g. tp-dev-api-cache)
   MOCK_MODE    "true" = return built-in sample data, no API call (default "true")
   CACHE_TTL_SECONDS  optional, default 21600 (6 hours)
@@ -30,7 +33,8 @@ import json
 import os
 import re
 import time
-from datetime import date
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import date, datetime
 from decimal import Decimal
 
 import boto3
@@ -41,6 +45,7 @@ SERPAPI_URL = "https://serpapi.com/search"
 SERPAPI_CLASS = {"economy": 1, "premium_economy": 2, "business": 3, "first": 4}
 MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "15"))
 RETURNS_PER_LOOKUP = int(os.environ.get("SERPAPI_RETURNS_PER_LOOKUP", "8"))   # kept from each return lookup, no extra calls
+SPREAD_POOL = 10   # the cheapest outbound options that the return lookups are spread across
 CABINS = {"economy", "premium_economy", "business", "first"}
 
 # Approximate conversion rates to SGD, fixed for reproducibility. Update and re-date when needed.
@@ -79,6 +84,19 @@ def _to_sgd(amount, currency):
     return round(float(amount) * rate, 2) if rate else None
 
 
+def _price(v):
+    """A fare as a float: a number, or text such as "1200" or "$1,234"; None when there is no usable price."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if v > 0 else None
+    try:
+        p = float(re.sub(r"[^\d.]", "", str(v)))
+    except ValueError:
+        return None
+    return p if p > 0 else None
+
+
 def _validate(event):
     iata = re.compile(r"^[A-Z]{3}$")
     origin = str(event.get("origin", "")).upper()
@@ -88,13 +106,16 @@ def _validate(event):
     try:
         depart = date.fromisoformat(event["departDate"])
         ret = date.fromisoformat(event["returnDate"]) if event.get("returnDate") else None
-    except (KeyError, ValueError):
+    except (KeyError, ValueError, TypeError):
         return None, _err("bad_input", "departDate (and optional returnDate) must be YYYY-MM-DD")
     if depart < date.today():
         return None, _err("bad_input", "departDate is in the past")
     if ret and ret < depart:
         return None, _err("bad_input", "returnDate is before departDate")
-    pax = int(event.get("pax", 1))
+    try:
+        pax = int(event.get("pax", 1))
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "pax must be a whole number between 1 and 9")
     if not 1 <= pax <= 9:
         return None, _err("bad_input", "pax must be between 1 and 9")
     cabin = str(event.get("cabin", "economy")).lower()
@@ -113,12 +134,18 @@ def _validate(event):
             return None, _err("bad_input", f"{k} must be HH:MM (24h), e.g. 09:00")
         windows[k] = v or None
     max_stops = event.get("maxStops")
-    airlines = lambda k: sorted({str(a).strip().lower() for a in (event.get(k) or []) if str(a).strip()})[:5]
+    try:
+        max_stops = None if max_stops in (None, "") else min(max(int(max_stops), 0), 3)
+    except (TypeError, ValueError):
+        return None, _err("bad_input", "maxStops must be a whole number 0-3")
+    # a single airline given as a string is one airline, not a list of letters
+    airlines = lambda k: sorted({str(a).strip().lower() for a in ([event[k]] if isinstance(event.get(k), str)
+                                                                  else event.get(k) or []) if str(a).strip()})[:5]
     sort_by = str(event.get("sortBy") or "price").lower()
     return {"origin": origin, "destination": dest, "departDate": depart.isoformat(),
             "returnDate": ret.isoformat() if ret else None, "returnFrom": ret_from,
             "pax": pax, "cabin": cabin,
-            "maxStops": None if max_stops in (None, "") else min(max(int(max_stops), 0), 3), **windows,
+            "maxStops": max_stops, **windows,
             "preferredAirlines": airlines("preferredAirlines"), "avoidAirlines": airlines("avoidAirlines"),
             "sortBy": sort_by if sort_by in ("price", "duration", "best") else "price"}, None
 
@@ -139,6 +166,18 @@ def _minutes(iso):
         return None
     d, h, mi = (int(x or 0) for x in m.groups())
     return d * 1440 + h * 60 + mi
+
+
+def _ground_hours(o):
+    """Usable hours at the destination: return departure minus outbound arrival (local times), 0 when unknown."""
+    sl = o.get("slices") or []
+    if len(sl) < 2 or not sl[0].get("arriveAt") or not sl[-1].get("departAt"):
+        return 0
+    try:
+        arrive, leave = (datetime.fromisoformat(str(x)[:19]) for x in (sl[0]["arriveAt"], sl[-1]["departAt"]))
+    except ValueError:
+        return 0
+    return max((leave - arrive).total_seconds() / 3600, 0)
 
 
 def _apply_prefs(offers, q):
@@ -185,8 +224,8 @@ def _apply_prefs(offers, q):
     pref = lambda o: -int("preferred airline" in o["matches"])
     if q["sortBy"] == "duration":
         key = lambda o: (pref(o), o["totalMinutes"] or 10 ** 6, price(o))
-    elif q["sortBy"] == "best":   # cheap and short: each hour of travel counts as SGD 40 per traveller
-        key = lambda o: (pref(o), price(o) + (o["totalMinutes"] or 0) / 60 * 40 * q["pax"])
+    elif q["sortBy"] == "best":   # cheap, short and long on the ground: each hour counts as SGD 40 per traveller
+        key = lambda o: (pref(o), price(o) + ((o["totalMinutes"] or 0) / 60 - _ground_hours(o)) * 40 * q["pax"])
     else:
         key = lambda o: (pref(o), price(o))
     offers = sorted(offers, key=key)
@@ -195,7 +234,7 @@ def _apply_prefs(offers, q):
     return offers
 
 def _cache_key(q):
-    return "flights-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "flights-v7:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -239,6 +278,15 @@ _DEADLINE = None
 REQUEST_TIMEOUT_S = float(os.environ.get("REQUEST_TIMEOUT_S", "20"))   # one HTTP request, at most
 
 
+# The optional nonstop-only search runs at the same time as the main search: one attempt of at most NONSTOP_WAIT_S
+# (and REQUEST_TIMEOUT_S), started only when NONSTOP_MIN_LEFT_S of the budget is left. Once the main search is back
+# it is waited for only while NONSTOP_LOOKUP_RESERVE_S stays left for the return lookups. With the 35 s budget and
+# REQUEST_TIMEOUT_S 20 a hung nonstop search is given up 20 s in, leaving the lookups 15 s.
+NONSTOP_WAIT_S = 30
+NONSTOP_MIN_LEFT_S = 25
+NONSTOP_LOOKUP_RESERVE_S = 15
+
+
 def _time_left():
     return float("inf") if _DEADLINE is None else _DEADLINE - time.time()
 
@@ -269,11 +317,11 @@ def _start_budget(context, default_s):
 
 
 # ---------------------------------------------------------------- SerpApi Google Flights
-def _serp_get(params):
-    """One SerpApi search. Returns (json, error)."""
+def _serp_get(params, cap=25, attempts=2):
+    """One SerpApi search (a retry on 429/5xx/timeout unless attempts=1). Returns (json, error)."""
     last = None
-    for attempt in range(2):
-        wait = _wait()
+    for attempt in range(attempts):
+        wait = _wait(cap)
         if not wait:
             last = last or _err("upstream_timeout", "Google Flights (SerpApi) did not answer in time", "serpapi")
             break
@@ -288,11 +336,17 @@ def _serp_get(params):
                 return None, _err("upstream_rejected", f"SerpApi returned {r.status_code}", "serpapi",
                                   detail=r.text[:300])
             else:
-                data = r.json()
-                if data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
-                    return None, _err("no_results", f"Google Flights: {data['error'][:200]}", "serpapi")
-                return data, None
-        if not _pause(attempt):
+                try:
+                    data = r.json()
+                except ValueError:
+                    data = None
+                if not isinstance(data, dict):   # an HTML error page with status 200: retried like a 5xx
+                    last = _err("upstream_unavailable", "SerpApi sent a reply that is not JSON", "serpapi")
+                elif data.get("error") and not (data.get("best_flights") or data.get("other_flights")):
+                    return None, _err("no_results", f"Google Flights: {str(data['error'])[:200]}", "serpapi")
+                else:
+                    return data, None
+        if attempt + 1 >= attempts or not _pause(attempt):
             break
     return None, last
 
@@ -317,19 +371,56 @@ def _serp_slice(option):
             "duration": _iso_min(option.get("total_duration")),
             "stops": max(len(segs) - 1, 0),
             "flightNumbers": [str(g.get("flight_number") or "").replace(" ", "") for g in segs],
+            # per segment, as SerpApi writes it ("Economy", "Premium economy", ...) -> "economy", "premium_economy"
+            "cabins": [str(g.get("travel_class") or "").strip().lower().replace(" ", "_") or None for g in segs],
             "airlines": list(dict.fromkeys(g.get("airline") for g in segs if g.get("airline")))}
 
 
-def _serp_offer(legs, price, url):
+def _serp_offer(legs, price, url, cabin):
+    """cabin: the requested cabin. The offer's cabin is that cabin when every segment SerpApi names a class for is
+    in it, else "mixed" (e.g. an economy leg on a premium economy fare)."""
     slices = [_serp_slice(o) for o in legs]
-    if not all(slices) or price in (None, ""):
+    price = _price(price)
+    if not all(slices) or price is None:
         return None
+    known = {c for s_ in slices for c in s_["cabins"] if c}
     airlines = list(dict.fromkeys(a for s_ in slices for a in s_.pop("airlines")))
     ident = "|".join(f"{s_['departAt']}{','.join(s_['flightNumbers'])}" for s_ in slices)
     offer_id = "gf:" + hashlib.sha256(ident.encode()).hexdigest()[:20]
     return {"offerId": offer_id, "airline": " / ".join(airlines[:3]), "priceTotal": float(price), "currency": "SGD",
             "priceTotalSGD": round(float(price), 2), "slices": slices, "bookingUrl": url,
-            "provider": "google_flights"}
+            "provider": "google_flights", "cabin": cabin if known <= {cabin} else "mixed"}
+
+
+def _time_gap(a, b):
+    """Minutes between two SerpApi options' first departures plus between their last arrivals (0 when unknown)."""
+    def at(o, i, end):
+        try:
+            return datetime.fromisoformat(((o.get("flights") or [])[i].get(end) or {}).get("time") or "")
+        except (IndexError, ValueError):
+            return None
+    gaps = [(at(a, i, end), at(b, i, end)) for i, end in ((0, "departure_airport"), (-1, "arrival_airport"))]
+    return sum(abs((x - y).total_seconds()) / 60 for x, y in gaps if x and y)
+
+
+def _option_key(o):
+    """The same flights (departure time and flight number of every segment), whichever search returned them."""
+    return tuple(((g.get("departure_airport") or {}).get("time"), g.get("flight_number")) for g in o.get("flights") or [])
+
+
+def _pick_lookups(cands, cabin, lookups):
+    """The outbound options (cands: with a departure_token, cheapest first) whose return flights are looked up.
+    Above economy, options with a segment in another cabin ("mixed") are skipped unless every option is mixed. Then
+    the cheapest nonstop, the cheapest, and each time the one (of the cheapest SPREAD_POOL) whose departure and
+    arrival times are furthest from those already picked, so the trips differ in time on the ground."""
+    if cabin != "economy":
+        cands = [o for o in cands if {c for c in (_serp_slice(o) or {}).get("cabins", []) if c} <= {cabin}] or cands
+    picks = [o for o in cands if len(o.get("flights") or []) == 1][:1] + cands[:1]
+    picks = [o for i, o in enumerate(picks) if o not in picks[:i]][:lookups]
+    pool = cands[:SPREAD_POOL]
+    while len(picks) < lookups and any(o not in picks for o in pool):
+        picks.append(max((o for o in pool if o not in picks), key=lambda o: min(_time_gap(o, p) for p in picks)))
+    return picks
 
 
 def _call_serpapi(q, key):
@@ -347,37 +438,61 @@ def _call_serpapi(q, key):
         params = {**base, "type": 3, "multi_city_json": json.dumps([
             {"departure_id": q["origin"], "arrival_id": q["destination"], "date": q["departDate"]},
             {"departure_id": q["returnFrom"], "arrival_id": q["origin"], "date": q["returnDate"]}])}
+    ns_job = None
+    if q["cabin"] != "economy" and _time_left() >= NONSTOP_MIN_LEFT_S:
+        # above economy the cheapest fares are often 1-stop or mixed-cabin bundles: one more search, nonstop only
+        # (SerpApi stops=1), so a nonstop is in the list when one is sold. It runs beside the main search; the pool is
+        # not waited for on shutdown, so a hung request is left behind and its answer unused.
+        ns_params = {**params, "stops": 1}
+        pool = ThreadPoolExecutor(max_workers=1)
+        ns_job = pool.submit(_serp_get, ns_params, NONSTOP_WAIT_S, 1)
+        pool.shutdown(wait=False)
     data, error = _serp_get(params)
     if error:
         return None, error
     url = (data.get("search_metadata") or {}).get("google_flights_url")
     first = (data.get("best_flights") or []) + (data.get("other_flights") or [])
-    first = sorted((o for o in first if o.get("price")), key=lambda o: o["price"])
+    nonstop_params = {}   # id(option) -> the params of the nonstop-only search that found it (for its return lookup)
+    if ns_job:
+        try:   # wait only while the return lookups keep their reserve
+            ns, ns_err = ns_job.result(timeout=max(_time_left() - NONSTOP_LOOKUP_RESERVE_S, 0))
+        except FutureTimeout:
+            ns, ns_err = None, _err("upstream_timeout", "the nonstop search was still running when the return "
+                                                        "lookups needed the time", "serpapi")
+        except Exception as e:  # noqa: BLE001 -- the nonstop search is optional: a bad answer never costs the results
+            ns, ns_err = None, _err("upstream_failed", f"nonstop search: {type(e).__name__}: {e}"[:300], "serpapi")
+        if ns_err:
+            print("nonstop search failed:", ns_err)
+        else:
+            seen = {_option_key(o) for o in first}
+            for o in (ns.get("best_flights") or []) + (ns.get("other_flights") or []):
+                if _option_key(o) not in seen:
+                    seen.add(_option_key(o))
+                    first.append(o)
+                    nonstop_params[id(o)] = ns_params
+    first = sorted((o for o in first if isinstance(o, dict) and _price(o.get("price"))), key=lambda o: _price(o["price"]))
     if not q["returnDate"]:
-        offers = [_serp_offer([o], o["price"], url) for o in first[:40]]
+        offers = [_serp_offer([o], o["price"], url, q["cabin"]) for o in first[:40]]
         return [o for o in offers if o], None
-    lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "2")), 0), 4)
-    # look up returns for the cheapest outbound and, if different, the best-ranked one
-    shortest = min((o for o in first if o.get("departure_token")),
-                   key=lambda o: o.get("total_duration") or 10 ** 6, default=None)
-    picks = []
-    for o in ([first[0], shortest] + list(data.get("best_flights") or []) + first[1:]) if first else []:
-        if o and o.get("departure_token") and o not in picks:
-            picks.append(o)
-        if len(picks) >= lookups:
-            break
+    lookups = min(max(int(os.environ.get("SERPAPI_RETURN_LOOKUPS", "3")), 0), 4)
+    picks = _pick_lookups([o for o in first if o.get("departure_token")], q["cabin"], lookups)
     offers = []
     for out in picks:
         if offers and _time_left() < 8:   # enough round trips already; don't risk the timeout
             break
-        back, err = _serp_get({**params, "departure_token": out["departure_token"]})
+        back, err = _serp_get({**nonstop_params.get(id(out), params), "departure_token": out["departure_token"]})
+        if err and id(out) in nonstop_params and _time_left() >= 8:
+            # the nonstop search's params keep stops=1, so a nonstop outbound with only connecting returns finds
+            # nothing: ask once more for its returns without the stops filter
+            back, err = _serp_get({**params, "departure_token": out["departure_token"]})
         if err:
             print("return lookup failed:", err)
             continue
         rets = sorted((r for r in (back.get("best_flights") or []) + (back.get("other_flights") or [])
-                       if r.get("price")), key=lambda r: r["price"])
+                       if isinstance(r, dict) and _price(r.get("price"))), key=lambda r: _price(r["price"]))
         for r in rets[:RETURNS_PER_LOOKUP]:
-            o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url)
+            o = _serp_offer([out, r], r["price"], (back.get("search_metadata") or {}).get("google_flights_url") or url,
+                            q["cabin"])
             if o:
                 offers.append(o)
     if not offers:
@@ -459,6 +574,14 @@ def _mock(q):
 
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event, context)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event, context):
     _start_budget(context, 35)
     if isinstance(event, str):
         event = json.loads(event)
@@ -485,18 +608,26 @@ def lambda_handler(event, context):
     every, source, attempts = None, None, []
     serp_key = _secret("SERPAPI_KEY")
     if serp_key:
-        found, error = _call_serpapi(_api_query(q), serp_key)
+        try:
+            found, error = _call_serpapi(_api_query(q), serp_key)
+        except Exception as e:  # noqa: BLE001 -- an unreadable SerpApi reply: try the next provider
+            found, error = None, _err("upstream_failed", f"Google Flights reply could not be read: "
+                                                         f"{type(e).__name__}: {e}"[:300], "serpapi")
         if error:
             attempts.append(error["message"])
             print("serpapi failed:", error)
         else:
             every, source = found, "google_flights"
     if every is None and _get_token():
-        found, error = _call_duffel(_api_query(q))
+        try:
+            found, error = _call_duffel(_api_query(q))
+            found = [_summarise(o) for o in found] if not error else None
+        except Exception as e:  # noqa: BLE001 -- an unreadable Duffel reply
+            found, error = None, _err("upstream_failed", f"Duffel reply could not be read: {type(e).__name__}: {e}"[:300])
         if error:
             attempts.append(error["message"])
         else:
-            every, source = [_summarise(o) for o in found], "duffel"
+            every, source = found, "duffel"
     if every is None:
         if not attempts:
             return _err("not_configured", "no flight API key in the secret (SERPAPI_KEY or DUFFEL_TOKEN); "

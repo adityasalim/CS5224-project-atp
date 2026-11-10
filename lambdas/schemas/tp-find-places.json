@@ -8,6 +8,28 @@
         "type": "string",
         "description": "Where to search: a city ('Kyoto'), or a neighbourhood or landmark plus city for a specific area ('Gion, Kyoto', 'Nyhavn, Copenhagen', 'near Shinjuku Station, Tokyo'). Use this OR lat/lng."
       },
+      "near": {
+        "type": "object",
+        "properties": {
+          "lat": {
+            "type": "number",
+            "description": "Latitude of the point the city should be near."
+          },
+          "lng": {
+            "type": "number",
+            "description": "Longitude of the point the city should be near."
+          }
+        },
+        "description": "With city: a point the city must be close to, e.g. the trip's main city for a day-trip town or landmark ('Mount Fuji' near Tokyo). The search prefers matches near it and only accepts one within maxKm; otherwise the call returns unknown_location."
+      },
+      "maxKm": {
+        "type": "number",
+        "description": "With near: the largest accepted distance in km between the found city and near (default 450)."
+      },
+      "minKm": {
+        "type": "number",
+        "description": "With near: the smallest accepted distance in km between the found city and near (default 0). For a day trip use 25, so a namesake in the main city (a tour office called 'Mount Fuji Tours') is not taken."
+      },
       "lat": {
         "type": "number",
         "description": "Latitude of a search centre, e.g. the chosen hotel, to find places close to it."
@@ -79,6 +101,14 @@
         "type": "number",
         "description": "Search radius in km for restaurants, cafes, bars, desserts and street food, 1-15 (default 5)."
       },
+      "priceLevel": {
+        "type": "integer",
+        "description": "Meal price level 1-4 ($ to $$$$) for a walkable zone (foodRadiusKm 2 or less): restaurants at this Google price level are ranked first."
+      },
+      "cuisineOnly": {
+        "type": "boolean",
+        "description": "true with categories ['restaurant'], a cuisine and lat/lng with foodRadiusKm 2 or less: only restaurants of that cuisine near the point (no generic restaurants)."
+      },
       "maxPerCategory": {
         "type": "integer",
         "description": "Results per category or keyword, 1-40 (default 8). The agent sets this from the trip length: use about 10-12 for short trips and up to 40 for long ones."
@@ -89,6 +119,10 @@
           "type": "string"
         },
         "description": "Specific places the traveller mentioned by name (max 6), e.g. ['teamLab Planets', 'Ichiran Shibuya', 'Fushimi Inari']. Each found one comes back first with 'requested' set and is never filtered by the preferences; names not found are listed in 'notFound'. Pass only names (no categories) for a quick lookup, or together with categories."
+      },
+      "namesCategory": {
+        "type": "string",
+        "description": "Leave out for places the traveler named. 'cafe' or 'restaurant' looks the names up on Google as ordinary candidates of that category instead: kept only when rated 4.0+ with 50+ reviews, not marked requested and not required in the plan."
       }
     },
     "required": []

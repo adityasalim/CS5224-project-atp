@@ -27,11 +27,14 @@
 | `LOOP` | `false` = ablation variant B (no judge/repair) | no |
 | `DAILY_SPEND_SGD_PER_PERSON` | `100` (keep equal to the verifier's) | no |
 | `GUARDRAIL_ID` / `GUARDRAIL_VERSION` | Phase 7.1 | no |
-| `PROMPT_ARN_PLANNER` (etc.) | Phase 7.2, Prompt Management ARN | no |
+| `PROMPT_ARN_PLANNER` (etc.) | Leave every `PROMPT_ARN_*` unset; `prompts.py` is the source of truth (a set ARN loads the older managed prompt instead) | no, keep unset |
 | `DEFAULT_HOME_AIRPORT` | `SIN` | no |
 | `PROMPT_CACHE` | `true` (default): prompt-cache checkpoints for Claude/Nova calls; `false` turns them off | no |
 | `MEMORY_ID` | `tp_dev_memory-AbCdEf1234` (Phase 6.4) | no; memory is off without it |
 | `MEMORY_PREFERENCES_NAMESPACE` | `/users/{actorId}/preferences` (must match the console) | default shown |
+| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (now Claude Opus 5.5 planner, Haiku 5.5 small jobs, Sonnet 5.5 reviewer and evaluator); stays `combo_19` when the file is switched back to configuration 19 | no; legacy defaults without it |
+| `ANTHROPIC_SECRET_ID` | `tp/dev/anthropic`, a secret holding `{"api_key": ...}` (runtime role needs `GetSecretValue` on it) | default shown |
+| `MODEL_BUDGET_LEDGER` | `public_claude_5_5`; a new id whenever the caps in `public_models.py` change | yes, with `PUBLIC_MODEL_CONFIGURATION` |
 
 ## Personal preferences
 

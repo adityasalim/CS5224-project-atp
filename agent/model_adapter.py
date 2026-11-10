@@ -12,6 +12,9 @@ ALIBABA_SECRET=os.environ.get('ALIBABA_SECRET_ID', '')
 # Request timeouts. A planner reply can be up to 8000 tokens, which takes longer than the old 90 s on a large trip.
 ALIBABA_TIMEOUT_SECONDS=float(os.environ.get('ALIBABA_TIMEOUT_SECONDS', '180'))
 BEDROCK_READ_TIMEOUT_SECONDS=int(os.environ.get('BEDROCK_READ_TIMEOUT_SECONDS', '180'))
+ANTHROPIC_SECRET=os.environ.get('ANTHROPIC_SECRET_ID') or 'tp/dev/anthropic'   # the secret's name; it holds {"api_key": ...}
+ANTHROPIC_TIMEOUT_SECONDS=float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '300'))
+THINKING_HEADROOM_TOKENS=16000   # Claude counts adaptive thinking inside max_tokens, so it gets room on top of the answer cap
 
 class ModelAdapterError(RuntimeError):
     def __init__(self,kind,code=None):
@@ -43,6 +46,10 @@ class ModelAdapter:
             from botocore.config import Config
             result=boto3.client('bedrock-runtime',region_name='ap-southeast-1',
                 config=Config(connect_timeout=10,read_timeout=BEDROCK_READ_TIMEOUT_SECONDS,retries={'total_max_attempts':1}))
+        elif provider=='anthropic':
+            import boto3,anthropic
+            raw=boto3.client('secretsmanager',region_name='ap-southeast-1').get_secret_value(SecretId=ANTHROPIC_SECRET)['SecretString']
+            result=anthropic.Anthropic(api_key=json.loads(raw)['api_key'],timeout=ANTHROPIC_TIMEOUT_SECONDS,max_retries=0)
         else:
             import boto3
             from openai import OpenAI
@@ -72,11 +79,12 @@ class ModelAdapter:
         if self.quota_exhausted:raise ModelAdapterError('ExperimentDeferredAfterQuotaExhaustion',429)
         if role not in self.configuration.selections:raise ValueError('Unknown or unattributed model role')
         if not isinstance(trip_id,str) or not trip_id:raise ValueError('trip_id is required')
-        if tools:raise ValueError('Text adapter does not silently discard tool schemas; explicit tool conversion is required')
         selected=self.configuration.selections[role]
+        if tools and selected.provider!='anthropic':raise ValueError('Text adapter does not silently discard tool schemas; explicit tool conversion is required')
         if selected.provider=='alibaba' and selected.model_id not in ALIBABA_MODELS:
             raise ValueError('Alibaba model lacks verified experiment-pool eligibility')
         if type(max_tokens) is not int or not 1<=max_tokens<=8000:raise ValueError('Invalid bounded output limit')
+        if selected.provider=='anthropic':max_tokens+=THINKING_HEADROOM_TOKENS
         sections=list(system) if isinstance(system,list) else [system]
         system=system_text(system)
         if cache_system_prefix and (selected.provider!='bedrock' or selected.model_id!='global.anthropic.claude-sonnet-4-6' or len(sections)<2):
@@ -95,10 +103,12 @@ class ModelAdapter:
              'temperatureRequested':temperature,'temperatureApplied':None}
         if cache_system_prefix:row['requestOptions']['cacheSystemPrefix']=True
         reservation=None
+        web_urls=[]
         if selected.provider!='google':
             if self.budget_authorizer is None:
                 raise ValueError('Verified pricing and budget authorization required before paid-capable calls')
-            reservation=self.budget_authorizer(selected,system,messages,max_tokens)
+            # Web search results come back as input tokens (tens of thousands per search): reserve room for them too
+            reservation=self.budget_authorizer(selected,system,messages,max_tokens+50000*sum(int(t.get('max_uses',1)) for t in tools or []))
             if reservation is None or not hasattr(reservation,'settle'):
                 raise ValueError('A spending reservation is required before provider invocation')
         start=time.monotonic()
@@ -136,6 +146,41 @@ class ModelAdapter:
                 row.update(inputTokens=usage.get('inputTokens'),outputTokens=usage.get('outputTokens'),
                            cacheReadTokens=usage.get('cacheReadInputTokens'),cacheWriteTokens=usage.get('cacheWriteInputTokens'),
                            totalTokens=usage.get('totalTokens'),finishReason=result.get('stopReason'))
+            elif selected.provider=='anthropic':
+                # No temperature: Opus and Sonnet 5.5 reject sampling settings. The first section (trip and pool) is cached.
+                blocks=[{'type':'text','text':s} for s in sections if s]
+                if len(blocks)>1:blocks[0]['cache_control']={'type':'ephemeral'}
+                request=dict(model=selected.model_id,max_tokens=max_tokens,system=blocks,thinking={'type':'adaptive'},
+                        output_config={'effort':selected.options.get('reasoningEffort','medium')},
+                        messages=[{'role':m['role'],'content':[{'type':'text','text':b['text']} for b in m['content']]} for m in messages],
+                        **({'tools':tools} if tools else {}))   # server tools only (web search)
+                # Opus: a safety-classifier refusal is re-run server side on Anthropic's recommended model (beta)
+                opus=selected.model_id.startswith('claude-opus')
+                # Fast mode (beta, Opus only, 2x price) for the draft and corrections; its own rate limit falls back to normal speed
+                fast=opus and selected.options.get('speed')=='fast' and getattr(self,'operation',None) in ('proposal','correction')
+                betas=['server-side-fallback-2026-07-01']+(['fast-mode-2026-02-01'] if fast else [])
+                try:
+                    with (client.beta.messages.stream(**request,betas=betas,fallbacks='default',**({'speed':'fast'} if fast else {}))
+                          if opus else client.messages.stream(**request)) as stream:
+                        result=stream.get_final_message()
+                except Exception as error:   # the SDK is imported lazily, so match its errors by name
+                    # fast mode's own rate limit, or fast mode not enabled for this account (beta): retry at normal speed
+                    refused=type(error).__name__ in ('BadRequestError','PermissionDeniedError') and any(
+                        w in str(error).lower() for w in ('speed','fast'))
+                    if not fast or not (getattr(error,'status_code',None)==429 or refused):raise   # any 429, incl. ramp limits
+                    fast=False
+                    with client.beta.messages.stream(**request,betas=betas[:1],fallbacks='default') as stream:
+                        result=stream.get_final_message()
+                if fast and getattr(result.usage,'speed',None) in (None,'fast'):row['speed']='fast'   # as served when reported
+                text=''.join(b.text for b in result.content if b.type=='text')
+                # the pages the search really returned, so a cited source can be checked against them
+                web_urls=[r.url for b in result.content if b.type=='web_search_tool_result' and isinstance(b.content,list)
+                          for r in b.content if getattr(r,'type',None)=='web_search_result']
+                usage=result.usage
+                row.update(inputTokens=usage.input_tokens,outputTokens=usage.output_tokens,cacheReadTokens=usage.cache_read_input_tokens or 0,
+                           cacheWriteTokens=usage.cache_creation_input_tokens or 0,finishReason=result.stop_reason,responseModelId=result.model,fallbackUsed=result.model!=selected.model_id,
+                           webSearchRequests=getattr(getattr(usage,'server_tool_use',None),'web_search_requests',None),
+                           transport='anthropic.beta.messages.stream' if opus else 'anthropic.messages.stream')
             else:
                 native=[{'role':'system','content':system}]+[
                     {'role':m['role'],'content':'\n'.join(b['text'] for b in m['content'])} for m in messages]
@@ -246,7 +291,7 @@ class ModelAdapter:
                     'usage':{'inputTokens':row['inputTokens'] or 0,'outputTokens':row['outputTokens'] or 0,
                              'cacheReadInputTokens':row['cacheReadTokens'] or 0,'cacheWriteInputTokens':row['cacheWriteTokens'] or 0},
                     'stopReason':'max_tokens' if row.get('finishReason') in ('length','max_tokens') else 'end_turn',
-                    '_adapter':row}
+                    'webResultUrls':web_urls,'_adapter':row}
         except Exception as error:
             logger = logging.getLogger(__name__)
             logger.error(

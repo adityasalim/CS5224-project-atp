@@ -4,10 +4,23 @@ set -euo pipefail
 unset PUBLIC_MODEL_CONFIGURATION
 cd "$(dirname "$0")"
 python3 test_lambdas.py
+python3 test_google_food.py | tail -1
+python3 test_zones.py | tail -1
+python3 test_zone_pool.py | tail -1
 python3 test_tool_preferences.py
+python3 test_ui_preferences.py | tail -1
 python3 test_robust_tools.py | tail -1
+python3 test_pinned_places.py | tail -1
 python3 test_serpapi_flights.py | grep " OK"
+python3 test_run6_tools.py | grep " OK$"
+python3 test_run7_tools.py | grep " OK$"
+python3 test_run8_tools.py | grep " OK$"
+python3 test_final_tools.py | grep " OK$"
+python3 test_rail_hops.py | tail -1
 python3 test_model_selection.py | tail -1
+python3 test_agent_run8.py | grep " OK$"
+python3 test_agent_run9.py | grep " OK$"
+python3 test_agent_final.py | grep " OK$"
 python3 fake_gateway.py & GW=$!
 trap 'kill $GW 2>/dev/null' EXIT
 sleep 2
@@ -15,6 +28,7 @@ python3 test_agent_single_city.py | tail -3
 python3 test_agent_multi_city.py | tail -3
 python3 test_agent_personal.py | tail -1
 python3 test_agent_robust.py | tail -1
+python3 test_agent_model_strings.py | tail -1
 python3 ../gateway_smoke_test.py --gateway-url http://127.0.0.1:8765/mcp \
   --token-url http://127.0.0.1:8765/oauth2/token --client-id a --client-secret b | tail -1
 

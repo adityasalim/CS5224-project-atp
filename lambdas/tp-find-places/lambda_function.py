@@ -2,10 +2,22 @@
 tp-find-places — Lambda tool: find attractions, restaurants and cafes near a city or point
 using OpenStreetMap Overpass (cached), with Amazon Location and Google Places as fallbacks.
 
-Fallback chain: Overpass (one request for all categories; if that fails, the categories in groups, restaurants
-and cafes first) -> Amazon Location Places -> Google Places (if GOOGLE_MAPS_KEY in secret) -> mock. Categories
-that Overpass returns too few places for are topped up from Amazon Location. The whole chain is bounded by
-TIME_BUDGET_SECONDS (default 45), so the tool always answers before the 60 s Lambda timeout.
+Food (restaurant, cafe, dessert) comes from Google Places first when the secret has GOOGLE_MAPS_KEY (rating >= 4.0,
+at least 50 reviews, operational), and so do the sights (city categories that are neither food nor outdoor: rating
+>= 4.0, at least GOOGLE_SIGHT_MIN_REVIEWS reviews); a sight category Google keeps fewer than half the asked places for
+also goes through the chain below. A city call with Google-first sights also makes one Text Search "top sights in
+<city>" first (same floor; places with searchedAs "top_sights", returned first in Google's order, tag "top sight"),
+so it makes 1 + (Google-first sight categories, at most 4) + (food categories) Text Search requests; temple and
+shrine searches ask by Google place type (includedType). Only the other places are kept in the response cache, so a
+cached call asks Google for the food and sights again. Fallback chain: Overpass (one request for all categories; if that fails, the categories
+in groups, restaurants and cafes first) -> Amazon Location Places -> Google Places (if GOOGLE_MAPS_KEY in secret)
+-> mock. Categories that Overpass returns too few places for are topped up from Amazon Location. The whole call, the
+city geocode included, is bounded by TIME_BUDGET_SECONDS (default 45): every Amazon Location and Google request waits
+at most the time left, so the tool always answers before the 60 s Lambda timeout. A reply a provider sends that cannot
+be read (an HTML page, a null list, a place without id or location) is that provider's failure: the chain goes on.
+Zone mode: a call with lat/lng, only restaurant/cafe/dessert categories and foodRadiusKm <= 2 is one walkable zone of
+the planner. It makes ONE Google Nearby Search inside that circle (Amazon Location if Google fails, no Overpass) and is
+never cached.
 
 Environment variables:
   SECRET_ARN   secret with optional {"GOOGLE_MAPS_KEY": "..."}
@@ -19,6 +31,10 @@ Input event:
   {"city": "Tokyo", "categories": ["temple", "museum", "restaurant", "climbing", "hiking"],
    "keywords": ["bouldering gym", "day hike"], "radiusKm": 6, "cuisine": "japanese", "maxPerCategory": 20}
   ("lat" and "lng" can be given instead of "city".)
+  - near: {"lat", "lng"} biases the city geocode to that point; only a match within maxKm (default 450) and at least
+    minKm (default 0) from it is taken. When the geocode finds none, an Amazon Location place search is tried.
+  - cuisineOnly: true with categories ["restaurant"] in zone mode -> the Nearby Search asks only for the cuisine's
+    Google restaurant types (no generic "restaurant").
   - categories: fixed place types (see CATEGORY_TAGS). Unknown words are treated as keywords.
   - keywords: free-text activities (up to 8) for anything else; searched with Amazon Location / Google text
     search and returned with category "activity" and "activity": <keyword>.
@@ -59,15 +75,15 @@ from botocore.config import Config
 # Whole-tool time budget (seconds). Keep well under the Lambda timeout (60 s) so the tool
 # always answers, falling back to the next source instead of timing out.
 TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_SECONDS", "45"))
-OVERPASS_TIMEOUT_S = 26          # per Overpass request (one request now covers all categories)
-OVERPASS_SHARE_S = 34            # Overpass may use at most this much of the budget
+OVERPASS_TIMEOUT_S = 13          # per Overpass request (one request now covers all categories)
+OVERPASS_SHARE_S = 13            # Overpass may use at most this much of the budget (main server and mirror together)
 FOOD_RADIUS_KM = 5               # food search radius for every city (override per call with foodRadiusKm)
 MAX_PER_CATEGORY = 40
 MAX_KEYWORDS = 8
 OVERPASS_MIN_CAP, OVERPASS_MAX_CAP = 200, 600    # elements returned per category (output statement)
 OVERPASS_NOTABLE_CAP = 100       # well-known places (with a wikidata tag) per category, listed first
 OVERPASS_DIET_CAP = 200          # diet-tagged food places per category
-_GEO_CFG = Config(connect_timeout=4, region_name="us-east-1", read_timeout=8, retries={"max_attempts": 2})
+GEO_CONNECT_S, GEO_READ_S, GEO_MAX_TRIES = 4, 8, 3   # one Amazon Location call: up to 3 attempts of 4 s + 8 s
 
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]
 CATEGORY_TAGS = {
@@ -103,7 +119,42 @@ CATEGORY_TAGS = {
     "playground": ['["leisure"="playground"]'],
 }
 FOOD = {"restaurant", "cafe", "bar", "dessert", "street_food"}
+# Food categories searched on Google Places first (when the secret has GOOGLE_MAPS_KEY): rated, reviewed, open venues.
+GOOGLE_FIRST = {"restaurant", "cafe", "dessert"}
+GOOGLE_MIN_RATING, GOOGLE_MIN_REVIEWS = 4.0, 50
+GOOGLE_SIGHT_MIN_REVIEWS = 200   # sights from Google first: 4.0+ stars and at least this many reviews
+GOOGLE_SIGHTS_MAX = 4            # sight categories per call that go to Google first (owner, run 6); the rest use the chain
+GOOGLE_FOOD_TEXT = {"cafe": "specialty coffee"}   # Google text for a category's generic search text
 FOOD_KEYWORDS = ("restaurant", "eatery", "dining")   # keyword searches that mean "a place to eat"
+ZONE_FOOD_MAX_KM = 2.0   # a food-only call this small around lat/lng is one walkable zone (hard boundary, no cache)
+G_MEAL_TYPES = {"american", "barbecue", "brazilian", "chinese", "fine_dining", "french", "greek", "indian",
+                "indonesian", "italian", "japanese", "korean", "lebanese", "mediterranean", "mexican", "middle_eastern",
+                "ramen", "seafood", "spanish", "sushi", "thai", "turkish", "vegan", "vegetarian", "vietnamese"}
+G_CAFE_TYPES = ["cafe", "coffee_shop", "coffee_roastery", "tea_house"]
+G_TREAT_TYPES = ["bakery", "dessert_shop"]
+# A Google place's primaryType -> our category, for the sight searches (a "theme park" search also returns zoos and
+# museums). Types not listed keep the category they were searched for.
+G_PRIMARY_CATEGORY = {"amusement_park": "theme_park", "theme_park": "theme_park", "water_park": "theme_park",
+                      "zoo": "zoo", "wildlife_park": "zoo", "aquarium": "aquarium",
+                      "museum": "museum", "art_gallery": "gallery", "tourist_attraction": "attraction",
+                      "park": "park", "garden": "garden", "botanical_garden": "garden",
+                      "buddhist_temple": "temple", "hindu_temple": "temple", "shinto_shrine": "shrine", "church": "church",
+                      "historical_landmark": "historic", "historical_place": "historic", "monument": "historic",
+                      "castle": "historic", "observation_deck": "viewpoint", "market": "market",
+                      "shopping_mall": "shopping", "department_store": "shopping", "book_store": "bookshop",
+                      "playground": "playground", "spa": "spa", "beach": "beach", "hiking_area": "hiking",
+                      "national_park": "nature", "night_club": "nightlife"}
+# Every Google-first sight call of a city also makes ONE Text Search "top sights in <city>" (4.0+ stars, 200+ reviews),
+# so the famous sights (Senso-ji, Fushimi Inari, Kinkaku-ji) reach the pool whatever category they fall in. Its places
+# keep their primaryType category and are grouped as searchedAs TOP_SIGHTS, in Google's order.
+TOP_SIGHTS = "top_sights"
+# Temples and shrines are searched by Google place type ("temples in Kyoto" with Text Search includedType), not by the
+# bare word around a point. includedType only biases the results (Places API (New) Text Search); strictTypeFiltering
+# keeps only that type. Shrines are strict; temples are not, because one type cannot cover Buddhist and Hindu temples
+# (Bali), so a Hindu temple can still come back for "temples in Bali".
+G_SIGHT_TYPES = {"temple": ("temples", "buddhist_temple", False), "shrine": ("shrines", "shinto_shrine", True)}
+G_PRICE_LEVELS = {"PRICE_LEVEL_FREE": 0, "PRICE_LEVEL_INEXPENSIVE": 1, "PRICE_LEVEL_MODERATE": 2,
+                  "PRICE_LEVEL_EXPENSIVE": 3, "PRICE_LEVEL_VERY_EXPENSIVE": 4}
 
 
 def _is_food_keyword(kw):
@@ -118,6 +169,7 @@ DIET_TAG = {"vegetarian": "diet:vegetarian", "vegan": "diet:vegan", "halal": "di
             "gluten_free": "diet:gluten_free"}
 OUTDOOR = {"climbing", "hiking", "nature", "onsen", "beach"}
 CITY_MAX_KM, OUTDOOR_MAX_KM = 15, 50
+NEAR_MAX_KM = 450                # a city geocoded with "near" must lie within maxKm (default) of that point
 DIET_SEARCH_MAX_M = 15000        # the wider search for diet-tagged places
 KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osaka": (34.6937, 135.5023),
                 "singapore": (1.2903, 103.8520), "seoul": (37.5665, 126.9780), "bangkok": (13.7563, 100.5018),
@@ -133,7 +185,13 @@ KNOWN_CITIES = {"tokyo": (35.6812, 139.7671), "kyoto": (35.0116, 135.7681), "osa
                 # popular day-trip towns
                 "nikko": (36.7199, 139.6982), "kamakura": (35.3192, 139.5467), "hakone": (35.2324, 139.1069),
                 "nara": (34.6851, 135.8048), "kobe": (34.6901, 135.1955), "busan": (35.1796, 129.0756),
-                "ayutthaya": (14.3532, 100.5689), "sapporo": (43.0618, 141.3545), "fukuoka": (33.5902, 130.4017)}
+                "ayutthaya": (14.3532, 100.5689), "sapporo": (43.0618, 141.3545), "fukuoka": (33.5902, 130.4017),
+                }
+# Day-trip landmarks, at the town a visit is based in. Checked before the address geocode, which answers "Fuji"
+# with Fuji city (Shizuoka), 38 km from the Kawaguchiko side.
+LANDMARKS = {"mount fuji": (35.50, 138.76), "mt fuji": (35.50, 138.76), "mt. fuji": (35.50, 138.76),
+             "fuji": (35.50, 138.76), "kawaguchiko": (35.50, 138.76), "lake kawaguchiko": (35.50, 138.76),
+             "fujikawaguchiko": (35.50, 138.76)}
 
 _secret_cache = None
 _dynamodb = boto3.resource("dynamodb")
@@ -159,20 +217,84 @@ def _mock_mode():
     return os.environ.get("MOCK_MODE", "true").lower() == "true"
 
 
-def _geocode(city):
+def _geo_client(deadline):
+    """An Amazon Location (geo-places, us-east-1) client whose worst case (every attempt timing out) ends by the
+    deadline: up to GEO_MAX_TRIES attempts of GEO_CONNECT_S + GEO_READ_S while the time allows, else one shorter
+    attempt. None when less than 3 s are left."""
+    left = deadline - time.time() - 1
+    if left < 3:
+        return None
+    full = GEO_CONNECT_S + GEO_READ_S
+    tries = max(1, min(GEO_MAX_TRIES, int(left // full)))
+    connect = min(GEO_CONNECT_S, left / 3)
+    return boto3.client("geo-places", config=Config(
+        region_name="us-east-1", connect_timeout=connect, read_timeout=min(GEO_READ_S, left / tries - connect),
+        retries={"total_max_attempts": tries}))
+
+
+def _coord(lat, lng):
+    """(lat, lng) as floats, or None when either is missing or not a number."""
+    try:
+        return float(lat), float(lng)
+    except (TypeError, ValueError):
+        return None
+
+
+def _listed(v):
+    """A list field of the request: a single string is one item (never split into letters); anything else is none."""
+    return [v] if isinstance(v, str) else v if isinstance(v, list) else []
+
+
+def _safe(provider, *args, **kwargs):
+    """A provider call whose unreadable reply (or any other failure) is that provider's error, so the chain goes on."""
+    try:
+        return provider(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        return None, f"{provider.__name__.strip('_')} failed: {type(e).__name__}: {str(e)[:120]}"
+
+
+def _geocode(city, near=None, max_km=None, min_km=0.0, deadline=None):
+    """(lat, lng) of a place name. With near ({"lat", "lng"}) the search is biased to that point and only a result
+    between min_km and max_km of it is taken, so "Mount Fuji" near Tokyo is never a namesake on another continent
+    (max_km) or a tour office of that name in the city (min_km). The address geocode comes first, then KNOWN_CITIES,
+    then (with near) an Amazon Location place search, which knows landmarks the address geocode does not. Both calls
+    end by the deadline (the call's time budget)."""
+    deadline = deadline or time.time() + TIME_BUDGET_S
     parts = [x.strip().lower() for x in city.split(",") if x.strip()]
     known = KNOWN_CITIES.get(city.strip().lower()) or (KNOWN_CITIES.get(parts[-1]) if parts else None)
+    close = lambda lat, lng: near is None or min_km <= _km(near["lat"], near["lng"], lat, lng) <= max_km
+    # "Mt Fuji (Kawaguchiko)" or "Mount Fuji, Japan" -> the landmark; "Fuji, Shizuoka" or "Fuji (Shizuoka)" is the city
+    name = parts[0] if parts and all(p == "japan" for p in parts[1:]) else ""
+    name = name if not re.search(r"\((?!kawaguchi)", name) else ""
+    mark = LANDMARKS.get(city.strip().lower()) or LANDMARKS.get(re.sub(r"\s*\(.*?\)", "", name))
+    if mark and close(*mark):
+        return mark
+    known = known if known and close(*known) else None
     if _mock_mode():
         return known
     try:
-        r = boto3.client("geo-places", config=_GEO_CFG).geocode(QueryText=city, MaxResults=1)
-        items = r.get("ResultItems", [])
-        if items:
-            lng, lat = items[0]["Position"]
-            return lat, lng
+        bias = {"BiasPosition": [near["lng"], near["lat"]], "MaxResults": 5} if near else {"MaxResults": 1}
+        client = _geo_client(deadline)
+        r = client.geocode(QueryText=city, **bias) if client else {}
+        for it in r.get("ResultItems") or []:
+            lng, lat = it["Position"]
+            if close(lat, lng):
+                return lat, lng
     except Exception as e:  # noqa: BLE001
         print("geocode failed:", e)
-    return known
+    if known or near is None:
+        return known
+    try:
+        client = _geo_client(deadline)
+        r = client.search_text(QueryText=city, MaxResults=10, BiasPosition=[near["lng"], near["lat"]],
+                               Language="en") if client else {}
+        for it in r.get("ResultItems") or []:
+            pos = it.get("Position")
+            if pos and close(pos[1], pos[0]):
+                return pos[1], pos[0]
+    except Exception as e:  # noqa: BLE001
+        print("place search for geocode failed:", e)
+    return None
 
 
 def _km(lat1, lng1, lat2, lng2):
@@ -216,7 +338,8 @@ def _simple_hours(raw):
         return {"open": "00:00", "close": "23:59"}
     spans = []
     for m in _TIME_RANGE.finditer(text):
-        o = _clock_minutes(m.group(1), m.group(2), m.group(3))
+        # Google writes AM/PM once when both ends share it ("5:00 – 10:00 PM"): the opening borrows the closing's
+        o = _clock_minutes(m.group(1), m.group(2), m.group(3) or m.group(6))
         c = _clock_minutes(m.group(4), m.group(5), m.group(6))
         if o is None or c is None or o >= 24 * 60:
             continue
@@ -229,28 +352,52 @@ def _simple_hours(raw):
     return {"open": f"{o // 60:02d}:{o % 60:02d}", "close": f"{c // 60:02d}:{c % 60:02d}"}
 
 
-def _validate(event):
-    raw = [str(c).lower().strip() for c in (event.get("categories") or []) if str(c).strip()]
+def _validate(event, deadline=None):
+    raw = [str(c).lower().strip() for c in _listed(event.get("categories")) if str(c).strip()]
     cats = [c for c in raw if c in CATEGORY_TAGS]
     # Anything that isn't a known category becomes a free-text keyword ("bouldering", "kayaking", ...)
-    kws = [c for c in raw if c not in CATEGORY_TAGS] + [str(k).strip() for k in (event.get("keywords") or [])]
+    kws = [c for c in raw if c not in CATEGORY_TAGS] + [str(k).strip() for k in _listed(event.get("keywords"))]
     kws = list(dict.fromkeys(re.sub(r"[^\w\s&'-]", "", k)[:40].strip().lower() for k in kws if k))[:MAX_KEYWORDS]
     kws = [k for k in kws if k]
     names = list(dict.fromkeys(re.sub(r"[^\w\s&'.,()-]", "", str(n))[:60].strip()
-                               for n in (event.get("names") or []) if str(n).strip()))[:6]
+                               for n in _listed(event.get("names")) if str(n).strip()))[:6]
     names = [n for n in names if n]
     if not cats and not kws and not names:
         cats = ["attraction", "museum", "restaurant"]
+    city = re.sub(r"[^\w\s&'.,()-]", "", str(event.get("city") or ""))[:60].strip()
     if event.get("lat") is not None and event.get("lng") is not None:
-        lat, lng = float(event["lat"]), float(event["lng"])
-    elif event.get("city"):
-        coords = _geocode(str(event["city"]))
+        coords = _coord(event["lat"], event["lng"])
         if not coords:
-            return None, _err("unknown_location", f"could not find '{event['city']}'; pass lat and lng")
+            return None, _err("bad_input", "lat and lng must be numbers")
+        lat, lng = coords
+    elif event.get("city"):
+        near = event.get("near") if isinstance(event.get("near"), dict) else {}
+        try:
+            near = {"lat": float(near["lat"]), "lng": float(near["lng"])}
+        except (KeyError, TypeError, ValueError):
+            near = None
+        try:
+            max_km = float(event.get("maxKm") or NEAR_MAX_KM)
+        except (TypeError, ValueError):
+            max_km = float(NEAR_MAX_KM)
+        try:
+            min_km = max(float(event.get("minKm") or 0), 0.0)
+        except (TypeError, ValueError):
+            min_km = 0.0
+        coords = _geocode(str(event["city"]), near, max_km, min_km, deadline)
+        if not coords:
+            within = (f" within {max_km:g} km of near" + (f" and at least {min_km:g} km from it" if min_km else "")
+                      if near else "")
+            print("unknown_location:", event["city"])
+            return None, _err("unknown_location", f"could not find '{event['city']}'{within}; pass lat and lng")
         lat, lng = coords
     else:
         return None, _err("bad_input", "give either city, or lat and lng")
     cuisine = re.sub(r"[^a-z_|]", "", str(event.get("cuisine", "")).lower())
+    # The form's "Cafés & desserts" chip arrives as a cuisine: search it as the cafe and dessert categories instead
+    cats += [c for c, w in (("cafe", "caf"), ("dessert", "dessert")) if w in cuisine] + (
+        ["cafe"] if any("coffee" in k for k in kws) else [])
+    cuisine = "|".join(c for c in cuisine.split("|") if not re.search(r"caf|dessert", c))
 
     def words(v, allowed=None, n=8):
         items = v if isinstance(v, list) else [v] if v else []
@@ -285,18 +432,30 @@ def _validate(event):
         per_cat = min(max(int(event.get("maxPerCategory", 8)), 1), MAX_PER_CATEGORY)
     except (TypeError, ValueError):
         per_cat = 8
+    try:
+        radius = min(max(float(event.get("radiusKm", 4)), 0.5), OUTDOOR_MAX_KM)
+    except (TypeError, ValueError):
+        radius = 4.0
     return {"lat": round(lat, 4), "lng": round(lng, 4), "categories": cats, "keywords": kws,
-            "radiusKm": min(max(float(event.get("radiusKm", 4)), 0.5), OUTDOOR_MAX_KM), "cuisine": cuisine or None,
+            **({"city": city} if city else {}),
+            "radiusKm": radius, "cuisine": cuisine or None,
             "foodRadiusKm": food_radius,
             "maxPerCategory": per_cat, "prefs": prefs,
-            "names": names}, None
+            **({"priceLevel": event["priceLevel"]} if event.get("priceLevel") in (1, 2, 3, 4) else {}),
+            **({"cuisineOnly": True} if event.get("cuisineOnly") is True else {}),
+            "names": names, "namesCategory": event.get("namesCategory") if event.get("namesCategory") in ("cafe", "restaurant") else None}, None
+
+
+def _is_sight(cat):
+    """A city sight: a known category that is neither food nor outdoor (searched on Google first when there is a key)."""
+    return cat in CATEGORY_TAGS and cat not in FOOD and cat not in OUTDOOR
 
 
 def _radius_km(cat, q):
     """Search radius per category: food 5 km, city sights within 15 km, outdoors/keywords up to 50 km."""
     if cat in FOOD:
         return q.get("foodRadiusKm", FOOD_RADIUS_KM)
-    if cat in ("hiking", "nature"):
+    if cat == "hiking":
         return min(max(q["radiusKm"], 40.0), OUTDOOR_MAX_KM)     # trails are usually outside the city
     if cat in OUTDOOR or cat.startswith("kw:"):
         return min(max(q["radiusKm"], 20.0), OUTDOOR_MAX_KM)
@@ -304,7 +463,7 @@ def _radius_km(cat, q):
 
 
 def _cache_key(q):
-    return "places-v4:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
+    return "places-v9:" + hashlib.sha256(json.dumps(q, sort_keys=True).encode()).hexdigest()[:32]
 
 
 def _cache_get(key):
@@ -346,7 +505,7 @@ def _place(pid, name, cat, lat, lng, q, hours_raw=None, simple=None, cuisine=Non
             else ["well-known"] if (rating or 0) >= 4.6 else [])
     if cat in INDOOR:
         tags.append("indoor")
-    if cat in FAMILY:
+    if cat in FAMILY and (q.get("prefs") or {}).get("audience") == "family":   # a family trip only
         tags.append("family")
     if t.get("wheelchair") in ("yes", "designated"):
         tags.append("wheelchair")
@@ -400,34 +559,37 @@ def _overpass_query(cats, q, cap):
 
 
 def _overpass_request(query, deadline, ua):
-    """One Overpass query: main server, then mirror. Returns (elements, error)."""
-    last = "not tried"
+    """One Overpass query: main server, then mirror. Returns (elements, error); the error names what went wrong at
+    each server."""
+    errors = []
     for url in OVERPASS_URLS:          # main server, then mirror; no retries on the same server
         left = deadline - time.time()
         if left < 8:
-            last = "time budget used up"
+            errors.append(f"time budget used up before {url}")
             break
         try:
             r = requests.post(url, data={"data": query}, headers={"User-Agent": ua},
                               timeout=(4, min(OVERPASS_TIMEOUT_S, left - 2)))
         except requests.RequestException as e:
-            last = f"{type(e).__name__} at {url}"
+            errors.append(f"{type(e).__name__} at {url}")
             continue
         if r.status_code in (429, 502, 503, 504):
-            last = f"http {r.status_code} at {url}"
+            errors.append(f"http {r.status_code} at {url}")
             continue
         if r.status_code >= 400:
-            return None, f"overpass http {r.status_code}: {r.text[:200]}"
+            return None, "overpass " + "; ".join(errors + [f"http {r.status_code}: {r.text[:200]}"])
         try:
             data = r.json()
         except ValueError:
-            last = f"non-JSON reply at {url}"   # Overpass returns an HTML error page when overloaded
+            data = None
+        if not isinstance(data, dict):
+            errors.append(f"non-JSON reply at {url}")   # Overpass returns an HTML error page when overloaded
             continue
         if data.get("remark") and not data.get("elements"):
-            last = f"overpass remark: {data['remark'][:120]}"
+            errors.append(f"overpass remark: {str(data['remark'])[:120]} at {url}")
             continue
-        return data.get("elements", []), None
-    return None, f"overpass {last}"
+        return [e for e in data.get("elements") or [] if isinstance(e, dict)], None
+    return None, "overpass " + "; ".join(errors or ["not tried"])
 
 
 def _overpass_groups(cats):
@@ -491,13 +653,14 @@ def _category_of(tags, wanted):
 def _parse_overpass(elements, q):
     out, seen = [], set()
     for el in elements:
-        tags = el.get("tags", {})
+        tags = el.get("tags") if isinstance(el.get("tags"), dict) else {}
         name = tags.get("name:en") or tags.get("name")
-        lat = el.get("lat") or (el.get("center") or {}).get("lat")
-        lng = el.get("lon") or (el.get("center") or {}).get("lon")
+        center = el.get("center") if isinstance(el.get("center"), dict) else {}
+        coords = _coord(*((el["lat"], el.get("lon")) if el.get("lat") is not None else (center.get("lat"), center.get("lon"))))
         cat = _category_of(tags, q["categories"])
-        if not name or lat is None or not cat:
+        if not name or not coords or not cat or el.get("type") is None or el.get("id") is None:
             continue
+        lat, lng = coords
         key = (name.lower(), round(lat, 3), round(lng, 3))
         if key in seen:                 # the same place can come from the well-known, normal and diet statements
             continue
@@ -532,7 +695,7 @@ def _text_targets(q):
                 c.strip()
                 for c in q["cuisine"].split("|")
                 if c.strip()
-            ][:5]
+            ][:6]
 
             for cuisine in cuisines:
                 out.append((
@@ -552,24 +715,25 @@ def _amazon_location(q, deadline):
     """Amazon Location Service Places (search_text inside a circle). Uses the Lambda role
     (geo-places:*), no API key. Opening hours are not requested, so openSimple stays None
     and the verifier skips the hours check for these places."""
-    client = boto3.client("geo-places", config=_GEO_CFG)
     out, errors = [], []
     for cat, text, radius_km, kw in _text_targets(q):
-        if deadline - time.time() < 4:
+        client = _geo_client(deadline) if deadline - time.time() >= 4 else None
+        if client is None:
             errors.append("time budget used up")
             break
         radius = min(radius_km, 50) * 1000
         try:
-            r = client.search_text(QueryText=text, MaxResults=min(q["maxPerCategory"] + 4, 20),
+            r = client.search_text(QueryText=text, MaxResults=min(q["maxPerCategory"] + 4, 20), Language="en",
                                    Filter={"Circle": {"Center": [q["lng"], q["lat"]], "Radius": int(radius)}})
         except Exception as e:  # noqa: BLE001
             errors.append(f"{cat}: {type(e).__name__}: {str(e)[:120]}")
             continue
-        for it in r.get("ResultItems", []):
-            pos = it.get("Position")
-            if not pos or not it.get("Title"):
+        for it in r.get("ResultItems") or []:
+            pos = it.get("Position") if isinstance(it, dict) else None
+            coords = _coord(pos[1], pos[0]) if isinstance(pos, (list, tuple)) and len(pos) == 2 else None
+            if not coords or not it.get("Title") or not it.get("PlaceId"):
                 continue
-            lng, lat = pos
+            lat, lng = coords
             out.append(_place("aloc:" + it["PlaceId"][:200], it["Title"], cat, lat, lng, q, activity=kw, fame_known=False,
                               url=f"https://www.google.com/maps/search/?api=1&query={quote(it['Title'])}%20{lat},{lng}"))
     if not out and errors:
@@ -577,36 +741,203 @@ def _amazon_location(q, deadline):
     return out, None
 
 
-def _google(q, deadline=None):
+def _g_cuisine(p, cat):
+    """Cuisine of a Google place from its primaryType only (a secondary type is often wrong: a tofu kaiseki place
+    listed as korean_restaurant too): <x>_restaurant with x in G_MEAL_TYPES ("indian_restaurant" -> "indian"), or
+    "steak" for a steak_house. A PRICE_LEVEL_VERY_EXPENSIVE restaurant also gets "fine_dining"."""
+    types = [str(t) for t in [p.get("primaryType")] + list(p.get("types") or []) if t]
+    main = str(p.get("primaryType") or "")
+    kind = main[:-11] if main.endswith("_restaurant") and main[:-11] in G_MEAL_TYPES else None
+    kind = kind or ("steak" if main == "steak_house" else None)
+    if (p.get("priceLevel") == "PRICE_LEVEL_VERY_EXPENSIVE" and kind != "fine_dining"
+            and (cat == "restaurant" or (cat not in GOOGLE_FIRST and "restaurant" in types))):
+        kind = f"{kind} fine_dining" if kind else "fine_dining"
+    return kind
+
+
+def _g_name(p, default="Unnamed"):
+    """English name of a Google place. Google falls back to the local name, sometimes mixed with an English one
+    ("Fujisan coffee roastery 百花テラス富士山珈琲焙煎所"): a mixed name keeps its Latin part (at least 3 Latin
+    letters); a name only in another script is kept as it is."""
+    name = (p.get("displayName") or {}).get("text") or default
+    latin = lambda ch: ord(ch) < 0x250 or 0x1E00 <= ord(ch) <= 0x1EFF or 0x2000 <= ord(ch) <= 0x206F
+    if not any(ch.isalpha() and not latin(ch) for ch in name):
+        return name
+    part = re.sub(r"\(\s*\)|\[\s*\]", " ", "".join(ch if latin(ch) else " " for ch in name))
+    part = re.sub(r"\s+", " ", part).strip(" -\u2013\u2014|/,.:;&+")
+    return part if sum(ch.isalpha() for ch in part) >= 3 else name
+
+
+def _num(v):
+    """A number from a provider field (a numeric string such as "1,200" too); None when it is not one."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return v
+    try:
+        return float(str(v).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _g_places(r):
+    """(the places list of a Google reply, error or None): an HTML page, a JSON error body or a null list is an error
+    or no places, never an exception. Places without an id or a location are left out."""
+    try:
+        data = r.json()
+    except ValueError:
+        return [], "google non-JSON reply"
+    if not isinstance(data, dict):
+        return [], "google non-JSON reply"
+    if data.get("error"):
+        return [], f"google error: {str(data['error'])[:200]}"
+    return [p for p in data.get("places") or [] if isinstance(p, dict) and p.get("id")
+            and _coord((p.get("location") or {}).get("latitude"), (p.get("location") or {}).get("longitude"))], None
+
+
+def _google(q, deadline=None, sights_first=False):
+    """Google Text Search per category and keyword. Food categories (GOOGLE_FIRST) keep 4.0+ stars and
+    GOOGLE_MIN_REVIEWS; with sights_first, sight categories ask for a full page (20) and keep 4.0+ stars and
+    GOOGLE_SIGHT_MIN_REVIEWS. Other searches (keywords, the last-resort sights provider) have no floor.
+    With sights_first, a call with a city and at least one sight category first asks "top sights in <city>" (same
+    floor; one request), and a later sight search leaves out the places that one already found. Temples and shrines
+    are searched by place type (G_SIGHT_TYPES)."""
     key = _secret("GOOGLE_MAPS_KEY")
     if not key:
         return None, "no GOOGLE_MAPS_KEY in secret"
     headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
                "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
-                                   "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri"}
-    out = []
-    for cat, text, radius_km, kw in _text_targets(q):
-        if deadline and deadline - time.time() < 5:
+                                   "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType,"
+                                   "places.types"}
+    targets = _text_targets(q)
+    if sights_first and q.get("city") and any(_is_sight(c) for c in q["categories"]):
+        targets = [(TOP_SIGHTS, f"top sights in {q['city']}", _radius_km("attraction", q), None)] + targets
+    out, errs, top_ids = [], [], set()
+    for cat, text, radius_km, kw in targets:
+        left = deadline - time.time() if deadline else 15
+        if left < 5:
             break
-        body = {"textQuery": text, "maxResultCount": min(q["maxPerCategory"], 20),
+        top = cat == TOP_SIGHTS
+        sight = sights_first and (top or _is_sight(cat))
+        floor = GOOGLE_MIN_REVIEWS if cat in GOOGLE_FIRST else GOOGLE_SIGHT_MIN_REVIEWS if sight else 0
+        body = {"textQuery": GOOGLE_FOOD_TEXT.get(text, text), "languageCode": "en",
+                "maxResultCount": 20 if sight else min(q["maxPerCategory"], 20),
                 "locationBias": {"circle": {"center": {"latitude": q["lat"], "longitude": q["lng"]},
                                             "radius": min(radius_km, 50) * 1000}}}
+        if cat in G_SIGHT_TYPES and not kw:
+            words, gtype, strict = G_SIGHT_TYPES[cat]
+            body.update(textQuery=f"{words} in {q['city']}" if q.get("city") else words, includedType=gtype,
+                        **({"strictTypeFiltering": True} if strict else {}))
+        if floor:
+            body["minRating"] = GOOGLE_MIN_RATING
         try:
             r = requests.post("https://places.googleapis.com/v1/places:searchText",
-                              headers=headers, json=body, timeout=15)
-        except requests.RequestException as e:
-            return None, f"google {type(e).__name__}"
-        if r.status_code >= 400:
-            return None, f"google http {r.status_code}: {r.text[:200]}"
-        for p in r.json().get("places", []):
-            loc = p.get("location", {})
+                              headers=headers, json=body, timeout=min(15, left))
+        except requests.RequestException as e:   # Google unreachable: stop, keeping what came back before
+            errs.append(f"google {type(e).__name__}")
+            break
+        if r.status_code >= 400:   # one failed search keeps the other categories' results
+            errs.append(f"google http {r.status_code}: {r.text[:200]}")
+            continue
+        places, perr = _g_places(r)
+        if perr:
+            errs.append(perr)
+        for p in places:
+            n, rating = _num(p.get("userRatingCount")), _num(p.get("rating"))
+            if (sight and p["id"] in top_ids) or p.get("businessStatus", "OPERATIONAL") != "OPERATIONAL" or (floor and (
+                    (n or 0) < floor or (rating or 0) < GOOGLE_MIN_RATING)):
+                continue
+            lat, lng = _coord(p["location"].get("latitude"), p["location"].get("longitude"))
             days = (p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []
-            raw = "; ".join(days) or None
-            out.append(_place("gplace:" + p["id"], p.get("displayName", {}).get("text", "Unnamed"), cat,
-                              loc.get("latitude"), loc.get("longitude"), q, hours_raw=raw, activity=kw,
-                              website=p.get("websiteUri"), url=p.get("googleMapsUri"), rating=p.get("rating"),
-                              fame_known=False))
-    return out, None
+            raw = "; ".join(str(d) for d in days) or None
+            # a sight is the category of its Google primaryType when that maps cleanly (food and keywords keep theirs)
+            real = cat if cat in FOOD or kw else G_PRIMARY_CATEGORY.get(str(p.get("primaryType") or ""),
+                                                                        "attraction" if top else cat)
+            out.append(_place("gplace:" + str(p["id"]), _g_name(p), real,
+                              lat, lng, q, hours_raw=raw, activity=kw,
+                              website=p.get("websiteUri"), url=p.get("googleMapsUri"), rating=rating,
+                              fame_known=False, cuisine=_g_cuisine(p, cat)))
+            out[-1].update(reviews=n, priceLevel=p.get("priceLevel"),
+                           **({"searchedAs": cat} if real != cat or top else {}))
+            if top:
+                top_ids.add(p["id"])
+                out[-1]["tags"] += ["top sight"] + ([] if "well-known" in out[-1]["tags"] else ["well-known"])
+            if p.get("primaryType") == "coffee_roastery":
+                out[-1]["tags"].append("roaster")
+    if errs:
+        print("google searches failed:", "; ".join(errs))
+    return (out, None) if out or not errs else (None, errs[0])
+
+
+def _google_zone(q, deadline):
+    """One walkable zone: ONE Nearby Search inside a hard circle of foodRadiusKm around lat/lng for the asked
+    categories (restaurants with the wished cuisine types, cafes and tea houses, bakeries and dessert shops),
+    then rated 4.0+, 50+ reviews and open, in review-count-aware rating order. Restaurants of a wished cuisine come
+    first; then, with a meal priceLevel (1-4), restaurants at that level, then those with no price, then the others."""
+    key = _secret("GOOGLE_MAPS_KEY")
+    if not key:
+        return None, "no GOOGLE_MAPS_KEY in secret"
+    if deadline - time.time() < 4:
+        return None, "time budget used up"
+    kinds = [c for c in (q["cuisine"] or "").split("|") if c] + list(q["prefs"]["dietary"])
+    meal = [f"{c}_restaurant" for c in kinds if c in G_MEAL_TYPES] + (["steak_house"] if "steak" in kinds else [])
+    # cuisineOnly (an area search for the traveler's cuisines): only those restaurant types, no generic "restaurant"
+    only = q.get("cuisineOnly") and q["categories"] == ["restaurant"] and meal
+    types = {"cafe": G_CAFE_TYPES, "dessert": G_TREAT_TYPES, "restaurant": meal if only else ["restaurant"] + meal}
+    cat_of = {t: c for c in q["categories"] for t in types[c]}
+    body = {"includedPrimaryTypes": sorted(cat_of), "maxResultCount": 20, "rankPreference": "POPULARITY",
+            "languageCode": "en",
+            "locationRestriction": {"circle": {"center": {"latitude": q["lat"], "longitude": q["lng"]},
+                                               "radius": q["foodRadiusKm"] * 1000}}}
+    headers = {"X-Goog-Api-Key": key, "Content-Type": "application/json",
+               "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
+                                   "places.regularOpeningHours.weekdayDescriptions,places.rating,places.websiteUri,"
+                                   "places.userRatingCount,places.priceLevel,places.businessStatus,places.primaryType,"
+                                   "places.types"}
+    try:
+        r = requests.post("https://places.googleapis.com/v1/places:searchNearby", headers=headers, json=body,
+                          timeout=min(8, deadline - time.time()))
+    except requests.RequestException as e:
+        return None, f"google {type(e).__name__}"
+    if r.status_code >= 400:
+        return None, f"google http {r.status_code}: {r.text[:200]}"
+    places, perr = _g_places(r)
+    if perr:
+        return None, perr
+    scored = []
+    for p in places:
+        n, rating, kind = _num(p.get("userRatingCount")) or 0, _num(p.get("rating")) or 0, str(p.get("primaryType") or "")
+        if (p.get("businessStatus", "OPERATIONAL") != "OPERATIONAL" or rating < GOOGLE_MIN_RATING
+                or n < GOOGLE_MIN_REVIEWS):
+            continue
+        lat, lng = _coord(p["location"].get("latitude"), p["location"].get("longitude"))
+        raw = "; ".join(str(d) for d in (p.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
+        cat = cat_of.get(kind, "restaurant")
+        g = _place("gplace:" + str(p["id"]), _g_name(p), cat,
+                   lat, lng, q, hours_raw=raw, website=p.get("websiteUri"),
+                   url=p.get("googleMapsUri"), rating=rating, fame_known=False,
+                   cuisine=_g_cuisine(p, cat) or (kind.replace("_restaurant", "").replace("_", " ")
+                                                  if kind not in ("", "restaurant") else None))
+        if kind == "coffee_roastery":
+            g["tags"].append("roaster")
+        g.update(reviews=n, priceLevel=p.get("priceLevel"), matches=_matches(g, q["prefs"]))
+        scored.append(((n * rating + 150 * 4.2) / (n + 150), g))   # Bayesian: 4.6 with 900 reviews before 4.9 with 60
+    want = q.get("priceLevel")
+    wished = [c for c in (q["cuisine"] or "").split("|") if c]
+
+    def cuisine_tier(g):   # restaurants of a wished cuisine first (matched as the agent does: cuisine, name, tags)
+        if not wished or g["category"] != "restaurant":
+            return 0
+        blob = f'{g.get("cuisine") or ""} {g.get("name") or ""} {g.get("description") or ""} {" ".join(g["tags"])}'.lower()
+        return 0 if any(c in blob or c.replace("_", " ") in blob for c in wished) else 1
+
+    def price_tier(g):
+        lvl = G_PRICE_LEVELS.get(g.get("priceLevel"))
+        return 0 if not want or g["category"] != "restaurant" else 1 if lvl is None else 0 if lvl == want else 2
+    scored.sort(key=lambda x: (cuisine_tier(x[1]), price_tier(x[1]), -x[0], x[1]["placeId"]))
+    ranked = [g for _, g in scored if _allowed(g, q["prefs"])]
+    return [g for c in q["categories"] for g in [x for x in ranked if x["category"] == c][:q["maxPerCategory"]]], None
 
 
 def _mock(q):
@@ -637,25 +968,31 @@ NAMED_MAX_KM = 80   # a named place further than this from the city is probably 
 
 
 def _named(q, deadline):
-    """Look up places the user named. Returns (places, notFound). Amazon Location first, then Google."""
+    """Look up places the user named. Returns (places, notFound). Amazon Location first, then Google. Web-searched
+    venues (namesCategory) are ordinary cafes or restaurants, not pinned, and come from Google only, rated 4.0+ with
+    50+ reviews and open, so a pick never skips the floor the zone food has."""
     found, missing = [], []
     gkey = None
+    cat = q.get("namesCategory") or "requested"
+    web = cat != "requested"
     for name in q.get("names", []):
         hit = None
         if _mock_mode():
             i = len(found)
             hit = _place(f"mock:{q['lat']:.2f},{q['lng']:.2f}:named_{re.sub(r'[^a-z0-9]', '', name.lower())[:24]}",
-                         f"{name} (sample)", "requested", q["lat"] + 0.006 * (i + 1), q["lng"] - 0.004 * (i + 1), q,
+                         f"{name} (sample)", cat, q["lat"] + 0.006 * (i + 1), q["lng"] - 0.004 * (i + 1), q,
                          hours_raw="10:00-20:00", simple={"open": "10:00", "close": "20:00"}, fame_known=False,
                          description=f"Sample entry for the requested place {name}.")
-        if hit is None and deadline - time.time() > 3:
+        if hit is None and not web and deadline - time.time() > 3:
             try:
-                r = boto3.client("geo-places", config=_GEO_CFG).search_text(
-                    QueryText=name, MaxResults=3, BiasPosition=[q["lng"], q["lat"]])
-                for it in r.get("ResultItems", []):
+                client = _geo_client(deadline)
+                r = client.search_text(   # English names, so the planner and day rules read them
+                    QueryText=name, MaxResults=3, BiasPosition=[q["lng"], q["lat"]], Language="en") if client else {}
+                for it in r.get("ResultItems") or []:
                     pos = it.get("Position")
-                    if pos and it.get("Title") and _km(q["lat"], q["lng"], pos[1], pos[0]) <= NAMED_MAX_KM:
-                        hit = _place("aloc:" + it["PlaceId"][:200], it["Title"], "requested", pos[1], pos[0], q,
+                    if (pos and it.get("Title") and it.get("PlaceId")
+                            and _km(q["lat"], q["lng"], pos[1], pos[0]) <= NAMED_MAX_KM):
+                        hit = _place("aloc:" + it["PlaceId"][:200], it["Title"], cat, pos[1], pos[0], q,
                                      fame_known=False, url="https://www.google.com/maps/search/?api=1&query="
                                      f"{quote(it['Title'])}%20{pos[1]},{pos[0]}")
                         break
@@ -665,26 +1002,38 @@ def _named(q, deadline):
             gkey = gkey if gkey is not None else (_secret("GOOGLE_MAPS_KEY") or "")
             if gkey:
                 try:
-                    r = requests.post("https://places.googleapis.com/v1/places:searchText", timeout=10, json={
-                        "textQuery": name, "maxResultCount": 1,
+                    r = requests.post("https://places.googleapis.com/v1/places:searchText",
+                                      timeout=min(10, deadline - time.time()), json={
+                        "textQuery": name, "maxResultCount": 1, "languageCode": "en",
                         "locationBias": {"circle": {"center": {"latitude": q["lat"], "longitude": q["lng"]},
                                                     "radius": 50000}}},
                         headers={"X-Goog-Api-Key": gkey, "Content-Type": "application/json",
                                  "X-Goog-FieldMask": "places.id,places.displayName,places.location,places.googleMapsUri,"
-                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating"})
+                                                     "places.regularOpeningHours.weekdayDescriptions,places.rating,"
+                                                     "places.primaryType,places.types"
+                                                     + (",places.userRatingCount,places.priceLevel,places.businessStatus"
+                                                        if web else "")})
                     for gp in (r.json().get("places") or []) if r.status_code < 400 else []:
+                        if web and (gp.get("businessStatus", "OPERATIONAL") != "OPERATIONAL"
+                                    or (gp.get("rating") or 0) < GOOGLE_MIN_RATING
+                                    or (gp.get("userRatingCount") or 0) < GOOGLE_MIN_REVIEWS):
+                            continue
                         loc = gp.get("location", {})
                         if loc and _km(q["lat"], q["lng"], loc["latitude"], loc["longitude"]) <= NAMED_MAX_KM:
                             raw = "; ".join((gp.get("regularOpeningHours") or {}).get("weekdayDescriptions") or []) or None
-                            hit = _place("gplace:" + gp["id"], gp.get("displayName", {}).get("text", name), "requested",
+                            hit = _place("gplace:" + gp["id"], _g_name(gp, name), cat,
                                          loc["latitude"], loc["longitude"], q, hours_raw=raw,
-                                         url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False)
+                                         url=gp.get("googleMapsUri"), rating=gp.get("rating"), fame_known=False,
+                                         cuisine=_g_cuisine(gp, cat))
+                            if web:
+                                hit.update(reviews=gp.get("userRatingCount"), priceLevel=gp.get("priceLevel"))
                 except Exception as e:  # noqa: BLE001
                     print("named lookup (google) failed:", e)
         if hit:
             hit["requested"] = name
-            hit["tags"] = ["requested by user"] + hit["tags"]
-            hit["matches"] = ["requested"]
+            if cat == "requested":
+                hit["tags"] = ["requested by user"] + hit["tags"]
+                hit["matches"] = ["requested"]
             found.append(hit)
         else:
             missing.append(name)
@@ -751,19 +1100,24 @@ def _rank(places, q):
                 mixed += [a, b]
             group = mixed + famous[len(mixed) // 2:] + local[len(mixed) // 2:]
         return group[:q["maxPerCategory"]]
-    out = []
-    for cat in q["categories"]:
-        out.extend(best([p for p in places if p["category"] == cat]))
+    # the city's top sights first, in Google's order (its prominence), then each category; a top sight that a food
+    # search found too stays food
+    others = {p["placeId"] for p in places if p.get("searchedAs") != TOP_SIGHTS}
+    out = [p for p in places if p.get("searchedAs") == TOP_SIGHTS and p["placeId"] not in others and _allowed(p, prefs)]
+    top = {_dupe_key(p) for p in out}   # a top sight another provider also found (an OSM temple) is not listed twice
+    for cat in q["categories"]:   # grouped by the category searched for, so a Google sight of another type stays
+        out.extend(best([p for p in places if (p.get("searchedAs") or p["category"]) == cat and _dupe_key(p) not in top]))
     seen = {_dupe_key(p) for p in out}
     for kw in q.get("keywords", []):
         group = best([p for p in places if p["category"] == "activity" and p.get("activity") == kw])
-        if _is_food_keyword(kw):                      # "halal restaurant" results are restaurants
+        cafe = "coffee" in kw or "caf" in kw
+        if _is_food_keyword(kw) or cafe:              # "halal restaurant" results are restaurants, "pour-over coffee" cafes
             relabelled = []
             for p in group:
                 if _dupe_key(p) in seen:              # already found through OpenStreetMap
                     continue
                 seen.add(_dupe_key(p))
-                p["category"] = "restaurant"
+                p["category"] = "cafe" if cafe else "restaurant"
                 if "indoor" not in p["tags"]:
                     p["tags"].append("indoor")
                 relabelled.append(p)
@@ -773,24 +1127,33 @@ def _rank(places, q):
 
 
 def _count_by_category(places):
+    """Places per category they were searched for (a Google sight can be another category, see G_PRIMARY_CATEGORY)."""
     counts = {}
     for p in places:
-        key = p.get("category") or "unknown"
+        key = p.get("searchedAs") or p.get("category") or "unknown"
         counts[key] = counts.get(key, 0) + 1
     return counts
 
 
 # ---------------------------------------------------------------- entry point
 def lambda_handler(event, context):
+    """The tool; a request it cannot read is a bad_input error, never an exception."""
+    try:
+        return _handle(event)
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError) as e:
+        return _err("bad_input", f"could not read the request: {type(e).__name__}: {str(e)[:200]}")
+
+
+def _handle(event):
     del _warnings[:]
+    deadline = time.time() + TIME_BUDGET_S   # the geocode counts against the budget too
     if isinstance(event, str):
         event = json.loads(event)
-    q, error = _validate(event or {})
+    q, error = _validate(event or {}, deadline)
     if error:
         return error
 
-    deadline = time.time() + TIME_BUDGET_S
-    named, not_found = _named(q, deadline) if q["names"] else ([], [])
+    named, not_found = _named(q, deadline) if q["names"] else ([], [])   # each lookup has its own try
     extra = {"notFound": not_found} if not_found else {}
     only_named = q["names"] and not event.get("categories") and not event.get("keywords")
     if only_named:   # just the named places, no general search
@@ -803,21 +1166,72 @@ def lambda_handler(event, context):
         return {"ok": True, "source": "mock", "query": q, "places": places,
                 "note": "Mock data — not real places.", **extra}
 
-    key = _cache_key({**q, "names": []})
+    if (q["categories"] and set(q["categories"]) <= GOOGLE_FIRST and q["foodRadiusKm"] <= ZONE_FOOD_MAX_KM
+            and event.get("lat") is not None):   # one walkable zone: Google inside a hard boundary, never cached
+        places, err = _safe(_google_zone, q, deadline)
+        source = "google-zone"
+        if not places:   # Overpass is skipped: it can take 26 s per try
+            found, err2 = _safe(_amazon_location, {**q, "keywords": []}, deadline)
+            places, source = _rank(found or [], q), "amazon_location-zone"
+            err = "; ".join(e for e in (err, err2) if e) or None
+        _pool_put(named + places)
+        return {"ok": True, "source": source, "query": q, "places": named + places, "fallbacksTried": [err] if err else [],
+                "attribution": "Ratings and places from Google Maps" if source == "google-zone"
+                               else "Place data © Amazon Location Service / HERE", **extra}
+
+    # food and the first GOOGLE_SIGHTS_MAX sights (in the traveler's interest order) come from Google first when there
+    # is a key; further sights use the free chain
+    asked_order = [str(c).strip().lower() for c in _listed(event.get("categories"))]   # q["categories"] is sorted
+    sights = sorted((c for c in q["categories"] if _is_sight(c) and c not in GOOGLE_FIRST),
+                    key=lambda c: asked_order.index(c) if c in asked_order else len(asked_order))[:GOOGLE_SIGHTS_MAX]
+    gcats = ([c for c in q["categories"] if c in GOOGLE_FIRST or c in sights]
+             if _secret("GOOGLE_MAPS_KEY") else [])
+    # the cache holds only the chain's places, so which sights Google answers is part of the key
+    key = _cache_key({**q, "names": [], **({"googleFirst": sorted(sights)} if gcats else {})})
     cached = _cache_get(key)
+    google_wanted = bool(gcats)
+    if cached and gcats and "google" in cached.get("source", "").split("+"):
+        # The cache holds only the non-Google places (Places terms): ask Google for the food and sights again
+        qf = {**q, "categories": gcats, "keywords": []}
+        found, err = _safe(_google, qf, deadline, sights_first=True)
+        if found:
+            fresh = _rank(found, qf)
+            keys = {_dupe_key(p) for p in fresh}   # a keyword cafe in the cache can be the same shop Google returns
+            cached["places"] = fresh + [p for p in cached.get("places", []) if _dupe_key(p) not in keys]
+        else:
+            print("google failed on a cached query:", err)
+            cached, gcats = None, []   # the chain below finds everything without asking Google a second time
     if cached:
         _pool_put(named + cached.get("places", []))
         return {**cached, "places": named + cached.get("places", []),
                 "source": cached.get("source", "") + "-cache", **extra}
 
-    attempts, places, sources = [], [], []
-    if q["categories"]:
-        qc = {**q, "keywords": []}
+    attempts, places, sources, chain_google, asked = [], [], [], False, []
+    if gcats:   # rated, reviewed food and sights from Google first; the rest (and all if Google fails) from the chain
+        found, err = _safe(_google, {**q, "categories": gcats, "keywords": []}, deadline, sights_first=True)
+        asked = list(gcats)   # asked once already (answered, nothing above the floor, or down): never again unfloored
+        if found:
+            places += found
+            sources.append("google")
+            have = _count_by_category(found)
+            # the chain searches the rest: food Google found nothing for, sights it kept fewer than half the asked for
+            enough = lambda c: have.get(c, 0) * 2 >= min(q["maxPerCategory"], 20) if _is_sight(c) else c in have
+            gcats = [c for c in gcats if enough(c)]
+        else:
+            attempts.append(err or "google returned no results")
+            gcats = []
+    if [c for c in q["categories"] if c not in gcats]:
+        qc = {**q, "categories": [c for c in q["categories"] if c not in gcats], "keywords": []}
         for provider in (_overpass, _amazon_location, _google):
             if deadline - time.time() < 3:
                 attempts.append(f"{provider.__name__.strip('_')} skipped: time budget used up")
                 continue
-            found, err = provider(qc, deadline)
+            # categories Google already answered above (with the rating floor) are not asked again without it
+            pq = {**qc, "categories": [c for c in qc["categories"] if c not in asked]} if provider is _google else qc
+            if not pq["categories"]:
+                attempts.append("google skipped: already searched")
+                continue
+            found, err = _safe(provider, pq, deadline)
             if err:
                 attempts.append(err)
                 print("provider failed:", err)
@@ -825,14 +1239,15 @@ def lambda_handler(event, context):
             if found:
                 places += found
                 sources.append(provider.__name__.strip("_"))
+                chain_google = provider is _google
                 break
             attempts.append(f"{provider.__name__.strip('_')} returned no results")
         # Overpass is free and detailed but thin in some places: top up short categories from Amazon Location
         if "overpass" in sources and deadline - time.time() > 8:
             have = _count_by_category(places)
-            short = [c for c in q["categories"] if have.get(c, 0) < q["maxPerCategory"]]
+            short = [c for c in qc["categories"] if have.get(c, 0) < q["maxPerCategory"]]
             if short:
-                extra_found, err = _amazon_location({**q, "categories": short, "keywords": []}, deadline)
+                extra_found, err = _safe(_amazon_location, {**q, "categories": short, "keywords": []}, deadline)
                 if err:
                     _warnings.append("top-up: " + err)
                 elif extra_found:
@@ -847,7 +1262,7 @@ def lambda_handler(event, context):
             if deadline - time.time() < 3:
                 attempts.append(f"keywords: {provider.__name__.strip('_')} skipped: time budget used up")
                 continue
-            found, err = provider(qk, deadline)
+            found, err = _safe(provider, qk, deadline)
             if err:
                 attempts.append("keywords: " + err)
                 print("keyword provider failed:", err)
@@ -868,13 +1283,20 @@ def lambda_handler(event, context):
             attribution.append("Place data © OpenStreetMap contributors")
         if any(s_.startswith("amazon_location") for s_ in sources):
             attribution.append("Place data © Amazon Location Service / HERE")
+        if "google" in sources:
+            attribution.append("Ratings and places from Google Maps")
         result = {"ok": True, "source": "+".join(sources), "query": q, "places": places, "counts": counts,
                   "warnings": list(_warnings), "fallbacksTried": attempts,
                   "attribution": "; ".join(attribution) or None}
         missing = [k for k in q["keywords"] if not any(p.get("activity") == k for p in places)]
         if missing:
             result["note"] = f"No places found for: {', '.join(missing)}."
-        _cache_put(key, result)
+        # Places terms allow no caching of Google content, and the warm path re-asks Google for its food and sights
+        # only, so a query with Google keyword results or Google as the chain's last resort is not cached; a Google
+        # failure is not cached either
+        google_other = "google-keywords" in sources or chain_google
+        if ("google" in sources or not google_wanted) and not google_other:
+            _cache_put(key, {**result, "places": [p for p in places if not p["placeId"].startswith("gplace:")]})
         _pool_put(named + places)
         return {**result, "places": named + places, **extra}
 

@@ -32,6 +32,12 @@
       "Resource": "arn:aws:secretsmanager:ap-southeast-1:<account-id>:secret:tp/dev/gateway-client-*"
     },
     {
+      "Sid": "AnthropicSecret",
+      "Effect": "Allow",
+      "Action": "secretsmanager:GetSecretValue",
+      "Resource": "arn:aws:secretsmanager:ap-southeast-1:<account-id>:secret:tp/dev/anthropic-*"
+    },
+    {
       "Sid": "Memory",
       "Effect": "Allow",
       "Action": [
