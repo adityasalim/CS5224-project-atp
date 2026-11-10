@@ -151,7 +151,7 @@ class RecoveryTests(unittest.TestCase):
 
     def invoke(self, generator):
         ns = dict(os=os, re=re, uuid=uuid, traceback=types.SimpleNamespace(print_exc=lambda: None),
-                  RunHistory=RunHistory, SESSIONS={}, REGION="test", PACKAGE_MODES={"compare"},
+                  RunHistory=RunHistory, _background=types.SimpleNamespace(busy=lambda key: None), SessionBusy=type("SessionBusy", (Exception,), {}), SESSIONS={}, REGION="test", PACKAGE_MODES={"compare"},
                   GatewayError=type("GatewayError", (Exception,), {}),
                   _user_from_context=lambda *args: "alice", _session_key=lambda u, s: (u, s),
                   _memory_session_id=lambda s: s, _touch_session=lambda *args: None,
@@ -159,7 +159,7 @@ class RecoveryTests(unittest.TestCase):
                   boto3=types.SimpleNamespace(resource=lambda *args, **kwargs: types.SimpleNamespace(Table=lambda _: self.trips)),
                   ev=lambda kind, message=None, **extra: {"type": kind, **({"message": message} if message else {}), **extra},
                   MAX_PROMPT_CHARS=4000)
-        exec(definitions(ROOT / "agent/tp_travel_agent.py", {"invoke"}), ns)
+        exec(definitions(ROOT / "agent/tp_travel_agent.py", {"invoke", "_process_request"}), ns)
         os.environ["TRIPS_TABLE"] = "trips"
         return ns["invoke"], types.SimpleNamespace(session_id="session-1")
 

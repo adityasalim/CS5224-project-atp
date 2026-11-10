@@ -297,6 +297,7 @@
 </main>
 
 <script src="auth-session.js"></script>
+<script src="background-status.js"></script>
 <script src="trip-form.js"></script>
 <script>
 /* ============================================================
@@ -810,6 +811,7 @@ function showRunRecovery() {
       }
       if (run.status === "completed") {
         store.del("pending_run"); box.remove();
+        showChips(run.choices || []);
         add("bot", (result.itineraries || []).length || (result.messages || []).some(m => m.role !== "user")
           ? "Your saved result has been restored."
           : "The request finished, but no saved itinerary was found. Check History for saved plans.");
@@ -822,6 +824,7 @@ function showRunRecovery() {
           retry.onclick = () => {
             if (busy) return;
             store.del("pending_run"); box.remove();
+        showChips(run.choices || []);
             window.pendingTripBudget = pending.budget;
             window.pendingPackageMode = pending.packageMode;
             $("input").value = pending.prompt; send();
@@ -835,6 +838,48 @@ function showRunRecovery() {
   $("chat").append(box); scrollDown();
 }
 
+function applyBackgroundStatus(result) {
+  const run = result.run;
+  const pending = pendingRun();
+  const original = (result.messages || []).find(message => message.role === "user");
+  if (pending && original) {
+    pending.prompt = original.text; store.set("pending_run", JSON.stringify(pending));
+  }
+  (result.itineraries || []).forEach(restorePlan);
+  for (const message of result.messages || []) {
+    if (message.role !== "user" && !transcript.some(t => t.kind === "bot" && t.data === message.text)) add("bot", message.text);
+  }
+  if (run.status === "completed") {
+    store.del("pending_run"); window.pendingTripBudget = null; window.pendingPackageMode = null;
+    const box = $("runRecovery"); if (box) box.remove();
+    showChips((run.choices || []).length ? run.choices : hasUsablePlan() ? FOLLOW_UPS : []);
+  } else {
+    showRunRecovery();
+    const label = $("runRecovery").querySelector("p");
+    label.textContent = run.status === "planning"
+      ? "Planning continues on AWS. You can leave this page. " + (run.progress || "Working…")
+      : "Planning stopped (" + run.status + "). Your request is saved; check status for retry options.";
+  }
+}
+const backgroundPoll = TripJobs.create({
+  pending: pendingRun,
+  visible: () => document.visibilityState !== "hidden",
+  read: async pending => {
+    const response = await apiFetch(CONFIG.API_URL.replace(/\/$/, "") + "/chats/" + encodeURIComponent(pending.sessionId) +
+      "?requestId=" + encodeURIComponent(pending.requestId));
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.message || "Could not check planning status.");
+    return result;
+  },
+  update: applyBackgroundStatus,
+  error: error => {
+    showRunRecovery();
+    const box = $("runRecovery");
+    if (box) box.querySelector("p").textContent = "Could not refresh status. This does not mean planning stopped. " + error.message;
+    if (error.code === "SESSION_EXPIRED") showSignInRecovery();
+  }
+});
+
 async function runAgent(prompt, handle) {
   const resume = window.resumePlanningRequest; window.resumePlanningRequest = null;
   if (pendingRun() && !resume) throw TripAuth.failure("REQUEST_PENDING", "An earlier request needs a status check. Check it before starting another plan.");
@@ -842,7 +887,9 @@ async function runAgent(prompt, handle) {
     budget: window.pendingTripBudget || null, packageMode: window.pendingPackageMode || null};
   store.set("pending_run", JSON.stringify(pending));
   // Do not discard budget/package settings on auth or network failure.
-  const payload = {prompt, requestId: pending.requestId,
+  pending.background = true;
+  store.set("pending_run", JSON.stringify(pending));
+  const payload = {prompt, background: true, requestId: pending.requestId,
     ...(pending.budget ? {budget: pending.budget} : {}),
     ...(pending.packageMode ? {packageMode: pending.packageMode} : {})};
   const url = `https://bedrock-agentcore.${CONFIG.REGION}.amazonaws.com/runtimes/` +
@@ -856,7 +903,7 @@ async function runAgent(prompt, handle) {
   }
   if (!res.body) throw new Error("No planner response stream");
   const reader = res.body.getReader(), dec = new TextDecoder();
-  let buf = "", finished = false, terminal = false, failed = false, modern = false, duplicate = false;
+  let buf = "", finished = false, terminal = false, failed = false, modern = false, duplicate = false, background = false;
   const take = line => {
     line = line.trim(); if (!line || line.startsWith(":")) return;
     if (line.startsWith("data:")) line = line.slice(5).trim();
@@ -864,7 +911,7 @@ async function runAgent(prompt, handle) {
     try { event = JSON.parse(line); if (typeof event === "string") event = JSON.parse(event); }
     catch (_) { return; }
     if (event.type === "run") {
-      modern = true; duplicate = event.duplicate === true;
+      modern = true; duplicate = event.duplicate === true; background = event.background === true;
       pending.saved = event.saved === true;
       store.set("pending_run", JSON.stringify(pending));
       if (event.duplicate) showRunRecovery();
@@ -872,7 +919,15 @@ async function runAgent(prompt, handle) {
       finished = true;
     } else {
       if (["itinerary", "message", "question", "error"].includes(event.type)) terminal = true;
-      if (event.type === "error") { failed = true; showRunRecovery(); }
+      if (event.type === "error") {
+        failed = true;
+        if (event.code === "SESSION_BUSY" && event.activeRequestId) {
+          pending.requestId = event.activeRequestId; pending.saved = true;
+          pending.budget = null; pending.packageMode = null;
+          store.set("pending_run", JSON.stringify(pending));
+        }
+        showRunRecovery();
+      }
       handle(event);
     }
   };
@@ -887,6 +942,11 @@ async function runAgent(prompt, handle) {
   // Older deployed runtimes have no done event. A terminal event followed by a
   // clean EOF remains compatible; status-only EOF is always an interruption.
   if (!failed && !finished && (modern || !terminal)) throw new Error("Planner stream ended before a result");
+  if (background) {
+    showRunRecovery();
+    await backgroundPoll.check();
+    return;
+  }
   if (!failed && !duplicate && (finished || terminal)) {
     store.del("pending_run");
     window.pendingTripBudget = null; window.pendingPackageMode = null;
@@ -975,6 +1035,10 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
     renderTripForm();
   }
   if (pendingRun()) showRunRecovery();
+  setInterval(() => backgroundPoll.check(), 5000);
+  window.addEventListener("pageshow", () => backgroundPoll.check());
+  document.addEventListener("visibilitychange", () => backgroundPoll.check());
+  backgroundPoll.check();
   if (!$("app").classList.contains("hidden")) $("input").focus();
 })();
 </script>
