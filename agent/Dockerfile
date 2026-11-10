@@ -6,6 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tp_travel_agent.py .
+COPY background_jobs.py .
+COPY run_history.py .
 COPY gateway_client.py .
 COPY prompts.py .
 COPY final_evaluation.py .
