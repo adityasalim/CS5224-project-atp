@@ -46,6 +46,7 @@ import boto3
 from bedrock_agentcore import BedrockAgentCoreApp
 
 from gateway_client import Gateway, GatewayError
+from run_history import RunHistory
 from prompts import get_prompt, ZONE_RULES, GLOSS
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
@@ -5356,17 +5357,21 @@ def to_web(spec, seq, pool, verify_res, judge_res, caveats, story, pdf, trip_id,
                        for st in _stays_of(seq, pool)]}
 
 
-def save(user_id, trip_id, request, spec, seq, verify_res, judge_res, story, pdf, metrics, version=1, status="planned"):
+def save(user_id, trip_id, request, spec, seq, verify_res, judge_res, story, pdf, metrics, version=1, status="planned", web=None):
     _, ddb, _ = _clients()
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     try:
         ddb.Table(os.environ["TRIPS_TABLE"]).put_item(Item={
             "userId": user_id, "tripId": trip_id, "title": story["title"], "destination": spec["destination"],
+            "sessionId": _memory_session_id(metrics.get("sessionId", "")),
+            "requestId": metrics.get("requestId", ""),
             "startDate": spec["startDate"], "endDate": spec["endDate"], "status": status, "createdAt": now,
             **({"budget": json.dumps(trip_budget(spec)), "currency": currency_code(spec)} if "budget" in spec else {"budgetSGD": str(spec["budgetSGD"])}), "request": request[:MAX_REQUEST_CHARS], "tripSpec": json.dumps(spec)})
         item = {"tripId": trip_id, "version": str(version), "createdAt": now, "itinerary": json.dumps(seq),
                 "verify": json.dumps(verify_res or {}), "judge": json.dumps(judge_res or {}),
                 "narrative": json.dumps(story), "metrics": json.dumps(metrics)}
+        if web is not None:
+            item["webItinerary"] = json.dumps({k: v for k, v in web.items() if k != "pdfUrl"})
         if pdf and pdf.get("s3Key"):
             item["pdfKey"] = pdf["s3Key"]
         ddb.Table(os.environ["ITINERARIES_TABLE"]).put_item(Item=item)
@@ -5801,7 +5806,7 @@ def deliver_refused(state, best, usage, metrics, user_id, t0):
              "summary": "I couldn't build a plan that meets all your must-haves.",
              "dayNotes": {}}
     web = to_web(spec, seq, pool, vres, judge_res, list(reasons), story, None, trip_id, best["rounds"], version)
-    web.update(status="refused", verified=False, refusalReasons=reasons, pdfUrl=None)
+    web.update(status="refused", verified=False, refusalReasons=reasons, pdfUrl=None, hasPdf=False)
     web["judge"] = {**(web.get("judge") or {}), "passed": False}
     metrics.update(latencyMs=int((time.time() - t0) * 1000), repairRounds=best["rounds"],
                    acceptanceState=STATE_BLOCKED, stopReason=best.get("stopReason"),
@@ -5809,8 +5814,9 @@ def deliver_refused(state, best, usage, metrics, user_id, t0):
                    inputTokens=usage.input, outputTokens=usage.output, modelCalls=usage.calls)
     print(json.dumps({"metric": "plan_refused", "tripId": trip_id, **metrics}))
     saved = save(user_id, trip_id, state["request"], spec, seq, vres, judge_res, story, None,
-                 metrics, version, status="refused")
+                 metrics, version, status="refused", web=web)
     metrics["persisted"] = bool(saved)
+    web["historySaved"] = bool(saved)
     state.update(plan=best["plan"], seq=seq, story=story, verify=vres)
     yield ev("itinerary", itinerary=web)
     msg = ("I couldn't build a plan that meets all your must-haves: " + " ".join(reasons)
@@ -5959,17 +5965,21 @@ def deliver(state, best, usage, metrics, user_id, t0):
                              for role, selection in usage.adapter.configuration.selections.items()}
         metrics["modelInvocations"] = [row for row in usage.adapter.records if row["tripId"] == usage.trip_id]
     print(json.dumps({"metric": "plan_completed", "tripId": trip_id, **metrics}))
-    saved = save(user_id, trip_id, state["request"], spec, seq, vres, judge_res, story, pdf, metrics, version)
-    metrics["persisted"] = bool(saved)
-    if not saved:
-        caveats.append("This itinerary could not be saved to your trip history.")
-    state.update(plan=best["plan"], seq=seq, story=story, verify=vres)
     web = to_web(spec, seq, pool, vres, judge_res, caveats, story, pdf, trip_id, best["rounds"], version)
     web["status"] = accept_state
+    web["hasPdf"] = bool(pdf and pdf.get("s3Key"))
     if package_result is not None:
-        web['packageRecommendations']=package_result
-    if metrics.get('finalEvaluation',{}).get('status')=='success':
-        web['finalEvaluation']=metrics['finalEvaluation']['evaluation']
+        web['packageRecommendations'] = package_result
+    if metrics.get('finalEvaluation', {}).get('status') == 'success':
+        web['finalEvaluation'] = metrics['finalEvaluation']['evaluation']
+    saved = save(user_id, trip_id, state["request"], spec, seq, vres, judge_res, story, pdf,
+                 metrics, version, web=web)
+    metrics["persisted"] = bool(saved)
+    web["historySaved"] = bool(saved)
+    if not saved:
+        caveats.append("This itinerary could not be saved to your trip history.")
+        web["caveats"] = caveats
+    state.update(plan=best["plan"], seq=seq, story=story, verify=vres)
     yield ev("itinerary", itinerary=web)
 
 
@@ -6521,6 +6531,7 @@ def chat_turn(message, session_id, user_id):
     usage = public_usage(Usage)
     metrics = {"sessionId": session_id, "loop": LOOP_ENABLED}
     state = SESSIONS.setdefault(_session_key(user_id, session_id), {})
+    metrics["requestId"] = state.get("_requestId", "")
     _remember(state, "user", message)
 
     if state.get("plan"):
@@ -6632,32 +6643,86 @@ def invoke(payload, context=None):
     if len(prompt) > MAX_PROMPT_CHARS:
         yield ev("message", f"Your message is longer than {MAX_PROMPT_CHARS} characters. Please shorten it or split it into two messages.")
         return
+    request_id = payload.get("requestId") or str(uuid.uuid4())
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", request_id):
+        yield ev("error", "Invalid request ID.", code="INVALID_REQUEST")
+        return
+    # Persist before the first yield. A disconnected browser can find this request
+    # even if the stream never delivers another event. No extra table is needed.
     try:
+        history = RunHistory(boto3.resource("dynamodb", region_name=REGION).Table(os.environ["TRIPS_TABLE"]), user_id,
+                             _memory_session_id(session_id), request_id)
+        claimed = history.begin(prompt)
+    except Exception:
+        traceback.print_exc()
+        yield ev("error", "Your request could not be saved. Planning has not started. Please try again.",
+                 code="HISTORY_UNAVAILABLE")
+        return
+    if not claimed:
+        yield ev("run", run=history.public(), saved=True, duplicate=True)
+        yield ev("message", "This request was already received. Check its status in History; it has not been started again.")
+        yield ev("done", requestId=request_id)
+        return
+
+    def checkpoint(**kwargs):
+        try:
+            history.checkpoint(**kwargs)
+        except Exception:
+            # A checkpoint problem must not discard an otherwise valid itinerary.
+            traceback.print_exc()
+
+    SESSIONS.setdefault(skey, {})["_requestId"] = request_id
+    memory_save(user_id, session_id, [("USER", prompt[:4000])])
+    terminal = False
+    result_saved = False
+    try:
+        yield ev("run", run=history.public(), saved=True)
         if 'packageMode' in payload:
-            if payload['packageMode'] not in PACKAGE_MODES: raise ValueError('Invalid package mode')
-            SESSIONS.setdefault(skey,{})['requestedPackageMode']=payload['packageMode']
+            if payload['packageMode'] not in PACKAGE_MODES:
+                raise ValueError('Invalid package mode')
+            SESSIONS.setdefault(skey, {})['requestedPackageMode'] = payload['packageMode']
         if "budget" in payload:
-            try:
-                SESSIONS.setdefault(skey, {})["requestedBudget"] = trip_budget({"budget": payload["budget"]})
-            except ValueError:
-                yield ev("error", 'I couldn\'t read the budget override; send it as {"amount": number, "currency": "CODE"}.')
-                return
-        turns = [("USER", prompt[:4000])]
+            SESSIONS.setdefault(skey, {})["requestedBudget"] = trip_budget({"budget": payload["budget"]})
         for e in chat_turn(prompt[:4000], session_id, user_id):
             if e["type"] in ("message", "question"):
-                turns.append(("ASSISTANT", e["message"]))
+                checkpoint(message=e["message"])
+                memory_save(user_id, session_id, [("ASSISTANT", e["message"])])
+            elif e["type"] == "status":
+                checkpoint(progress=e.get("message"))
             elif e["type"] == "itinerary":
+                # save() has already persisted the full card and PDF pointer.
+                checkpoint(status="completed", itinerary=e["itinerary"] if e["itinerary"].get("historySaved", True) else None, force=True)
+                result_saved = e["itinerary"].get("historySaved", True)
                 it = e["itinerary"]
-                turns.append(("ASSISTANT", f"[Itinerary v{it.get('version')}] {it.get('title')}: {it.get('summary', '')} "
-                                           + " | ".join(d["title"] for d in it.get("days", []))))
+                summary = (f"[Itinerary v{it.get('version')}] {it.get('title')}: {it.get('summary', '')} "
+                           + " | ".join(d["title"] for d in it.get("days", [])))
+                checkpoint(message=summary)
+                memory_save(user_id, session_id, [("ASSISTANT", summary)])
+            elif e["type"] == "error":
+                terminal = True
+                checkpoint(status="failed", message=e.get("message", "Planning failed"))
             yield e
-        memory_save(user_id, session_id, turns)
-    except GatewayError as e:
-        print("gateway error:", e)
-        yield ev("error", f"A planning tool is unavailable right now ({e}). Please try again.")
-    except Exception as e:  # noqa: BLE001
+        if not terminal:
+            checkpoint(status="completed", force=True)
+        terminal = True
+        yield ev("done", requestId=request_id)
+    except GatewayError:
         traceback.print_exc()
-        yield ev("error", f"Something went wrong while planning ({type(e).__name__}). Please try again.")
+        terminal = True
+        text = "A planning service is unavailable. Your request is in History; check its status before retrying."
+        checkpoint(status="completed" if result_saved else "failed", message=text)
+        yield ev("error", text, code="TOOL_UNAVAILABLE")
+    except Exception:
+        traceback.print_exc()
+        terminal = True
+        text = "Planning stopped unexpectedly. Your request is in History; check its status before retrying."
+        checkpoint(status="completed" if result_saved else "failed", message=text)
+        yield ev("error", text, code="PLANNING_FAILED")
+    finally:
+        if not terminal:
+            # GeneratorExit/client disconnect is not a normal Exception. Keep the
+            # receipt and any finished result even when the stream is cancelled.
+            checkpoint(status="completed" if result_saved else "interrupted", force=True)
 
 
 if __name__ == "__main__":

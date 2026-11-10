@@ -7,16 +7,13 @@
   if (typeof CONFIG === 'undefined' || !CONFIG.API_URL) return;
 
   var base = CONFIG.API_URL.replace(/\/$/, '');
-  function token() { try { return sessionStorage.getItem('id_token'); } catch (e) { return null; } }
   function api(path) {
-    var t = token();
-    if (!t) return Promise.reject(new Error('Please sign in to see your history.'));
-    return fetch(base + path, { headers: { Authorization: t } }).then(function (r) {
-      if (r.status === 401) throw new Error('Your sign-in expired. Sign in again.');
+    return apiFetch(base + path).then(function (r) {
       if (!r.ok) throw new Error('Could not load history (' + r.status + ').');
       return r.json();
     });
   }
+
   function mk(tag, cls, text) {
     var e = document.createElement(tag);
     if (cls) e.className = cls;
@@ -57,12 +54,13 @@
   function close() { panel.classList.add('hidden'); }
   closeBtn.onclick = close;
 
-  function toTranscript(messages) {
+  function toTranscript(messages, itineraries) {
     var out = [];
     messages.forEach(function (m) {
       if (m.role === 'user') out.push({ kind: 'me', data: m.text });
       else out.push({ kind: 'bot', data: m.text });
     });
+    (itineraries || []).forEach(function (it) { out.push({kind: "itinerary", data: it}); });
     return out.slice(-60);
   }
 
@@ -70,8 +68,10 @@
     btn.disabled = true;
     msg.textContent = 'Opening chat...';
     api('/chats/' + encodeURIComponent(id)).then(function (res) {
+      if (busy) throw new Error('Wait for the current request before opening another chat.');
+      if (pendingRun() && pendingRun().sessionId !== id) throw new Error('Check the pending request before opening another chat.');
       sessionStorage.setItem('session_id', id);
-      sessionStorage.setItem('transcript', JSON.stringify(toTranscript(res.messages || [])));
+      sessionStorage.setItem('transcript', JSON.stringify(toTranscript(res.messages || [], res.itineraries || [])));
       location.reload();
     }).catch(function (e) {
       btn.disabled = false;
@@ -82,14 +82,34 @@
   function load() {
     list.textContent = '';
     msg.textContent = 'Loading...';
-    api('/chats').then(function (res) {
+    Promise.allSettled([api('/chats'), api('/trips')]).then(function (results) {
+      if (results.every(r => r.status === 'rejected')) throw results[0].reason;
+      var res = results[0].status === 'fulfilled' ? results[0].value : {};
+      var trips = results[1].status === 'fulfilled' ? results[1].value.trips || [] : [];
       var sessions = res.sessions || [];
-      msg.textContent = sessions.length ? '' : 'No earlier chats yet.';
+      msg.textContent = sessions.length || trips.length ? '' : 'No earlier chats yet.';
+      if (results.some(r => r.status === 'rejected')) msg.textContent = 'Some history could not be loaded. Available saved entries are shown below.';
+      if (res.memoryUnavailable) msg.textContent = 'Some older chat messages are temporarily unavailable. Saved requests and plans are shown below.';
       sessions.forEach(function (s) {
         var b = mk('button', 'item');
         b.type = 'button';
-        b.append(mk('div', 't', s.title || 'Conversation'), mk('div', 'd', fmtDate(s.createdAt)));
+        b.append(mk('div', 't', s.title || 'Conversation'), mk('div', 'd', fmtDate(s.createdAt) + (s.run ? ' · ' + s.run.status : '')));
         b.onclick = function () { openSession(s.sessionId, b); };
+        list.append(b);
+      });
+      if (trips.length) list.append(mk('h3', null, 'Saved plans & PDFs'));
+      trips.forEach(function (trip) {
+        var b = mk('button', 'item', trip.title || trip.destination || 'Saved plan');
+        b.type = 'button';
+        b.onclick = function () {
+          b.disabled = true;
+          api('/trips/' + encodeURIComponent(trip.tripId)).then(function (result) {
+            if (busy) throw new Error('Wait for the current request before opening a saved plan.');
+            if (!result.webItinerary) throw new Error('No saved itinerary is available for this trip.');
+            $('tripFormScreen').classList.add('hidden'); $('app').classList.remove('hidden');
+            restorePlan(result.webItinerary); close();
+          }).catch(function (e) { msg.textContent = e.message; }).finally(function () { b.disabled = false; });
+        };
         list.append(b);
       });
     }).catch(function (e) { msg.textContent = e.message; });

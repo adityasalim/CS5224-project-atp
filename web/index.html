@@ -296,6 +296,7 @@
   </div>
 </main>
 
+<script src="auth-session.js"></script>
 <script src="trip-form.js"></script>
 <script>
 /* ============================================================
@@ -329,6 +330,18 @@ const store = {
   set: (k, v) => { try { sessionStorage.setItem(k, v); } catch {} },
   del: (k) => { try { sessionStorage.removeItem(k); } catch {} }
 };
+
+const auth = TripAuth.create(CONFIG, store);
+function showSignInRecovery() {
+  if ($("reauthBtn")) return;
+  const button = el("button", null, "Sign in again"); button.id = "reauthBtn";
+  button.type = "button"; button.onclick = signIn;
+  $("signOutBtn").parentNode.append(button);
+}
+async function apiFetch(url, options) {
+  try { return await (AUTH_ON ? auth.fetch(url, options) : fetch(url, options)); }
+  catch (e) { if (e.code === "SESSION_EXPIRED") showSignInRecovery(); throw e; }
+}
 
 /* ---------- helpers ---------- */
 function b64url(bytes) {
@@ -365,8 +378,7 @@ async function handleCallback() {
       redirect_uri: REDIRECT_URI, code_verifier: store.get("pkce_verifier") || "" }) });
   if (!res.ok) { alert("Sign-in failed (" + res.status + "). Check the Cognito return URL matches " + REDIRECT_URI); return; }
   const t = await res.json();
-  store.set("id_token", t.id_token); store.set("access_token", t.access_token);
-  store.set("expires_at", String(Date.now() + t.expires_in * 1000));
+  auth.acceptTokens(t);
   store.del("pkce_verifier"); store.del("oauth_state");
 }
 function currentUser() {
@@ -383,7 +395,7 @@ function updateProviderApprovals() {
   link.classList.toggle("hidden", !allowed);
 }
 function signOut() {
-  ["id_token", "access_token", "expires_at", "session_id", "transcript"].forEach(store.del);
+  ["id_token", "access_token", "refresh_token", "expires_at", "auth_owner", "session_id", "transcript", "pending_run"].forEach(store.del);
   updateProviderApprovals();
   if (AUTH_ON) {
     const url = new URL(CONFIG.COGNITO_DOMAIN + "/logout");
@@ -402,7 +414,7 @@ function sessionId() {
 function saveTranscript() { store.set("transcript", JSON.stringify(transcript.slice(-60))); }
 function newTrip() {
   if (busy) return;
-  store.del("session_id"); store.del("transcript"); transcript = [];
+  store.del("session_id"); store.del("transcript"); store.del("pending_run"); transcript = [];
   $("chat").innerHTML = "";
   greet();
   showChips([]);
@@ -510,7 +522,7 @@ function renderItinerary(it) {
     card.append(t);
   }
   const pdf = safeUrl(it.pdfUrl);
-  if (pdf || (CONFIG.API_URL && it.tripId)) {
+  if (it.hasPdf !== false && (pdf || (CONFIG.API_URL && it.tripId))) {
     const l = el("a", "pdf", "Download PDF plan ↓"); l.href = pdf || "#"; l.target = "_blank"; l.rel = "noopener";
     l.onclick = (e) => { e.preventDefault(); openPdf(it, l); };
     card.append(l);
@@ -621,10 +633,9 @@ function feedbackBox(it) {
 
   send.onclick = async () => {
     if (!state.rating) return;
-    if (AUTH_ON && !currentUser()) { status.textContent = "Please sign in again to send feedback."; return; }
     send.disabled = true; status.textContent = "Sending…";
     try {
-      const r = await fetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/feedback`, {
+      const r = await apiFetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/feedback`, {
         method: "POST", headers: { "Authorization": store.get("id_token") || "", "Content-Type": "application/json" },
         body: JSON.stringify({ rating: state.rating, comments: ta.value.trim(), version: it.version || null,
                                ...state.dims })
@@ -688,11 +699,11 @@ function greet() {
 const PDF_LINK_MS = 14 * 60 * 1000;
 async function openPdf(it, link) {
   const fresh = it.pdfUrl && it.receivedAt && Date.now() - it.receivedAt < PDF_LINK_MS;
-  if (CONFIG.API_URL && it.tripId && (!AUTH_ON || currentUser())) {
+  if (CONFIG.API_URL && it.tripId) {
     const win = window.open("", "_blank");          // open now (inside the click) so popup blockers allow it
     const old = link.textContent; link.textContent = "Preparing PDF…";
     try {
-      const r = await fetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/pdf` +
+      const r = await apiFetch(`${CONFIG.API_URL.replace(/\/$/, "")}/trips/${encodeURIComponent(it.tripId)}/pdf` +
                             (it.version ? `?version=${encodeURIComponent(it.version)}` : ""),
                             { headers: { "Authorization": store.get("id_token") || "" } });
       const body = await r.json().catch(() => ({}));
@@ -720,6 +731,9 @@ function setBusy(b) { busy = b; $("sendBtn").disabled = b; $("newTripBtn").disab
 async function send() {
   const text = $("input").value.trim();
   if (!text || busy) return;
+  if (LIVE_AGENT && pendingRun() && !window.resumePlanningRequest) {
+    add("error", "Check the pending request before starting another plan."); showRunRecovery(); return;
+  }
   $("input").value = ""; autosize(); showChips([]);
   add("me", text);
   setBusy(true);
@@ -738,7 +752,12 @@ async function send() {
     else if (ev.type === "error") { add("error", ev.message); ok = false; }
   };
   try { LIVE_AGENT ? await runAgent(text, handle) : await runDemo(text, handle); }
-  catch (e) { ok = false; add("error", "Couldn't reach the planner: " + e.message); }
+  catch (e) {
+    ok = false;
+    const message = e.code ? e.message : "Connection to the planner was interrupted. Your request remains in this tab. Check status before retrying.";
+    add("error", message);
+    showRunRecovery();
+  }
   finally {
     work.done(ok); setBusy(false);
     if (!gotChoices && hasUsablePlan()) showChips(FOLLOW_UPS);
@@ -750,35 +769,129 @@ function hasUsablePlan() {
   return plans.length > 0 && (plans[plans.length - 1].data || plans[plans.length - 1]).status !== "refused";
 }
 
+function pendingRun() {
+  try { return JSON.parse(store.get("pending_run") || "null"); } catch { return null; }
+}
+function restorePlan(it) {
+  if (!transcript.some(t => t.kind === "itinerary" && t.data.tripId === it.tripId && Number(t.data.version) === Number(it.version))) {
+    add("itinerary", it);
+  }
+}
+function showRunRecovery() {
+  const previous = $("runRecovery"); if (previous) previous.remove();
+  const pending = pendingRun();
+  if (!pending) return;
+  const box = el("div", "bubble"); box.id = "runRecovery";
+  const label = el("p", null, pending.saved ? "Your request is saved in History." : "Your request is kept in this browser tab; server status is not yet confirmed.");
+  const check = el("button", null, "Check request status"); check.type = "button";
+  const login = el("button", null, "Sign in again"); login.type = "button"; login.onclick = signIn;
+  box.append(label, check, login);
+  check.onclick = async () => {
+    check.disabled = true;
+    try {
+      const response = await apiFetch(CONFIG.API_URL.replace(/\/$/, "") + "/chats/" + encodeURIComponent(pending.sessionId) +
+        "?requestId=" + encodeURIComponent(pending.requestId));
+      const result = await response.json();
+      if (response.status === 404 && !box.querySelector(".retry-run")) {
+        const resend = el("button", "retry-run", "Send saved request"); resend.type = "button";
+        resend.onclick = () => {
+          if (busy) return;
+          window.resumePlanningRequest = pending;
+          box.remove(); $("input").value = pending.prompt; send();
+        };
+        box.append(resend);
+      }
+      if (!response.ok) throw new Error(result.message || "Could not check this request.");
+      const run = result.run;
+      if (!run) throw new Error("No request status is available yet.");
+      (result.itineraries || []).forEach(restorePlan);
+      for (const message of result.messages || []) {
+        if (message.role !== "user" && !transcript.some(t => t.kind === "bot" && t.data === message.text)) add("bot", message.text);
+      }
+      if (run.status === "completed") {
+        store.del("pending_run"); box.remove();
+        add("bot", (result.itineraries || []).length || (result.messages || []).some(m => m.role !== "user")
+          ? "Your saved result has been restored."
+          : "The request finished, but no saved itinerary was found. Check History for saved plans.");
+      } else {
+        label.textContent = run.status === "planning"
+          ? "Planning was last reported as in progress: " + (run.progress || "Working") + ". Check again shortly; this does not start another run."
+          : "This request stopped (" + run.status + "). Your original request is saved. You can retry it.";
+        if (["failed", "interrupted"].includes(run.status) && !box.querySelector(".retry-run")) {
+          const retry = el("button", "retry-run", "Retry saved request"); retry.type = "button";
+          retry.onclick = () => {
+            if (busy) return;
+            store.del("pending_run"); box.remove();
+            window.pendingTripBudget = pending.budget;
+            window.pendingPackageMode = pending.packageMode;
+            $("input").value = pending.prompt; send();
+          };
+          box.append(retry);
+        }
+      }
+    } catch (e) { label.textContent = e.message + " Your request is still kept in this tab."; }
+    finally { check.disabled = false; }
+  };
+  $("chat").append(box); scrollDown();
+}
+
 async function runAgent(prompt, handle) {
-  if (AUTH_ON && !currentUser()) { handle({ type: "error", message: "Your sign-in has expired. Please sign in again." }); return; }
+  const resume = window.resumePlanningRequest; window.resumePlanningRequest = null;
+  if (pendingRun() && !resume) throw TripAuth.failure("REQUEST_PENDING", "An earlier request needs a status check. Check it before starting another plan.");
+  const pending = resume || {requestId: crypto.randomUUID(), sessionId: sessionId(), prompt,
+    budget: window.pendingTripBudget || null, packageMode: window.pendingPackageMode || null};
+  store.set("pending_run", JSON.stringify(pending));
+  // Do not discard budget/package settings on auth or network failure.
+  const payload = {prompt, requestId: pending.requestId,
+    ...(pending.budget ? {budget: pending.budget} : {}),
+    ...(pending.packageMode ? {packageMode: pending.packageMode} : {})};
   const url = `https://bedrock-agentcore.${CONFIG.REGION}.amazonaws.com/runtimes/` +
               `${encodeURIComponent(CONFIG.AGENT_RUNTIME_ARN)}/invocations?qualifier=DEFAULT`;
-  const res = await fetch(url, { method: "POST",
-    headers: { "Authorization": "Bearer " + store.get("access_token"), "Content-Type": "application/json",
-               "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": sessionId() },
-    body: JSON.stringify({ prompt, ...(window.pendingTripBudget ? {budget: window.pendingTripBudget} : {}), ...(window.pendingPackageMode ? {packageMode: window.pendingPackageMode} : {}) }) });
-  window.pendingTripBudget = null;
-  window.pendingPackageMode = null;
-  if (!res.ok) { handle({ type: "error", message: "Agent error " + res.status + ": " + (await res.text()).slice(0, 300) }); return; }
-  const reader = res.body.getReader(), dec = new TextDecoder();
-  let buf = "", raw = "", any = false;
-  const take = (line) => {
-    line = line.trim(); if (!line) return;
-    if (line.startsWith("data:")) line = line.slice(5).trim();
-    try {
-      let ev = JSON.parse(line);
-      if (typeof ev === "string") ev = JSON.parse(ev);   // some runtimes double-encode streamed JSON
-      if (ev && ev.type) { handle(ev); any = true; } else raw += line + "\n";
-    } catch { raw += line + "\n"; }
-  };
-  while (true) {
-    const { value, done } = await reader.read(); if (done) break;
-    buf += dec.decode(value, { stream: true });
-    const lines = buf.split("\n"); buf = lines.pop(); lines.forEach(take);
+  const options = {method: "POST", headers: {"Content-Type": "application/json",
+    "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": pending.sessionId}, body: JSON.stringify(payload)};
+  const res = AUTH_ON ? await auth.fetch(url, options, "access_token") : await fetch(url, options);
+  if (!res.ok) {
+    if (res.status === 403) throw TripAuth.failure("ACCESS_DENIED", "Your account is not permitted to use this planner. This is an access error, not a confirmed expired session.");
+    throw TripAuth.failure("PLANNER_UNAVAILABLE", "The planner could not accept the request (HTTP " + res.status + "). Check status before retrying.");
   }
-  if (buf.trim()) take(buf);
-  if (!any && raw.trim()) handle({ type: "message", message: raw.trim().slice(0, 4000) });
+  if (!res.body) throw new Error("No planner response stream");
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "", finished = false, terminal = false, failed = false, modern = false, duplicate = false;
+  const take = line => {
+    line = line.trim(); if (!line || line.startsWith(":")) return;
+    if (line.startsWith("data:")) line = line.slice(5).trim();
+    let event;
+    try { event = JSON.parse(line); if (typeof event === "string") event = JSON.parse(event); }
+    catch (_) { return; }
+    if (event.type === "run") {
+      modern = true; duplicate = event.duplicate === true;
+      pending.saved = event.saved === true;
+      store.set("pending_run", JSON.stringify(pending));
+      if (event.duplicate) showRunRecovery();
+    } else if (event.type === "done") {
+      finished = true;
+    } else {
+      if (["itinerary", "message", "question", "error"].includes(event.type)) terminal = true;
+      if (event.type === "error") { failed = true; showRunRecovery(); }
+      handle(event);
+    }
+  };
+  try {
+    while (true) {
+      const {value, done} = await reader.read(); if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split("\n"); buf = lines.pop(); lines.forEach(take);
+    }
+    buf += dec.decode(); if (buf.trim()) take(buf);
+  } finally { reader.releaseLock(); }
+  // Older deployed runtimes have no done event. A terminal event followed by a
+  // clean EOF remains compatible; status-only EOF is always an interruption.
+  if (!failed && !finished && (modern || !terminal)) throw new Error("Planner stream ended before a result");
+  if (!failed && !duplicate && (finished || terminal)) {
+    store.del("pending_run");
+    window.pendingTripBudget = null; window.pendingPackageMode = null;
+    const recovery = $("runRecovery"); if (recovery) recovery.remove();
+  }
 }
 
 /* ---------- demo mode (no backend yet) ---------- */
@@ -826,6 +939,14 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
   if (['/agency/index.html','/agency/admin.html'].includes(portal)) store.set('portal_return',portal);
   if (AUTH_ON) {
     await handleCallback();
+    if (store.get("refresh_token")) {
+      try { await auth.ensureFresh(); }
+      catch (e) { if (e.code !== "SESSION_EXPIRED") console.warn(e.message); }
+    }
+    // Timers may pause on mobile; every request also checks token expiry.
+    setInterval(() => {
+      if (store.get("refresh_token")) auth.ensureFresh().catch(e => { if (e.code === "SESSION_EXPIRED") showSignInRecovery(); });
+    }, 60000);
     updateProviderApprovals();
     setInterval(updateProviderApprovals, 1000);
     window.addEventListener("pageshow", updateProviderApprovals);
@@ -853,6 +974,7 @@ $("composer").addEventListener("submit", (e) => { e.preventDefault(); send(); })
     $("tripFormScreen").classList.remove("hidden");
     renderTripForm();
   }
+  if (pendingRun()) showRunRecovery();
   if (!$("app").classList.contains("hidden")) $("input").focus();
 })();
 </script>

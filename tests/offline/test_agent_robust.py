@@ -97,7 +97,7 @@ class SM:
     def get_secret_value(self, SecretId): return {"SecretString": json.dumps({"client_id": "a", "client_secret": "b"})}
 class T:
     def __init__(s, n): s.n = n
-    def put_item(s, Item): pass
+    def put_item(s, Item, **kwargs): pass
 class R:
     def Table(s, n): return T(n)
 b = types.ModuleType("boto3")
