@@ -236,9 +236,9 @@ def deploy_web(changed, commit, report):
     # Publish the supporting frontend files as well as index.html.
     import mimetypes
     for asset in sorted((REPO / "web").rglob("*")):
-        if not asset.is_file() or asset.name == "index.html":
-            continue
         key = asset.relative_to(REPO / "web").as_posix()
+        if not asset.is_file() or key == "index.html":  # root page already uploaded above with CONFIG filled in
+            continue
         body = asset.read_bytes()
         if key == "agency/config.js":
             config = {
