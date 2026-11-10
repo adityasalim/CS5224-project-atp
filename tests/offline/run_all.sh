@@ -51,3 +51,5 @@ node ../test_auth_recovery.js
 
 python3 test_background_jobs.py
 node ../test_background_status.js
+
+node ../test_smooth_progress.js

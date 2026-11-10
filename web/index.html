@@ -661,15 +661,16 @@ function render(item) {
 function add(kind, data) { const item = { kind, data }; transcript.push(item); saveTranscript(); render(item); }
 
 /* progress bubble for the current turn */
-function startWork() {
+function startWork(autoScroll = true) {
   const row = el("div", "row bot"); const box = el("div", "bubble work");
   const now = el("div", "now"); now.append(el("span", "spin"), el("span", "label", "Working…"));
   const det = el("details"); const sum = el("summary", null, "Show steps"); const ol = el("ol");
-  det.append(sum, ol); box.append(now, det); row.append(box); $("chat").append(row); scrollDown();
-  let n = 0;
+  det.append(sum, ol); box.append(now, det); row.append(box); $("chat").append(row); if (autoScroll) scrollDown();
+  let n = 0, last = null, complete = false;
   return {
-    step(text) { n++; now.querySelector(".label").textContent = text; ol.append(el("li", null, text)); sum.textContent = "Show steps (" + n + ")"; scrollDown(); },
+    step(text, follow = true) { if (text === last || complete) return; last = text; n++; now.querySelector(".label").textContent = text; ol.append(el("li", null, text)); sum.textContent = "Show steps (" + n + ")"; if (follow) scrollDown(); },
     done(ok) {
+      if (complete) return; complete = true;
       if (!n) { row.remove(); return; }
       box.classList.add("done"); now.remove();
       sum.textContent = (ok ? "✓ " : "") + n + " step" + (n > 1 ? "s" : "") + " · show";
@@ -727,6 +728,7 @@ async function openPdf(it, link) {
 
 /* ---------- talking to the agent ---------- */
 let busy = false;
+let backgroundWork = null, backgroundWorkRequest = null;
 function setBusy(b) { busy = b; $("sendBtn").disabled = b; $("newTripBtn").disabled = b; $("input").disabled = b; if (!b) $("input").focus(); }
 
 async function send() {
@@ -739,6 +741,7 @@ async function send() {
   add("me", text);
   setBusy(true);
   const work = startWork();
+  if (LIVE_AGENT) { backgroundWork = work; backgroundWorkRequest = null; }
   let gotPlan = false, gotChoices = false, ok = true;
   const handle = (ev) => {
     if (ev.type === "status") work.step(ev.message);
@@ -760,8 +763,16 @@ async function send() {
     showRunRecovery();
   }
   finally {
-    work.done(ok); setBusy(false);
-    if (!gotChoices && hasUsablePlan()) showChips(FOLLOW_UPS);
+    const pending = pendingRun();
+    if (ok && pending && pending.background) {
+      if (!backgroundWork) backgroundWork = work;
+      backgroundWorkRequest = pending.requestId;
+    } else {
+      work.done(ok);
+      if (backgroundWork === work) { backgroundWork = null; backgroundWorkRequest = null; }
+    }
+    setBusy(false);
+    if (!pending && !gotChoices && hasUsablePlan()) showChips(FOLLOW_UPS);
   }
 }
 // follow-up chips ("make day 3 more relaxed") only make sense when the latest plan was delivered, not refused
@@ -779,10 +790,12 @@ function restorePlan(it) {
   }
 }
 function showRunRecovery() {
-  const previous = $("runRecovery"); if (previous) previous.remove();
+  const previous = $("runRecovery");
   const pending = pendingRun();
-  if (!pending) return;
-  const box = el("div", "bubble"); box.id = "runRecovery";
+  if (!pending) { if (previous) previous.remove(); return; }
+  if (previous && previous.dataset.requestId === pending.requestId) return;
+  if (previous) previous.remove();
+  const box = el("div", "bubble"); box.id = "runRecovery"; box.dataset.requestId = pending.requestId;
   const label = el("p", null, pending.saved ? "Your request is saved in History." : "Your request is kept in this browser tab; server status is not yet confirmed.");
   const check = el("button", null, "Check request status"); check.type = "button";
   const login = el("button", null, "Sign in again"); login.type = "button"; login.onclick = signIn;
@@ -839,6 +852,8 @@ function showRunRecovery() {
 }
 
 function applyBackgroundStatus(result) {
+  const chat = $("chat"), position = chat.scrollTop;
+  const follow = chat.scrollHeight - chat.clientHeight - position < 80;
   const run = result.run;
   const pending = pendingRun();
   const original = (result.messages || []).find(message => message.role === "user");
@@ -851,15 +866,29 @@ function applyBackgroundStatus(result) {
   }
   if (run.status === "completed") {
     store.del("pending_run"); window.pendingTripBudget = null; window.pendingPackageMode = null;
+    if (backgroundWork) backgroundWork.done(true);
+    backgroundWork = null; backgroundWorkRequest = null;
     const box = $("runRecovery"); if (box) box.remove();
     showChips((run.choices || []).length ? run.choices : hasUsablePlan() ? FOLLOW_UPS : []);
   } else {
+    if (run.status === "planning") {
+      if (!backgroundWork || backgroundWorkRequest && backgroundWorkRequest !== run.requestId) {
+        backgroundWork = startWork(false);
+      }
+      backgroundWorkRequest = run.requestId;
+      backgroundWork.step(run.progress || "Planning continues on AWS…", false);
+    } else {
+      if (backgroundWork) backgroundWork.done(false);
+      backgroundWork = null; backgroundWorkRequest = null;
+    }
     showRunRecovery();
     const label = $("runRecovery").querySelector("p");
-    label.textContent = run.status === "planning"
+    const statusText = run.status === "planning"
       ? "Planning continues on AWS. You can leave this page. " + (run.progress || "Working…")
       : "Planning stopped (" + run.status + "). Your request is saved; check status for retry options.";
+    if (label.textContent !== statusText) label.textContent = statusText;
   }
+  if (!follow) chat.scrollTop = position;
 }
 const backgroundPoll = TripJobs.create({
   pending: pendingRun,
