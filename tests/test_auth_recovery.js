@@ -12,6 +12,7 @@ function harness(fetch) {
     document: {getElementById: id => id === 'runRecovery' ? null : ({addEventListener() {}})}});
   context.window = context;
   vm.runInContext(fs.readFileSync('web/auth-session.js', 'utf8'), context);
+  vm.runInContext(fs.readFileSync('web/background-status.js', 'utf8'), context);
   const store = {get: storage.getItem, set: storage.setItem, del: storage.removeItem};
   const auth = context.TripAuth.create({COGNITO_DOMAIN: 'https://auth.test', COGNITO_CLIENT_ID: 'client'}, store);
   function tokens(exp = Date.now() / 1000 + 3600) {
@@ -70,6 +71,12 @@ const stream = events => new Response(events.map(e => JSON.stringify(e) + '\n').
 
   h = harness(async () => stream([{type: 'run', saved: true}, {type: 'error', message: 'Service unavailable'}])); h.planner();
   await vm.runInContext('runAgent("Plan", handleEvent)', h.context); assert.equal(h.data.has('pending_run'), true);
+
+  let submitted;
+  h = harness(async (url, options) => { submitted = JSON.parse(options.body); return stream([{type: 'run', saved: true, background: true}, {type: 'done'}]); });
+  h.planner(); h.context.document.visibilityState = 'hidden';
+  await vm.runInContext('runAgent("Background plan", handleEvent)', h.context);
+  assert.equal(submitted.background, true); assert.equal(JSON.parse(h.data.get('pending_run')).background, true);
 
   const bodies = []; let calls = 0;
   h = harness(async (url, options) => {

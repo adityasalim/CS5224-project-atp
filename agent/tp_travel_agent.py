@@ -47,6 +47,7 @@ from bedrock_agentcore import BedrockAgentCoreApp
 
 from gateway_client import Gateway, GatewayError
 from run_history import RunHistory
+from background_jobs import BackgroundJobs, SessionBusy
 from prompts import get_prompt, ZONE_RULES, GLOSS
 from final_evaluation import evaluate_final
 from package_gather import gather_packages
@@ -64,6 +65,7 @@ from acceptance import (
 )
 
 app = BedrockAgentCoreApp()
+_background = BackgroundJobs(app)
 
 REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 # Legacy defaults, used only when no model adapter is active (local and dev runs):
@@ -6633,9 +6635,6 @@ def invoke(payload, context=None):
         yield ev("error", "I couldn't identify your account for this request. Please sign in again.")
         return
     skey = _session_key(user_id, session_id)
-    _touch_session(skey)
-    if payload.get("reset"):
-        SESSIONS.pop(skey, None)
     if not prompt:
         yield ev("message", "Hi! Tell me about the trip you'd like: where, when, how many people and your "
                             "budget and preferred currency.")
@@ -6647,14 +6646,35 @@ def invoke(payload, context=None):
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", request_id):
         yield ev("error", "Invalid request ID.", code="INVALID_REQUEST")
         return
+    history = None
     # Persist before the first yield. A disconnected browser can find this request
     # even if the stream never delivers another event. No extra table is needed.
     try:
         history = RunHistory(boto3.resource("dynamodb", region_name=REGION).Table(os.environ["TRIPS_TABLE"]), user_id,
                              _memory_session_id(session_id), request_id)
+        if payload.get("background") is True:
+            def work():
+                for _ in _process_request(payload, prompt, session_id, user_id, skey, history):
+                    pass
+            claimed = _background.submit(skey, request_id, lambda: history.begin(prompt), work)
+            yield ev("run", run=history.public(), saved=True, background=True, duplicate=not claimed)
+            yield ev("done", requestId=request_id)
+            return
+        active = _background.busy(skey)
+        if active:
+            raise SessionBusy(active)
         claimed = history.begin(prompt)
+    except SessionBusy as exc:
+        yield ev("error", "This conversation is still planning. Check the current request before sending changes.",
+                 code="SESSION_BUSY", activeRequestId=exc.request_id)
+        return
     except Exception:
         traceback.print_exc()
+        if history is not None and history.item:
+            try:
+                history.checkpoint(status="failed", message="Background planning could not start.")
+            except Exception:
+                traceback.print_exc()
         yield ev("error", "Your request could not be saved. Planning has not started. Please try again.",
                  code="HISTORY_UNAVAILABLE")
         return
@@ -6664,6 +6684,11 @@ def invoke(payload, context=None):
         yield ev("done", requestId=request_id)
         return
 
+    yield from _process_request(payload, prompt, session_id, user_id, skey, history)
+
+
+def _process_request(payload, prompt, session_id, user_id, skey, history):
+    request_id = history.request_id
     def checkpoint(**kwargs):
         try:
             history.checkpoint(**kwargs)
@@ -6671,6 +6696,9 @@ def invoke(payload, context=None):
             # A checkpoint problem must not discard an otherwise valid itinerary.
             traceback.print_exc()
 
+    _touch_session(skey)
+    if payload.get("reset"):
+        SESSIONS.pop(skey, None)
     SESSIONS.setdefault(skey, {})["_requestId"] = request_id
     memory_save(user_id, session_id, [("USER", prompt[:4000])])
     terminal = False
@@ -6685,13 +6713,13 @@ def invoke(payload, context=None):
             SESSIONS.setdefault(skey, {})["requestedBudget"] = trip_budget({"budget": payload["budget"]})
         for e in chat_turn(prompt[:4000], session_id, user_id):
             if e["type"] in ("message", "question"):
-                checkpoint(message=e["message"])
+                checkpoint(message=e["message"], choices=e.get("choices", []))
                 memory_save(user_id, session_id, [("ASSISTANT", e["message"])])
             elif e["type"] == "status":
                 checkpoint(progress=e.get("message"))
             elif e["type"] == "itinerary":
                 # save() has already persisted the full card and PDF pointer.
-                checkpoint(status="completed", itinerary=e["itinerary"] if e["itinerary"].get("historySaved", True) else None, force=True)
+                checkpoint(status="planning" if payload.get("background") else "completed", itinerary=e["itinerary"] if e["itinerary"].get("historySaved", True) else None, force=True)
                 result_saved = e["itinerary"].get("historySaved", True)
                 it = e["itinerary"]
                 summary = (f"[Itinerary v{it.get('version')}] {it.get('title')}: {it.get('summary', '')} "

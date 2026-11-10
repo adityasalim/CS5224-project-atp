@@ -39,7 +39,9 @@ class RunHistory:
         self.last_checkpoint = time.monotonic()
         return True
 
-    def checkpoint(self, status=None, progress=None, message=None, itinerary=None, force=False):
+    def checkpoint(self, status=None, progress=None, message=None, itinerary=None, force=False, choices=None):
+        if choices is not None:
+            self.item["choices"] = list(choices)[:20]
         if progress:
             self.item["progress"] = str(progress)[:500]
         if message:
@@ -58,7 +60,7 @@ class RunHistory:
 
     def public(self):
         result = {key: self.item[key] for key in
-                  ("requestId", "sessionId", "status", "progress", "updatedAt", "resultTripId", "version")
+                  ("requestId", "sessionId", "status", "progress", "updatedAt", "resultTripId", "version", "choices")
                   if key in self.item}
         if "version" in result:
             result["version"] = int(result["version"])  # DynamoDB reads numbers as Decimal.

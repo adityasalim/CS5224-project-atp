@@ -48,3 +48,6 @@ python3 test_public_protocol.py
 # Durable history and request recovery (standard library only).
 python3 test_request_recovery.py
 node ../test_auth_recovery.js
+
+python3 test_background_jobs.py
+node ../test_background_status.js

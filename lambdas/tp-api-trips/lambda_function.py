@@ -203,7 +203,7 @@ def _user_records(user_id):
 
 def _public_run(item):
     return {key: item[key] for key in
-            ("requestId", "sessionId", "status", "progress", "updatedAt", "resultTripId", "version")
+            ("requestId", "sessionId", "status", "progress", "updatedAt", "resultTripId", "version", "choices")
             if key in item}
 
 
