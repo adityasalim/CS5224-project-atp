@@ -43,3 +43,8 @@ python3 test_marketplace_domain.py
 python3 test_marketplace_transactions.py
 python3 test_public_models.py
 python3 test_public_protocol.py
+
+
+# Durable history and request recovery (standard library only).
+python3 test_request_recovery.py
+node ../test_auth_recovery.js

@@ -97,7 +97,7 @@ class SM:
     def get_secret_value(self, SecretId): return {"SecretString": json.dumps({"client_id": "a", "client_secret": "b"})}
 class T:
     def __init__(s, n): s.n = n
-    def put_item(s, Item): pass
+    def put_item(s, Item, **kwargs): pass
 class R:
     def Table(s, n): return T(n)
 b = types.ModuleType("boto3")
@@ -126,7 +126,8 @@ class Ctx:
 def run(prompt):
     its, msgs = [], []
     events = list(A.invoke({"prompt": prompt}, Ctx()))
-    if events and events[-1].get("choices"):     # the one-time preference question: tap "Use defaults"
+    reply = next((e for e in reversed(events) if e["type"] in ("question", "message", "error")), {})
+    if reply.get("type") == "question" and reply.get("choices"):     # the one-time preference question: tap "Use defaults"
         events += list(A.invoke({"prompt": "Use defaults"}, Ctx()))
     for e in events:
         if e["type"] == "itinerary": its.append(e["itinerary"])

@@ -229,10 +229,6 @@ def deploy_web(changed, commit, report):
     if DRY:
         report.append(f"[dry run] would upload index.html to s3://{bucket}/ and invalidate CloudFront")
         return
-    aws("s3").put_object(Bucket=bucket, Key="index.html", Body=html.encode("utf-8"),
-                         ContentType="text/html; charset=utf-8", CacheControl="no-cache")
-    report.append(f"uploaded index.html to s3://{bucket}/")
-
     # Publish the supporting frontend files as well as index.html.
     import mimetypes
     for asset in sorted((REPO / "web").rglob("*")):
@@ -241,6 +237,12 @@ def deploy_web(changed, commit, report):
             continue
         body = asset.read_bytes()
         if key == "agency/config.js":
+            # A manual provider setup must survive subsequent website deploys.
+            if not env("WEB_AGENCY_API_URL") and not env("WEB_AGENCY_TERMS_URL"):
+                report.append("preserved agency/config.js (no provider deployment settings supplied)")
+                continue
+            if not all(env(k) for k in ("WEB_AGENCY_API_URL", "WEB_AGENCY_TERMS_URL", "WEB_ADMIN_GROUP")):
+                raise RuntimeError("Provider config requires WEB_AGENCY_API_URL, WEB_AGENCY_TERMS_URL and WEB_ADMIN_GROUP together")
             config = {
                 "API_BASE": env("WEB_AGENCY_API_URL"),
                 "TERMS_URL": env("WEB_AGENCY_TERMS_URL"),
@@ -257,6 +259,10 @@ def deploy_web(changed, commit, report):
             ContentType=content_type, CacheControl="no-cache",
         )
     report.append("uploaded supporting website assets")
+
+    aws("s3").put_object(Bucket=bucket, Key="index.html", Body=html.encode("utf-8"),
+                         ContentType="text/html; charset=utf-8", CacheControl="no-cache")
+    report.append(f"uploaded index.html to s3://{bucket}/")
 
     dist = env("CLOUDFRONT_DISTRIBUTION_ID").split("/")[-1]   # an ARN or the plain ID both work
     if dist:

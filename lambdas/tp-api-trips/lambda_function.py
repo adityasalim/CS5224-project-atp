@@ -31,6 +31,7 @@ IAM for /chats: bedrock-agentcore:ListSessions and bedrock-agentcore:ListEvents 
 import json
 import os
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -103,7 +104,17 @@ def _get_trip(user_id, trip_id):
 
 
 def _latest_itinerary(trip_id):
-    items = _table("ITINERARIES_TABLE").query(KeyConditionExpression=Key("tripId").eq(trip_id)).get("Items", [])
+    table = _table("ITINERARIES_TABLE")
+    items, cursor = [], None
+    while True:
+        kwargs = {"KeyConditionExpression": Key("tripId").eq(trip_id)}
+        if cursor:
+            kwargs["ExclusiveStartKey"] = cursor
+        page = table.query(**kwargs)
+        items.extend(page.get("Items", []))
+        cursor = page.get("LastEvaluatedKey")
+        if not cursor:
+            break
     if not items:
         return None
 
@@ -176,22 +187,64 @@ def _chat_title(msgs):
     return next((m["text"] for m in msgs if m["role"] == "user"), "")[:60]
 
 
+def _user_records(user_id):
+    """Query only this authenticated user's partition, including paginated receipts."""
+    items, cursor = [], None
+    while True:
+        kwargs = {"KeyConditionExpression": Key("userId").eq(user_id), "ConsistentRead": True}
+        if cursor:
+            kwargs["ExclusiveStartKey"] = cursor
+        page = _table("TRIPS_TABLE").query(**kwargs)
+        items.extend(page.get("Items", []))
+        cursor = page.get("LastEvaluatedKey")
+        if not cursor:
+            return items
+
+
+def _public_run(item):
+    return {key: item[key] for key in
+            ("requestId", "sessionId", "status", "progress", "updatedAt", "resultTripId", "version")
+            if key in item}
+
+
+def _web_itinerary(trip, item):
+    if not item:
+        return None
+    web = item.get("webItinerary")
+    if isinstance(web, str):
+        try:
+            web = json.loads(web)
+        except (ValueError, TypeError):
+            web = None
+    if not isinstance(web, dict):
+        # Old records have the PDF key and narrative, but not a complete web card.
+        try:
+            story = json.loads(item.get("narrative") or "{}")
+        except (ValueError, TypeError):
+            story = {}
+        web = {"title": trip.get("title") or story.get("title") or "Saved trip",
+               "summary": story.get("summary") or "Open the PDF for the full archived itinerary.",
+               "days": [], "status": trip.get("status")}
+    web = dict(web, tripId=trip["tripId"], version=int(item["version"]), hasPdf=bool(item.get("pdfKey")))
+    web.pop("pdfUrl", None)  # Never restore an expired presigned URL.
+    return web
+
+
 # ---------------------------------------------------------------- route handlers
 def list_trips(event, user_id):
-    resp = _table("TRIPS_TABLE").query(KeyConditionExpression=Key("userId").eq(user_id),
-                                       ScanIndexForward=False, Limit=50)
     trips = [{k: t.get(k) for k in ("tripId", "title", "destination", "startDate", "endDate", "status",
-                                     "createdAt", "budgetSGD", "budget", "currency")} for t in resp.get("Items", [])]
+                                     "createdAt", "budgetSGD", "budget", "currency")}
+             for t in _user_records(user_id) if t.get("recordType") != "planning_run"]
     trips.sort(key=lambda t: t.get("createdAt") or "", reverse=True)
-    return _resp(event, 200, {"trips": trips})
+    return _resp(event, 200, {"trips": trips[:50]})
 
 
 def get_trip(event, user_id, trip_id):
     trip = _get_trip(user_id, trip_id)
-    if not trip:
+    if not trip or trip.get("recordType") == "planning_run":
         return _error(event, 404, "not_found", "trip not found")
     itin = _latest_itinerary(trip_id)
-    return _resp(event, 200, {"trip": trip, "itinerary": itin})
+    return _resp(event, 200, {"trip": trip, "itinerary": itin, "webItinerary": _web_itinerary(trip, itin)})
 
 
 def get_pdf(event, user_id, trip_id):
@@ -270,7 +323,7 @@ def put_prefs(event, user_id):
     return _resp(event, 200, {"saved": sorted(updates), "ignored": sorted(unknown)})
 
 
-def list_chats(event, user_id):
+def _memory_chats(event, user_id):
     """My chat sessions, newest first. The title is the plan title, else the first thing I said."""
     sessions, token = [], None
     while len(sessions) < MAX_SESSIONS:
@@ -296,14 +349,76 @@ def list_chats(event, user_id):
     return _resp(event, 200, {"sessions": out})
 
 
+def list_chats(event, user_id):
+    sessions, unavailable = {}, False
+    try:
+        result = _memory_chats(event, user_id)
+        sessions = {s["sessionId"]: s for s in json.loads(result["body"])["sessions"]}
+    except Exception as exc:
+        print("memory history unavailable:", type(exc).__name__)
+        unavailable = True
+    records = sorted(_user_records(user_id), key=lambda x: x.get("createdAt", ""))
+    for item in records:
+        sid = item.get("sessionId")
+        if item.get("recordType") != "planning_run" or not sid:
+            continue
+        session = sessions.setdefault(sid, {"sessionId": sid, "createdAt": item["createdAt"],
+                                            "title": item.get("title") or "Conversation"})
+        session["run"] = _public_run(item)
+        session["updatedAt"] = item["updatedAt"]
+    out = sorted(sessions.values(), key=lambda x: x.get("updatedAt") or x.get("createdAt", ""), reverse=True)
+    return _resp(event, 200, {"sessions": out[:MAX_SESSIONS], "memoryUnavailable": unavailable})
+
+
 def get_chat(event, user_id, session_id):
-    if not session_id or not SESSION_RE.match(session_id):
+    if not session_id or not SESSION_RE.fullmatch(session_id):
         return _error(event, 400, "bad_input", "invalid session id")
-    events = _session_events(user_id, session_id)      # scoped by actorId = my Cognito sub
-    messages = [m for e in events for m in _event_messages(e)]
-    if not messages:
+    request_id = (event.get("queryStringParameters") or {}).get("requestId")
+    if request_id:
+        if not SESSION_RE.fullmatch(request_id):
+            return _error(event, 400, "bad_input", "invalid request id")
+        run = _get_trip(user_id, "run_" + request_id)
+        if not run or run.get("recordType") != "planning_run" or run.get("sessionId") != session_id:
+            return _error(event, 404, "not_found", "request not found")
+        runs, records, messages, unavailable = [run], [], [], False
+    else:
+        records = _user_records(user_id)
+        runs = sorted([r for r in records if r.get("recordType") == "planning_run" and
+                       r.get("sessionId") == session_id], key=lambda r: r["createdAt"])
+        messages, unavailable = [], False
+        try:
+            messages = [m for e in _session_events(user_id, session_id) for m in _event_messages(e)]
+        except Exception as exc:
+            print("memory messages unavailable:", type(exc).__name__)
+            unavailable = True
+    receipt_messages = [m for r in runs for m in r.get("messages", [])]
+    # Keep legacy messages, but don't repeat the same turn from Memory and receipts.
+    remaining = Counter((m["role"].lower(), m["text"]) for m in receipt_messages)
+    legacy = []
+    for message in messages:
+        key = (message["role"].lower(), message["text"])
+        if remaining[key]:
+            remaining[key] -= 1
+        else:
+            legacy.append(message)
+    messages = legacy + receipt_messages
+    if not messages and not runs:
         return _error(event, 404, "not_found", "chat not found")
-    return _resp(event, 200, {"sessionId": session_id, "messages": messages})
+    trip_ids = {r["resultTripId"] for r in runs if r.get("resultTripId")}
+    trip_ids.update(r["tripId"] for r in records if r.get("recordType") != "planning_run" and
+                    r.get("sessionId") == session_id)
+    itineraries = []
+    for trip_id in sorted(trip_ids):
+        # Re-check ownership before resolving any pointer stored on a receipt.
+        trip = _get_trip(user_id, trip_id)
+        if trip and trip.get("recordType") != "planning_run":
+            web = _web_itinerary(trip, _latest_itinerary(trip_id))
+            if web:
+                itineraries.append(web)
+    return _resp(event, 200, {"sessionId": session_id, "messages": messages,
+                             "itineraries": itineraries,
+                             "run": _public_run(runs[-1]) if runs else None,
+                             "memoryUnavailable": unavailable})
 
 
 # ---------------------------------------------------------------- entry point

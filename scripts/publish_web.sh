@@ -25,8 +25,12 @@ for key, var in {"COGNITO_DOMAIN": "WEB_COGNITO_DOMAIN", "COGNITO_CLIENT_ID": "W
     print(f"  {key:<18} = {value or '(empty)'}")
 open(sys.argv[1], "w", encoding="utf-8").write(html)
 PY
+# Publish all supporting scripts and provider pages first. Preserve the live
+# provider config; scripts/deploy.py manages it when WEB_AGENCY_* are supplied.
+aws s3 cp web/ "s3://${WEB_BUCKET}/" --recursive --exclude "index.html" \
+  --exclude "agency/config.js" --cache-control no-cache
 aws s3 cp "$OUT" "s3://${WEB_BUCKET}/index.html" --content-type "text/html; charset=utf-8" --cache-control no-cache
-aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "/index.html" \
+aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "/*" \
   --query 'Invalidation.Status' --output text
 rm -f "$OUT"
 echo "Published. Hard-refresh the site in about a minute."

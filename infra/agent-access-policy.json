@@ -58,6 +58,14 @@
         "arn:aws:dynamodb:ap-southeast-1:<account-id>:table/tp-dev-trips",
         "arn:aws:dynamodb:ap-southeast-1:<account-id>:table/tp-dev-itineraries"
       ]
+    },
+    {
+      "Sid": "ReadRequestReceipts",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:GetItem"
+      ],
+      "Resource": "arn:aws:dynamodb:ap-southeast-1:<account-id>:table/tp-dev-trips"
     }
   ]
 }
