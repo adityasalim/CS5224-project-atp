@@ -95,6 +95,29 @@
       "fxQuote": {
         "type": "object",
         "description": "Server-fetched FX snapshot from the planner."
+      },
+      "legs": {
+        "type": "array",
+        "description": "Ordered city stays covering the whole trip; used to match exact single-city portions.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "startDate": {
+              "type": "string"
+            },
+            "endDate": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city",
+            "startDate",
+            "endDate"
+          ]
+        }
       }
     },
     "required": [

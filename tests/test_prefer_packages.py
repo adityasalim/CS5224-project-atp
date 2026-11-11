@@ -22,5 +22,5 @@ class Tests(unittest.TestCase):
         row=dict(ROW,costInclusions={})
         p=recommend(SPEC,[row],VERIFY,None,mode='packages_only')['packages'][0]
         self.assertFalse(p['comparison']['costComplete']);self.assertIsNone(p['comparison']['withinBudget'])
-        self.assertEqual(recommend(SPEC,[ROW],VERIFY,lambda *a:{'selected':[]},mode='compare')['status'],'custom_preferred')
+        self.assertEqual(recommend(SPEC,[ROW],VERIFY,lambda *a:{'selected':[]},mode='compare')['status'],'eligible_options')
 if __name__=='__main__':unittest.main()

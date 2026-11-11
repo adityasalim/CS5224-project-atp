@@ -132,6 +132,8 @@ def _agency_options(pdf, result, section):
              else "No agency package was recommended for this trip.")
         return
     line("Agency alternatives to the custom itinerary. Their prices are separate from the custom itinerary total. Nothing is booked.")
+    if result.get("status") == "eligible_options":
+        line("These alternatives passed package search filters. The reviewer preferred the custom itinerary; confirm suitability with the agency.")
     def money(value, currency):
         try:
             amount = Decimal(str(value))
@@ -148,6 +150,10 @@ def _agency_options(pdf, result, section):
         line(str(package.get("title") or "Agency package")[:200], bold=True)
         line(str(package.get("agencyName") or "Agency")[:200])
         cost = package.get("comparison") or {}
+        scope = package.get("coverageScope") or cost.get("coverageScope") or {}
+        if scope.get("type") == "city_leg":
+            line(f"Partial-trip option: {scope.get('city')} only, {scope.get('startDate')} to {scope.get('endDate')}.", bold=True)
+            line("Includes the inbound flight to this city only. Onward/return travel and the remaining trip are additional." if scope.get("flightCoverage") == "inbound_only" else "Land-only city package. Flights and the remaining trip are additional.")
         currency = str(cost.get("currency") or "SGD")
         line("Package price for your party: " + money(cost.get("packageTotal"), currency))
         line("Known extras: " + money(cost.get("knownExtras"), currency))

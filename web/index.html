@@ -452,7 +452,7 @@ function packageEnquiryUrl(p, it) {
 }
 function renderPackageOptions(result, it) {
   const section = el("section", "package-options");
-  if (!result || result.status === "custom_only") return section;
+  if (!result || result.mode === "custom_only" || result.status === "custom_only") return section;
   section.append(el("h3", null, "Agency package options"));
   if (!(result.packages || []).length) {
     const unavailable = ["search_unavailable", "review_unavailable"].includes(result.status);
@@ -460,12 +460,18 @@ function renderPackageOptions(result, it) {
     return section;
   }
   section.append(el("p", "note", "Compare these options with your custom itinerary. Enquiries open an email draft; nothing is booked or sent automatically."));
+  if (result.status === "eligible_options") section.append(el("p", "note", "These alternatives passed package search filters. The reviewer preferred the custom itinerary; confirm suitability with the agency."));
   result.packages.forEach(p => {
     const card = el("article", "package-card");
     card.style.cssText = "border:1px solid var(--line,#555);border-radius:12px;padding:16px;margin:12px 0";
     card.append(el("h3", null, p.title || "Agency package"));
     card.append(el("div", "meta", p.agencyName || "Agency"));
     const c = p.comparison || {}, currency = c.currency || it.currency || "SGD";
+    const scope = p.coverageScope || c.coverageScope;
+    if (scope?.type === "city_leg") {
+      card.append(el("p", "note", "Partial-trip option: " + scope.city + " only, " + scope.startDate + " to " + scope.endDate + "."));
+      card.append(el("p", "note", scope.flightCoverage === "inbound_only" ? "Includes the inbound flight to this city only. Onward/return travel and the remaining trip are additional." : "Land-only city package. Flights and the remaining trip are additional."));
+    }
     card.append(el("p", null, "Package price for your party: " + tripMoney(c.packageTotal, currency)));
     card.append(el("p", "note", "Known extras: " + tripMoney(c.knownExtras, currency)));
     if (c.costComplete && c.estimatedTotal != null) {
