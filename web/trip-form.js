@@ -215,6 +215,17 @@ function tripMultiSelect(options, selected, onChange) {
 
 const TRIP_CURRENCIES = ["SGD", "USD", "SAR", "EUR", "GBP", "CNY", "JPY"];
 
+// Calendar dates use the traveller's local day, not UTC (which can be yesterday).
+function tripToday(now = new Date()) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function validTripDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) return false;
+  const time = Date.parse(value + "T00:00:00Z");
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value;
+}
+
 function syncTripEndDate(state = tripFormState) {
   const nights = state.cities.reduce((sum, leg) => sum + Number(leg.nights), 0);
   const start = Date.parse(state.startDate + "T00:00:00Z");
@@ -309,6 +320,12 @@ function renderTripForm() {
         tripFormState[key] = type === "number" ? Number(v) : v;
         if (key === "startDate") syncTripEndDate();
       });
+    if (type === "date") {
+      const refreshMinimum = () => { input.min = tripToday(); };
+      refreshMinimum();
+      // Refresh when a tab has been left open overnight.
+      input.addEventListener("focus", refreshMinimum);
+    }
     if (key === "endDate") {
       input.readOnly = true;
       input.setAttribute("data-trip-end", "");
@@ -668,17 +685,15 @@ function validateTripCities(state = tripFormState) {
     }
   });
 
-  const selected = state.cities
-    .filter(leg => leg.location)
-    .map(leg => leg.location);
-
-  const cityKeys = selected.map(
-    city => `${city.name}|${city.countryCode}`.toLowerCase()
-  );
-
-  if (new Set(cityKeys).size !== cityKeys.length) {
-    errors.push("The same destination cannot be added twice.");
-  }
+  // Return visits are separate legs: Tokyo → Osaka → Tokyo is valid.
+  // Only adjacent duplicate destinations should be combined into one stay.
+  const cityKey = city => `${city.name.trim()}|${city.countryCode.trim()}`.toLowerCase();
+  state.cities.forEach((leg, index) => {
+    const previous = state.cities[index - 1];
+    if (leg.location && previous?.location && cityKey(leg.location) === cityKey(previous.location)) {
+      errors.push("Consecutive destinations must be different. Combine consecutive stays in the same city.");
+    }
+  });
 
   return errors;
 }
@@ -693,7 +708,13 @@ function validateTripDetails(state = tripFormState) {
 
   if (!start || !end) {
     errors.push("Please select departure and return/end dates.");
+  } else if (!validTripDate(start) || !validTripDate(end)) {
+    errors.push("Please select valid departure and return/end dates.");
   } else {
+    const today = tripToday();
+    if (start < today || end < today) {
+      errors.push("Travel dates cannot be in the past. Choose today or a future date.");
+    }
     const days = Math.round(
       (Date.parse(end + "T00:00:00Z") -
        Date.parse(start + "T00:00:00Z")) / 86400000
