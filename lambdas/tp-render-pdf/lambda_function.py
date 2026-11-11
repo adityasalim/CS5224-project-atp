@@ -116,6 +116,61 @@ def _when(s):
     return "-".join(t for t in (s.get("arriveAt") or "", s.get("departAt") or "") if t)
 
 
+def _agency_options(pdf, result, section):
+    """Render the same selected agency alternatives as the web card, outside custom totals."""
+    if not isinstance(result, dict) or result.get("mode") == "custom_only" or result.get("status") == "custom_only":
+        return
+    packages = [p for p in result.get("packages", []) if isinstance(p, dict)][:3]
+    if packages:
+        pdf.add_page()
+    section("Agency package options")
+    def line(text, bold=False):
+        pdf.set_font(_FAMILY, "B" if bold else "", 10)
+        pdf.multi_cell(0, 5.5, _t(text), align="L", new_x="LMARGIN", new_y="NEXT")
+    if not packages:
+        line("Package comparison was unavailable when this plan was created." if result.get("status") in ("search_unavailable", "review_unavailable")
+             else "No agency package was recommended for this trip.")
+        return
+    line("Agency alternatives to the custom itinerary. Their prices are separate from the custom itinerary total. Nothing is booked.")
+    def money(value, currency):
+        try:
+            amount = Decimal(str(value))
+            if not amount.is_finite() or amount < 0:
+                return "Unknown"
+            return f"{currency} {amount:,.2f}"
+        except Exception:
+            return "Unknown"
+    for index, package in enumerate(packages):
+        if index:
+            pdf.add_page()
+            section("Agency package options (continued)")
+        pdf.ln(3)
+        line(str(package.get("title") or "Agency package")[:200], bold=True)
+        line(str(package.get("agencyName") or "Agency")[:200])
+        cost = package.get("comparison") or {}
+        currency = str(cost.get("currency") or "SGD")
+        line("Package price for your party: " + money(cost.get("packageTotal"), currency))
+        line("Known extras: " + money(cost.get("knownExtras"), currency))
+        if cost.get("costComplete") and cost.get("estimatedTotal") is not None:
+            line("Estimated full trip total: " + money(cost["estimatedTotal"], currency))
+            if cost.get("customVerified") and cost.get("customTotal") is not None:
+                line("Custom itinerary estimate: " + money(cost["customTotal"], currency))
+        else:
+            line("Full trip total unknown. Known minimum: " + money(cost.get("knownMinimumTotal"), currency))
+            line("Missing costs: " + ", ".join(str(x) for x in cost.get("missingCosts", [])) + ". This package has not been confirmed within budget.")
+        for heading, key in (("Why it fits", "reasons"), ("Tradeoffs", "tradeoffs"), ("Included", "included"), ("Excluded", "excluded")):
+            values = package.get(key) or []
+            if not isinstance(values, list) or not values:
+                continue
+            line(heading, bold=True)
+            for text in values[:15]:
+                line("- " + str(text)[:600])
+        email = package.get("contactEmail")
+        if isinstance(email, str) and email.strip():
+            line("Agency contact: " + email.strip()[:254])
+        line(str(cost.get("comparisonNote") or "Confirm all inclusions, mandatory fees, availability and full price with the agency.")[:1200])
+
+
 def build_pdf(event, pool, daily_spend):
     spec, it = event["tripSpec"], event["itinerary"]
     pool = normalize_cached_pool(spec, pool)
@@ -294,6 +349,8 @@ def build_pdf(event, pool, daily_spend):
         pdf.set_font(_FAMILY, "", 10)
         for c in caveats:
             pdf.multi_cell(0, 5.5, _t(f"- {c}"), new_x="LMARGIN", new_y="NEXT")
+
+    _agency_options(pdf, event.get("packageRecommendations"), section)
 
     pdf.ln(3)
     pdf.set_font(_FAMILY, "I", 8.5)
