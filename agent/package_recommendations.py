@@ -94,6 +94,15 @@ def recommend(spec,records,verification,call,mode='compare'):
     if mode=='custom_only': return {**result,'status':'custom_only'}
     candidates=eligible(spec,records,verification)
     if not candidates: return result
+    if mode=='packages_only':
+        # The traveller explicitly prefers packages. Rank the eligible search
+        # results rather than asking the reviewer to choose custom over packages.
+        # All provenance, preference and cost checks above still apply.
+        options=[{**row,
+                  'reasons':[f"Package suitability match score: {row['matchScore']:.0%}."],
+                  'tradeoffs':[]}
+                 for row in candidates[:3]]
+        return {**result,'status':'recommended','selectionMethod':'eligibility_ranked','packages':options}
     # Contact fields are never sent to the model and cannot be invented by it.
     prompt={'mode':mode,'trip':{k:spec[k] for k in ('destination','legs','startDate','endDate','pax','budget','preferences','preferenceScores','cuisines') if k in spec},
             'customVerification':{'passed':verification.get('passed'),'totals':verification.get('totals')},
