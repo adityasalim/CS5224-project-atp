@@ -88,7 +88,48 @@ def validate_request(request):
     for key, value in scores.items():
         if key not in WEIGHTS or type(value) not in (int, float) or not 0 <= value <= 10:
             raise ValueError("Invalid preference score")
+    if "legs" in request:
+        legs = request["legs"]
+        if not isinstance(legs,list) or len(legs) != len(dest):
+            raise ValueError("Invalid ordered city legs")
+        cursor = start
+        for city,leg in zip(dest,legs):
+            if not isinstance(leg,dict) or _text(leg.get("city")) != city or _date(leg.get("startDate")) != cursor:
+                raise ValueError("Invalid ordered city legs")
+            last = _date(leg.get("endDate"))
+            if not last or last <= cursor:
+                raise ValueError("Invalid ordered city dates")
+            cursor = last
+        if cursor != end:
+            raise ValueError("City legs must cover the requested trip")
     return start, end, pax, dest, budget
+
+
+def _scope(request, package, wanted, start, end):
+    cities = _destinations(package.get("destinations"))
+    days = _integer(package.get("durationDays"))
+    if cities == wanted and days == (end-start).days+1 and _availability(package,start,end):
+        return {"type":"whole_trip"}
+    if len(wanted) <= 1 or not cities or len(cities) != 1:
+        return None
+    # Only an exact city stay is supported; never stretch or shift a package.
+    for index,leg in enumerate(request.get("legs", [])):
+        first,last = _date(leg["startDate"]),_date(leg["endDate"])
+        if cities != [_text(leg["city"])] or days != (last-first).days+1 or not _availability(package,first,last):
+            continue
+        flights = package.get("costInclusions",{}).get("flights")
+        if flights is True:
+            # A bundled international flight can cover only the initial inbound
+            # journey. Return bundles and flights to later cities would conflict.
+            if index != 0 or first != start or package.get("flightType") != "one_way" or not request.get("origin"):
+                continue
+        elif flights is not False:
+            continue  # Unknown flight coverage is too ambiguous for a partial option.
+        return {"type":"city_leg","city":leg["city"],"legIndex":index,
+                "startDate":first.isoformat(),"endDate":last.isoformat(),
+                "flightCoverage":"inbound_only" if flights else "none",
+                "remainingCities":[x["city"] for i,x in enumerate(request["legs"]) if i!=index]}
+    return None
 
 
 def search_packages(request, packages, agencies):
@@ -109,13 +150,14 @@ def search_packages(request, packages, agencies):
         agency = agency_by_id.get(aid, {})
         if not isinstance(pid, str) or not pid or pid in seen or p.get("status") != "PUBLISHED" or agency.get("status") != "APPROVED":
             continue
-        if _destinations(p.get("destinations")) != wanted or not _availability(p, start, end):
+        scope = _scope(request,p,wanted,start,end)
+        if not scope:
             continue
         minimum, maximum = _integer(p.get("minimumTravellers")), _integer(p.get("maximumTravellers"))
         if type(minimum) is not int or type(maximum) is not int or not minimum <= pax <= maximum:
             continue
         days = _integer(p.get("durationDays"))
-        if type(days) is not int or days != (end - start).days + 1:
+        if type(days) is not int:
             continue
         diet, includes = _strings(p.get("dietaryOptions")), _strings(p.get("included"))
         if (required_diet and (diet is None or not required_diet <= diet)) or (required_items and (includes is None or not required_items <= includes)):
@@ -123,10 +165,10 @@ def search_packages(request, packages, agencies):
         if request.get("accessibilityRequired") and p.get("accessible") is not True:
             continue
         flight_type = request.get("flightType")
-        if flight_type and p.get("costInclusions",{}).get("flights") is True and _text(p.get("flightType")).replace("one_way","oneway") != _text(flight_type).replace("one_way","oneway"):
+        if scope["type"] == "whole_trip" and flight_type and p.get("costInclusions",{}).get("flights") is True and _text(p.get("flightType")).replace("one_way","oneway") != _text(flight_type).replace("one_way","oneway"):
             continue
         origin = request.get("origin")
-        if origin and ("budget" not in request or p.get("costInclusions",{}).get("flights") is not False) and _text(origin) not in (_strings(p.get("departureLocations")) or set()):
+        if origin and (p.get("costInclusions",{}).get("flights") is True or (scope["type"] == "whole_trip" and ("budget" not in request or p.get("costInclusions",{}).get("flights") is not False))) and _text(origin) not in (_strings(p.get("departureLocations")) or set()):
             continue
         price = p.get("price")
         if not isinstance(price, dict) or price.get("currency") not in CURRENCIES or ("budget" not in request and price.get("currency") != "SGD"):
@@ -167,7 +209,7 @@ def search_packages(request, packages, agencies):
                         "title": p.get("title", ""), "destinations": p["destinations"],
                         "description":str(p.get("description", ""))[:800],
                         "cuisines":p.get("cuisines",[]),"dietaryOptions":p.get("dietaryOptions",[]),
-                        "eligibilityChecked":True,"costInclusions":coverage,"additionalCosts":extra_costs,
+                        "eligibilityChecked":True,"coverageScope":scope,"costInclusions":coverage,"additionalCosts":extra_costs,
                         "contactEmail":agency.get("businessEmail", ""),
                         "preferenceScores":{k:float(v) for k,v in (p.get("preferenceScores") or {}).items() if isinstance(v,(int,float,Decimal)) and not isinstance(v,bool)},
                         "price": {"amount": str(amount), "currency": currency, "basis": basis},

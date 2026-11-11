@@ -60,7 +60,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(recommend(SPEC,[],VERIFY,fail)['status'],'no_suitable_packages')
         self.assertEqual(recommend(SPEC,[ROW],VERIFY,fail,mode='custom_only')['status'],'custom_only')
     def test_none_selection_hallucinated_ids_malformed_claims_and_failure(self):
-        self.assertEqual(recommend(SPEC,[ROW],VERIFY,lambda *x:{'selected':[]})['status'],'custom_preferred')
+        self.assertEqual(recommend(SPEC,[ROW],VERIFY,lambda *x:{'selected':[]})['status'],'eligible_options')
         for answer in ({'selected':[{'packageId':'invented'}]}, {}):
             r=recommend(SPEC,[ROW],VERIFY,lambda *x:answer)
             self.assertEqual(r['status'],'review_unavailable');self.assertEqual(r['packages'],[])
