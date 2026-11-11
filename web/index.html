@@ -340,7 +340,11 @@ function showSignInRecovery() {
   $("signOutBtn").parentNode.append(button);
 }
 async function apiFetch(url, options) {
-  try { return await (AUTH_ON ? auth.fetch(url, options) : fetch(url, options)); }
+  try {
+    const response = await (AUTH_ON ? auth.fetch(url, options) : fetch(url, options));
+    if (response.ok && $("reauthBtn")) $("reauthBtn").remove();
+    return response;
+  }
   catch (e) { if (e.code === "SESSION_EXPIRED") showSignInRecovery(); throw e; }
 }
 
@@ -798,8 +802,7 @@ function showRunRecovery() {
   const box = el("div", "bubble"); box.id = "runRecovery"; box.dataset.requestId = pending.requestId;
   const label = el("p", null, pending.saved ? "Your request is saved in History." : "Your request is kept in this browser tab; server status is not yet confirmed.");
   const check = el("button", null, "Check request status"); check.type = "button";
-  const login = el("button", null, "Sign in again"); login.type = "button"; login.onclick = signIn;
-  box.append(label, check, login);
+  box.append(label, check);
   check.onclick = async () => {
     check.disabled = true;
     try {

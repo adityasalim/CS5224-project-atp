@@ -278,6 +278,24 @@
         "items": {
           "type": "string"
         }
+      },
+      "packageRecommendations": {
+        "type": "object",
+        "description": "Agency alternatives already selected by the agent, including computed cost comparisons. These are alternatives, never part of the custom itinerary total.",
+        "properties": {
+          "mode": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "packages": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          }
+        }
       }
     },
     "required": [

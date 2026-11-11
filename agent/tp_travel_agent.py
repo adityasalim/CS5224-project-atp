@@ -5918,7 +5918,8 @@ def deliver(state, best, usage, metrics, user_id, t0):
     try:   # the plan is delivered without a PDF when the renderer cannot be reached
         pdf = gw.call("render_pdf", {"tripId": trip_id, "version": version, "title": story["title"],
                                      "tripSpec": trip_spec_for_tools(spec), "itinerary": {**seq, "days": pdf_days},
-                                     "narrative": story, "caveats": caveats})
+                                     "narrative": story, "caveats": caveats,
+                                     **({"packageRecommendations": package_result} if package_result is not None else {})})
     except GatewayError as e:
         pdf = {"ok": False, "message": str(e)[:300]}
     if not pdf.get("ok"):
