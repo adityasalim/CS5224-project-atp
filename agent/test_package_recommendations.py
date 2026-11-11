@@ -61,9 +61,37 @@ class Tests(unittest.TestCase):
         self.assertEqual(recommend(SPEC,[ROW],VERIFY,fail,mode='custom_only')['status'],'custom_only')
     def test_none_selection_hallucinated_ids_malformed_claims_and_failure(self):
         self.assertEqual(recommend(SPEC,[ROW],VERIFY,lambda *x:{'selected':[]})['status'],'custom_preferred')
-        for answer in ({'selected':[{'packageId':'invented'}]}, {}, {'selected':[{'packageId':'p','reasons':['Guaranteed cheaper at USD 100'],'tradeoffs':['none']}]}):
+        for answer in ({'selected':[{'packageId':'invented'}]}, {}):
             r=recommend(SPEC,[ROW],VERIFY,lambda *x:answer)
             self.assertEqual(r['status'],'review_unavailable');self.assertEqual(r['packages'],[])
         def failure(*x): raise RuntimeError('model down')
         self.assertEqual(recommend(SPEC,[ROW],VERIFY,failure)['status'],'review_unavailable')
+    def test_unsafe_explanations_preserve_valid_packages_in_both_modes(self):
+        for mode in ('compare','packages_only'):
+            for phrase in ('Guaranteed cheaper at USD 100','Availability is not guaranteed','Not confirmed within budget','Culture fit costs $10'):
+                answer={'selected':[{'packageId':'p','reasons':[phrase],'tradeoffs':[phrase]}]}
+                r=recommend(SPEC,[ROW],VERIFY,lambda *x:answer,mode=mode)
+                self.assertEqual(r['status'],'recommended')
+                self.assertEqual(r['packages'][0]['packageId'],'p')
+                self.assertEqual(r['packages'][0]['reasons'],['Package suitability match score: 90%.'])
+                self.assertEqual(r['packages'][0]['tradeoffs'],[])
+                self.assertEqual(r['packages'][0]['comparison']['estimatedTotal'],'1000')
+
+    def test_safe_explanations_are_retained_while_unsafe_ones_are_removed(self):
+        answer={'selected':[{'packageId':'p','reasons':['Culture fit is 9/10','Cheaper','Food fit is high'],'tradeoffs':['Availability is not guaranteed','Fixed departure schedule']}]}
+        r=recommend(SPEC,[ROW],VERIFY,lambda *x:answer)
+        self.assertEqual(r['packages'][0]['reasons'],['Culture fit is 9/10','Food fit is high'])
+        self.assertEqual(r['packages'][0]['tradeoffs'],['Fixed departure schedule'])
+
+    def test_sanitized_prose_never_bypasses_eligibility_or_unknown_costs(self):
+        answer={'selected':[{'packageId':'p','reasons':['Guaranteed cheaper'],'tradeoffs':[]}]}
+        def fail(*x): self.fail('Ineligible packages must not reach reviewer')
+        for row in (dict(ROW,matchScore=.4),dict(ROW,eligibilityChecked=False),dict(ROW,price={'amount':'1500','currency':'USD','basis':'per_person'})):
+            self.assertEqual(recommend(SPEC,[row],VERIFY,fail)['packages'],[])
+        row=dict(ROW,costInclusions={})
+        r=recommend(SPEC,[row],VERIFY,lambda *x:answer)
+        self.assertEqual(r['status'],'recommended')
+        self.assertFalse(r['packages'][0]['comparison']['costComplete'])
+        self.assertIsNone(r['packages'][0]['comparison']['withinBudget'])
+
 if __name__=='__main__': unittest.main()

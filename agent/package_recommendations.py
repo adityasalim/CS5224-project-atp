@@ -77,9 +77,16 @@ def eligible(spec,records,verification):
 
 def _phrases(value,required=True):
     if not isinstance(value,list) or not (1 if required else 0)<=len(value)<=20: raise ValueError('Invalid explanation')
-    if any(not isinstance(x,str) or not x.strip() or len(x)>600 or re.search(r'[$€£¥]|\b(SGD|USD|SAR|EUR|GBP|CNY|JPY)\s*[\d,.]|\b(cheaper|affordable|best value|within budget|guaranteed)\b',x,re.I) for x in value):
-        raise ValueError('Unsupported explanation claim')
-    return value[:3]
+    # Prose must not veto a package that already passed eligibility and cost checks.
+    # Drop whole unsafe phrases, rather than editing a claim or its negation.
+    clean=[]
+    for text in value:
+        if not isinstance(text,str) or not text.strip() or len(text)>600:
+            continue
+        if re.search(r'[$€£¥]|\b(SGD|USD|SAR|EUR|GBP|CNY|JPY)\s*[\d,.]|\b(cheaper|affordable|best value|within budget|guaranteed)\b',text,re.I):
+            continue
+        clean.append(text.strip())
+    return clean[:3]
 
 def recommend(spec,records,verification,call,mode='compare'):
     if mode not in MODES: mode='compare'
@@ -100,7 +107,11 @@ def recommend(spec,records,verification,call,mode='compare'):
             pid=choice.get('packageId') if isinstance(choice,dict) else None
             if pid not in by_id or pid in seen: raise ValueError('Invalid package ID')
             row=by_id[pid];seen.add(pid)
-            chosen.append({**row,'reasons':_phrases(choice.get('reasons')),'tradeoffs':_phrases(choice.get('tradeoffs') or [],required=False)})
+            reasons=_phrases(choice.get('reasons'))
+            if not reasons:
+                # The score comes from the eligible search result, not model prose.
+                reasons=[f"Package suitability match score: {row['matchScore']:.0%}."]
+            chosen.append({**row,'reasons':reasons,'tradeoffs':_phrases(choice.get('tradeoffs') or [],required=False)})
         result.update(status='recommended' if chosen else 'custom_preferred',packages=chosen)
     except Exception as exc:
         result['status']='review_unavailable'
