@@ -14,7 +14,11 @@ ALIBABA_TIMEOUT_SECONDS=float(os.environ.get('ALIBABA_TIMEOUT_SECONDS', '180'))
 BEDROCK_READ_TIMEOUT_SECONDS=int(os.environ.get('BEDROCK_READ_TIMEOUT_SECONDS', '180'))
 ANTHROPIC_SECRET=os.environ.get('ANTHROPIC_SECRET_ID') or 'tp/dev/anthropic'   # the secret's name; it holds {"api_key": ...}
 ANTHROPIC_TIMEOUT_SECONDS=float(os.environ.get('ANTHROPIC_TIMEOUT_SECONDS', '300'))
-THINKING_HEADROOM_TOKENS=16000   # Claude counts adaptive thinking inside max_tokens, so it gets room on top of the answer cap
+# Claude counts adaptive thinking inside max_tokens, so it gets room on top of the answer cap. The answer cap is 8000 at
+# most, so a request asks for up to 128000 tokens, the streaming ceiling of Opus 5.5 and Sonnet 5.5. With 16000 a hard
+# trip (9 packed days in London) spent the whole limit thinking and returned no plan. The limit is a ceiling only: a
+# call is billed for the tokens it uses.
+THINKING_HEADROOM_TOKENS=120000
 
 class ModelAdapterError(RuntimeError):
     def __init__(self,kind,code=None):

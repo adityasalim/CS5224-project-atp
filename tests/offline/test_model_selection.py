@@ -367,6 +367,11 @@ assert ad_c.records[-1]["cacheReadTokens"] == 3000 and ad_c.records[-1]["success
 # the Opus planner opts into the server-side refusal fallback (beta); the Sonnet roles never send it
 assert c["betas"] == ["server-side-fallback-2026-07-01"] and c["fallbacks"] == "default"
 assert ad_c.records[-1]["transport"] == "anthropic.beta.messages.stream" and ad_c.records[-1]["responseModelId"] == "claude-opus-5-5"
+# thinking room: the largest plan request asks for exactly the 128000-token ceiling of Opus 5.5 and Sonnet 5.5, so a
+# hard trip is not cut off while thinking (live, 12 Nov: 20880 tokens used of a 20880 limit, no plan text)
+A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=A.MAX_OUTPUT_TOKENS, model_role="planner")
+assert claude.calls[-1]["max_tokens"] == 128000 == priced[-1] == ad_c.records[-1]["maxOutputTokens"]
+assert A.plan_tokens({"startDate": "2026-12-01", "endDate": "2026-12-09"}) + model_adapter.THINKING_HEADROOM_TOKENS > 100000
 # fast mode (beta, 2x price) only on the Opus first draft; a fast-mode rate limit falls back to normal speed
 ad_c.operation = "proposal"
 A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, model_role="planner")
