@@ -22,6 +22,7 @@ COPY google_transport.py .
 COPY public_models.py .
 COPY public_protocol.py .
 COPY public-model-config.json .
+COPY public-model-config-claude.json .
 COPY public-model-prices.json .
 COPY feedback_routing.py .
 COPY acceptance.py .

@@ -1,11 +1,12 @@
 """
 tp_travel_agent — the travel-planning agent hosted on Amazon Bedrock AgentCore Runtime.
 
-Model roles (chosen in public-model-config.json when PUBLIC_MODEL_CONFIGURATION=combo_19), all on the Anthropic API:
-  planner   claude-opus-5-5 (effort medium)           drafts and repairs the day-by-day plan
-  executor  claude-sonnet-5-5 (effort medium)         intake, airport lookup, router, chat, narrative, web food picks
-  reviewer  claude-sonnet-5-5 (effort medium)         judge, package selection, narrative review
-  independent_evaluator  claude-sonnet-5-5 (medium)   final evaluation (only when FINAL_EVALUATOR_ENABLED=true)
+Model roles (chosen in public-model-config.json when PUBLIC_MODEL_CONFIGURATION=combo_19):
+  planner   Qwen 3.8 Max (Alibaba)                    drafts the day-by-day plan
+  executor  DeepSeek V4.1 Flash (Alibaba)             intake, airport lookup, router, chat, narrative, plan corrections
+  reviewer  Kimi K3 (Bedrock)                         judge, package selection, narrative review
+  independent_evaluator  Kimi K3 (Bedrock)            final evaluation (only when FINAL_EVALUATOR_ENABLED=true)
+PUBLIC_MODEL_CONFIGURATION=claude_5_5 loads the optional demonstration roles in public-model-config-claude.json instead.
 Without the adapter the legacy Claude/Nova defaults below run (local and dev only).
 
 LLM-Modulo loop (report Figure 2):
@@ -73,8 +74,8 @@ REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 #   executor (intake/router/chat/narrative): Claude Haiku 5.5, thinking off (fallback: Haiku 4.5)
 #   reviewer (judge): Amazon Nova 2 Lite, a different model family so the reviewer doesn't grade its own family's work
 # With the adapter (PUBLIC_MODEL_CONFIGURATION=combo_19) roles come from public-model-config.json:
-# planner claude-opus-5-5, executor claude-sonnet-5-5, reviewer claude-sonnet-5-5 (Anthropic API). There is no model substitution or
-# fallback, and thinking is set by reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
+# planner Qwen 3.8 Max, executor DeepSeek V4.1 Flash, reviewer Kimi K3. There is no model substitution or fallback,
+# and thinking is set by enableThinking / thinkingBudget / reasoningEffort in that file, not by PLANNER_EFFORT or think=True.
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL_ID", "global.anthropic.claude-sonnet-5-5")
 EXECUTOR_MODEL = os.environ.get("INTAKE_MODEL_ID", "global.anthropic.claude-haiku-5-5")
 REVIEWER_MODEL = os.environ.get("JUDGE_MODEL_ID") or "global.amazon.nova-2-lite-v1:0"
@@ -2294,7 +2295,7 @@ def _page_key(url):
 
 
 def web_food_picks(spec, pool, usage, calls, sources, google_left=GOOGLE_FOOD_CAP):
-    """Claude roles only: the executor (Sonnet) with web search names venues per city from editorial domains.
+    """Optional configuration only: the executor with web search names venues per city from editorial domains.
     A pick that matches a pool place by name gets webSource; others are looked up by name on Google (one request per
     name, at most google_left in all) and added as ordinary, unpinned candidates when rated 4.0+ with 50+ reviews.
     A pick that cannot be found is dropped, so no venue comes from model text alone. Skipped (no model call) when
@@ -4256,7 +4257,7 @@ def _repair_request(spec, pool, plan, verify_res, judge_res, unscheduled, usage,
         PLANNER_MODEL, [planning_context(spec, pool), role], "Return the repaired plan.", usage,
         max_tokens=plan_tokens(spec), temperature=0.2, think=True, cache=True,
         model_role='executor' if getattr(getattr(usage, 'adapter', None), 'operation', None) == 'correction'
-        and _planner_provider(usage) != "anthropic" else 'planner'))   # Claude: corrections on Opus too
+        and _planner_provider(usage) != "anthropic" else 'planner'))   # optional configuration: corrections stay on the planner
 
 
 # ====================================================================== 4 sequence (code)
@@ -5649,7 +5650,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     _, _, gw = _clients()
     strict_mode = bool(getattr(getattr(usage, 'adapter', None), 'strict_no_retry', False))
     round_limit = 1 if strict_mode else MAX_REPAIR_ROUNDS
-    # Claude on the website: a second correction when the hard checks fail or a review score is below 3, and the
+    # Optional configuration: a second correction when the hard checks fail or a review score is below 3, and the
     # best-ranked plan is kept
     claude = _planner_provider(usage) == "anthropic"
     prepare_pool(spec, pool, _daily_spend(spec))
@@ -5788,7 +5789,7 @@ def improve(spec, pool, plan, full_request, usage, change=None):
     best["acceptanceReasons"] = accept_reasons
     best["stopReason"] = stop_reason
     best["qualityAccepted"] = accept_state == STATE_ACCEPTED
-    # Claude: a plan still failing checks is delivered as "not fully verified" with the failures listed (or refused
+    # Optional configuration: a plan still failing checks is delivered as "not fully verified" with the failures listed (or refused
     # for a mandatory conflict) by classify_acceptance; configuration 19 keeps its strict refusal
     if strict_mode and not claude and not _verified(best["verify"]) and not _budget_only_failure(best["verify"]):
         raise ValueError("Optimized itinerary failed deterministic checks after one correction")

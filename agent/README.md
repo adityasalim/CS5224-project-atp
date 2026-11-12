@@ -32,9 +32,10 @@
 | `PROMPT_CACHE` | `true` (default): prompt-cache checkpoints for Claude/Nova calls; `false` turns them off | no |
 | `MEMORY_ID` | `tp_dev_memory-AbCdEf1234` (Phase 6.4) | no; memory is off without it |
 | `MEMORY_PREFERENCES_NAMESPACE` | `/users/{actorId}/preferences` (must match the console) | default shown |
-| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (now Claude Opus 5.5 planner, Haiku 5.5 small jobs, Sonnet 5.5 reviewer and evaluator); stays `combo_19` when the file is switched back to configuration 19 | no; legacy defaults without it |
-| `ANTHROPIC_SECRET_ID` | `tp/dev/anthropic`, a secret holding `{"api_key": ...}` (runtime role needs `GetSecretValue` on it) | default shown |
-| `MODEL_BUDGET_LEDGER` | `public_claude_5_5`; a new id whenever the caps in `public_models.py` change | yes, with `PUBLIC_MODEL_CONFIGURATION` |
+| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (Qwen 3.8 Max planner, DeepSeek V4.1 Flash small jobs, Kimi K3 reviewer and evaluator). `claude_5_5`: the optional demonstration roles from `public-model-config-claude.json` | no; legacy defaults without it |
+| `ALIBABA_SECRET_ID` | name of the secret holding the Alibaba Model Studio key (runtime role needs `GetSecretValue` on it) | yes, with `combo_19` |
+| `ANTHROPIC_SECRET_ID` | `tp/dev/anthropic`, a secret holding `{"api_key": ...}` (runtime role needs `GetSecretValue` on it); read only with `claude_5_5` | default shown |
+| `MODEL_BUDGET_LEDGER` | `public_combo_19`; one id per configuration, and a new id whenever the caps in `public_models.py` change | yes, with `PUBLIC_MODEL_CONFIGURATION` |
 
 ## Personal preferences
 

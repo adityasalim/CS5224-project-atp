@@ -65,9 +65,10 @@ def raises(exc, fn, text=None):
 
 
 # ====================================================================== part 1: role adapter
-cfg = ModelConfiguration.load(AGENT / "public-model-config.json")
+CLAUDE_CONFIG = AGENT / "public-model-config-claude.json"
+cfg = ModelConfiguration.load(CLAUDE_CONFIG)
 S = cfg.selections
-# the website roles: Opus 5.5 plans and corrects, Sonnet 5.5 does the small jobs, reviews and evaluates, all on the
+# the optional demonstration roles (PUBLIC_MODEL_CONFIGURATION=claude_5_5): Opus 5.5 plans and corrects, Sonnet 5.5 does the small jobs, reviews and evaluates, all on the
 # Anthropic API at effort medium; Opus in fast mode (owner decisions, 2026-11-09: no Haiku, fast config)
 assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
     "planner": ("anthropic", "claude-opus-5-5", {"reasoningEffort": "medium", "speed": "fast"}),
@@ -76,13 +77,14 @@ assert {r: (s.provider, s.model_id, s.options) for r, s in S.items()} == {
     "independent_evaluator": ("anthropic", "claude-sonnet-5-5", {"reasoningEffort": "medium"})}
 print("config roles:", {r: (s.model_id, s.options) for r, s in S.items()})
 
-# strict validation and the provider request shapes below use the earlier Alibaba/Kimi combination (still supported)
+# strict validation and the provider request shapes below use configuration 19, the website configuration
 base = {"experimentId": "public_combo_19", "googleBillingDisabled": True,
         "planner": {"provider": "alibaba", "model": "qwen3.8-max-0902", "options": {"enableThinking": True, "thinkingBudget": 4000}},
         "executor": {"provider": "alibaba", "model": "deepseek-v4.1-flash", "options": {"enableThinking": True, "reasoningEffort": "low"}},
         "reviewer": {"provider": "bedrock", "model": "global.moonshotai.kimi-k3", "options": {"reasoningEffort": "medium"}},
         "independent_evaluator": {"provider": "bedrock", "model": "global.moonshotai.kimi-k3", "options": {"reasoningEffort": "low"}}}
 cfg = ModelConfiguration.parse(base)
+assert json.loads((AGENT / "public-model-config.json").read_text()) == base, "public-model-config.json is configuration 19"
 def with_(role, **row):
     d = json.loads(json.dumps(base)); d[role] = {**d[role], **row}; return d
 raises(ValueError, lambda: ModelConfiguration.parse({k: v for k, v in base.items() if k != "reviewer"}), "reviewer")
@@ -129,14 +131,18 @@ raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="glm-
 raises(ValueError, lambda: ModelConfiguration.parse(with_("planner", model="qwen3.7-max")), "verified experiment pool")
 raises(ValueError, lambda: ModelConfiguration.parse({**base, "fallbackModel": "x"}), "Unexpected")
 
-# website configuration must agree with the adapter's eligible models and with public_models.py's approved roles
+# each configuration file must agree with the adapter's eligible models and with public_models.py's approved roles
 from public_models import APPROVED
-got = tuple(S[r].model_id for r in ("planner", "executor", "reviewer"))
-assert got in APPROVED, f"public-model-config.json {got} does not match the approved roles in public_models.py {list(APPROVED)}"
-assert S["independent_evaluator"].model_id == APPROVED[got]
-for role, sel in S.items():
-    if sel.provider == "alibaba":
-        assert sel.model_id in model_adapter.ALIBABA_MODELS, f"{role}: {sel.model_id} is not in ALIBABA_MODELS"
+assert sorted(APPROVED) == ["claude_5_5", "combo_19"]
+for name, (file, roles, evaluator) in APPROVED.items():
+    assert f"COPY {file} ." in (AGENT / "Dockerfile").read_text().splitlines(), f"{file} is not copied into the image"
+    sels = ModelConfiguration.load(AGENT / file).selections
+    got = tuple(sels[r].model_id for r in ("planner", "executor", "reviewer"))
+    assert got == roles, f"{file} {got} does not match the approved roles for {name} in public_models.py {roles}"
+    assert sels["independent_evaluator"].model_id == evaluator
+    for role, sel in sels.items():
+        if sel.provider == "alibaba":
+            assert sel.model_id in model_adapter.ALIBABA_MODELS, f"{role}: {sel.model_id} is not in ALIBABA_MODELS"
 
 # fake providers (the reply reports reasoning tokens, as thinking models do)
 class FakeOpenAI:
@@ -354,7 +360,7 @@ class FakeAnthropic:
         self.beta = SimpleNamespace(messages=SimpleNamespace(stream=self.messages.stream))
 claude = FakeAnthropic('{"ok": true}')
 priced = []
-ad_c = ModelAdapter(ModelConfiguration.load(AGENT / "public-model-config.json"), clients={"anthropic": claude},
+ad_c = ModelAdapter(ModelConfiguration.load(CLAUDE_CONFIG), clients={"anthropic": claude},
                     budget_authorizer=lambda sel, system, messages, max_tokens: priced.append(max_tokens) or Reservation())
 uc = A.Usage(adapter=ad_c, trip_id="t2")
 assert A.ask_json(A.PLANNER_MODEL, ["POOL", "ROLE: planner"], "plan", uc, max_tokens=5440, temperature=0.3, model_role="planner") == {"ok": True}
@@ -603,7 +609,7 @@ ledger = BudgetLedger(store, cap_usd="50", provider_caps={"anthropic": "50"}, en
 r_fast = ledger.authorize(ad_c.configuration.selections["planner"], "s", MSG, 1000)
 r_norm = ledger.authorize(SimpleNamespace(provider="anthropic", model_id="claude-opus-5-5", options={}), "s", MSG, 1000)
 assert r_fast.maximum == 2 * r_norm.maximum, "fast mode reserves 2x"
-raises(ValueError, lambda: ModelConfiguration.parse({**json.loads((AGENT / "public-model-config.json").read_text()),
+raises(ValueError, lambda: ModelConfiguration.parse({**json.loads(CLAUDE_CONFIG.read_text()),
        "planner": {"provider": "anthropic", "model": "claude-opus-4-7", "options": {"speed": "fast"}}}), "Opus")
 web = FakeAnthropic('{"picks": []}'); web.messages.stream.reply.model = "claude-sonnet-5-5"
 web.messages.stream.reply.usage = SimpleNamespace(input_tokens=120000, output_tokens=2500, cache_read_input_tokens=0,
