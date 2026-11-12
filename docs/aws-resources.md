@@ -19,7 +19,7 @@ Fill in the blanks once, so teammates can find everything. None of these values 
 | AgentCore Gateway | `tp-dev-gateway` (MCP URL ends in `/mcp`) |
 | AgentCore Runtime | agent ARN `arn:aws:bedrock-agentcore:ap-southeast-1:890876258093:runtime/tp_travel_agent-BqUc5XA1Tx` |
 | AgentCore Memory | `tp_dev_memory` (ID `<memory-id>`) |
-| Models | Website (Anthropic API, `public-model-config.json`): `claude-opus-5-5` planner, `claude-haiku-5-5` small jobs, `claude-sonnet-5-5` reviewer and evaluator (evaluator off unless `FINAL_EVALUATOR_ENABLED=true`). Legacy Bedrock defaults: `global.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-haiku-4-5-20251001-v1:0`, `global.amazon.nova-2-lite-v1:0` |
+| Models | Website configuration `combo_19` (`public-model-config.json`): `qwen3.8-max-0902` planner, `deepseek-v4.1-flash` small jobs, `global.moonshotai.kimi-k3` reviewer and evaluator (evaluator off unless `FINAL_EVALUATOR_ENABLED=true`). Optional demonstration configuration `claude_5_5` (`public-model-config-claude.json`). Legacy Bedrock defaults: `global.anthropic.claude-sonnet-4-6`, `global.anthropic.claude-haiku-4-5-20251001-v1:0`, `global.amazon.nova-2-lite-v1:0` |
 | Budget alert | Billing → Budgets → `<name>` |
 
 ## Google Places quota

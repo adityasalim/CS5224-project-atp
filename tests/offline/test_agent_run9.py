@@ -297,7 +297,7 @@ class Reservation:
     def settle(self, row): reserved.append(("settled", row["role"], row["modelId"]))
 
 
-ad = PublicProtocolAdapter(ModelConfiguration.load(REPO / "agent" / "public-model-config.json"),
+ad = PublicProtocolAdapter(ModelConfiguration.load(REPO / "agent" / "public-model-config-claude.json"),
                            clients={"anthropic": fake_claude},
                            budget_authorizer=lambda sel, system, messages, max_tokens: reserved.append(
                                ("reserved", sel.model_id, max_tokens)) or Reservation())
@@ -308,7 +308,7 @@ assert claude_calls[0]["model"] == "claude-sonnet-5-5" and claude_calls[0]["syst
 assert [r[:2] for r in reserved] == [("reserved", "claude-sonnet-5-5"), ("settled", "executor")], reserved
 assert u.calls == 1 and ad.records[-1]["role"] == "executor" and ad.records[-1]["tripId"] == "trip_g"
 # a halted budget (the authorizer refuses) keeps the names and does not fail
-ad_x = PublicProtocolAdapter(ModelConfiguration.load(REPO / "agent" / "public-model-config.json"),
+ad_x = PublicProtocolAdapter(ModelConfiguration.load(REPO / "agent" / "public-model-config-claude.json"),
                              clients={"anthropic": fake_claude},
                              budget_authorizer=lambda *a: (_ for _ in ()).throw(RuntimeError("Global spending cap would be exceeded")))
 pool_x = copy.deepcopy(g_pool)
