@@ -6,7 +6,7 @@ candidate pool the search tools saved.
 
 | File | What it is |
 | --- | --- |
-| `tp_travel_agent.py` | The main entry point: Intake â†’ Gather â†’ Propose â†’ Sequence â†’ Verify â†’ Judge â†’ Repair (â‰¤3) â†’ Deliver |
+| `tp_travel_agent.py` | The main entry point: Intake → Gather → Propose → Sequence → Verify → Judge → Repair (≤3) → Deliver |
 | `prompts.py` | The system prompts for every model role (exported to `docs/prompt-management/`) |
 | `gateway_client.py` | Talks to AgentCore Gateway over MCP (gets a Cognito token, lists and calls tools) |
 | `model_adapter.py` | Role-based model calls through each provider's SDK (Alibaba Cloud Model Studio, Amazon Bedrock) |
@@ -70,10 +70,10 @@ changes re-search places with the new filters, then the plan is repaired as a ne
 
 ## Robust to new requests in chat
 
-| The traveller saysâ€¦ | What happens |
+| The traveller says… | What happens |
 | --- | --- |
 | a specific place ("we must see teamLab Planets", "add dinner at Ichiran Dotonbori") | Intake/router put it in `mustInclude`; `find_places` is called with `names`; found places are **pinned** (`spec.pinned`), listed first in the pool, sent to the verifier as `mustVisit`, and the planner must include them. Names that can't be found are reported in the reply. |
-| a specific hotel ("stay at Park Hyatt"), or one they already booked | `preferences.hotel.name` / `booked` (per leg on multi-city trips). `search_stays` centres on that hotel and puts it first, or, if booked, returns it as `booked:â€¦` with price 0 (or the price they give). Changing only the hotel re-searches hotels only. |
+| a specific hotel ("stay at Park Hyatt"), or one they already booked | `preferences.hotel.name` / `booked` (per leg on multi-city trips). `search_stays` centres on that hotel and puts it first, or, if booked, returns it as `booked:…` with price 0 (or the price they give). Changing only the hotel re-searches hotels only. |
 | "let's go to Osaka instead" | Router: `modify` with the new destination. The destination airport is looked up (built-in list, else one short executor call), Tokyo-only things (named places, day trips, named hotel) are dropped, dates/budget/travellers stay, and a new trip (version 1) is planned. |
 | "now plan a separate trip to Seoul" | Router: `new_trip`. The previous dates, travellers, budget, origin and preferences are carried into intake unless the new message changes them. |
 | "a day trip to Nikko" | `spec.dayTrips`; places are searched in that town (tagged `dayTrip`), the planner gives it a full day, `sequence_day` starts from the town after the travel time, and the verifier checks the distance, travel time and that the day's places are in that town. |
@@ -97,7 +97,7 @@ for the best judged quality per dollar (quality chain: 7.433/10 at USD 0.034 per
 | --- | --- | --- |
 | Planner | Qwen 3.8 Max (Alibaba Cloud Model Studio), thinking budget 4,000 tokens | Propose and repair: fitting flights, hotels, transfers and places into budget and time |
 | Executor | DeepSeek V4.1 Flash (Alibaba Cloud Model Studio), low reasoning effort | Intake, airport lookup, router, chat, narrative and single correction passes |
-| Reviewer | Kimi K3 (Amazon Bedrock) | Judge (1â€“5 scores), package selection, narrative review; a different provider from the planner so it does not favour its own style of answer |
+| Reviewer | Kimi K3 (Amazon Bedrock) | Judge (1–5 scores), package selection, narrative review; a different provider from the planner so it does not favour its own style of answer |
 | Independent evaluator | Kimi K3 (Amazon Bedrock), off by default | Scores delivered plans out of 10 when `FINAL_EVALUATOR_ENABLED=true` |
 
 Changing a model means editing `public-model-config.json` (and starting a new `MODEL_BUDGET_LEDGER` id), not the
@@ -140,13 +140,13 @@ for that session. Each new message is routed:
 
 | Intent | What happens |
 | --- | --- |
-| first message / missing details | Intake â†’ clarifying question, or a new plan |
+| first message / missing details | Intake → clarifying question, or a new plan |
 | `question` | Answered from the current plan's facts (executor), no re-planning |
-| `modify` | Small changes (budget, pace, hotel, food, a day) â†’ repair with the change request â†’ verify loop â†’ **new version** of the same trip. Changes to dates, travellers, destination or interests â†’ search again, then re-plan |
+| `modify` | Small changes (budget, pace, hotel, food, a day) → repair with the change request → verify loop → **new version** of the same trip. Changes to dates, travellers, destination or interests → search again, then re-plan |
 | `new_trip` | Starts a fresh trip in the same chat |
 | `smalltalk` | Short friendly reply |
 
-Each version is saved to `tp-dev-itineraries` (version 1, 2, 3â€¦) with its own PDF. The conversation memory
+Each version is saved to `tp-dev-itineraries` (version 1, 2, 3…) with its own PDF. The conversation memory
 lives in the Runtime session, so it's lost after the session goes idle (about 15 minutes by default) or when the
 user clicks **New trip**. The saved trips stay in DynamoDB.
 
@@ -168,15 +168,15 @@ check-out dates, and asks which airport to use if the first or last city has non
 | Gather | Done in code: flights, hotels, places and agency packages searched in parallel | Done in code: 1 open-jaw flight search (`returnFrom` = last city's airport), hotels + places per city, `search_transfers` per hop |
 | Propose / Repair | `PLANNER` / `REPAIR` | `PLANNER_MULTI` / `REPAIR_MULTI`: one stay per city, one transfer per hop, each day tagged with its city |
 | Sequence | Hotel is the base every day | That night's hotel is the base; a moving day starts 60 min after the transfer arrives (no sightseeing if it arrives late) |
-| Verify / PDF / web | `stayId` | `stays` + `transfers`; the web card shows the route, the hotels and a âœˆ / ðŸš† line on moving days |
+| Verify / PDF / web | `stayId` | `stays` + `transfers`; the web card shows the route, the hotels and a ✈ / 🚆 line on moving days |
 
 Changing the route in chat ("skip Abisko", "add Stockholm for 2 nights") sends the full new `legs` list,
 which triggers a new search and a new version of the trip.
 
 ## Streamed events
 
-`{"type":"status"}` progress Â· `{"type":"question"}` clarifying question Â· `{"type":"message"}` a chat reply Â·
-`{"type":"itinerary"}` a plan or a new version (title, summary, totals, days, caveats, pdfUrl, judge scores, version) Â·
+`{"type":"status"}` progress · `{"type":"question"}` clarifying question · `{"type":"message"}` a chat reply ·
+`{"type":"itinerary"}` a plan or a new version (title, summary, totals, days, caveats, pdfUrl, judge scores, version) ·
 `{"type":"error"}`. The chat page (`index.html`) understands all five. With `background=true` and a `requestId`, the
 request runs as a background task instead and the page polls the trips API for the result
 (see `docs/background-planning.md`).
@@ -185,4 +185,4 @@ request runs as a background task instead and the page polls the trips API for t
 
 Each finished plan prints one log line `{"metric": "plan_completed", ...}` with latency, repair rounds,
 pass/fail, judge minimum score, token counts and which tools the model chose (`toolCalls`) versus
-calls the code had to make for it (`fallbackCalls`). That gives you the tool-selection accuracy for Â§5.1.1.
+calls the code had to make for it (`fallbackCalls`). That gives you the tool-selection accuracy for §5.1.1.
