@@ -1,4 +1,4 @@
-# Model-Selection Study Log (archived, 2 November 2026)
+# Model-Selection Study Log (archived, November 2026)
 
 > **Archived working log.** This is the model-selection and deployment log kept while choosing the website's model
 > configuration, as it stood on **2 November 2026** on the `ahmed-test` development branch. It is kept for
