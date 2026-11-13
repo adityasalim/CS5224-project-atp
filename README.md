@@ -27,7 +27,7 @@ AI trip planners write fluent plans that are rarely checked. On the TravelPlanne
 ## Features
 
 - **Plain-language requests via a form**, e.g. *"a nine-night Tokyo and Osaka honeymoon for two from Singapore on SGD 7,000"*. The agent asks one follow-up question if dates, travelers or budget are missing.
-- **Real prices**: Google Flights fares via SerpApi (Duffel as fallback), hotels via Duffel Stays (liteAPI as fallback), places via OpenStreetMap (Amazon Location and Google Places as fallbacks).
+- **Real prices**: Google Flights fares via SerpApi (Duffel as fallback), hotels via Duffel Stays (liteAPI as fallback), places via Google Maps Places (Amazon Location and OpenStreetMap as fallbacks).
 - **Code-checked plans**: budget, dates, flight times, opening hours, travel times, pacing, duplicates, unknown IDs, multi-city chains and must-visit places.
 - **Independent reviewer**: a model from a different provider than the planner scores preference fit, theme, pacing and variety.
 - **Automatic repair**: a failing plan is corrected and re-checked; the best version is kept and remaining issues are shown as caveats.
