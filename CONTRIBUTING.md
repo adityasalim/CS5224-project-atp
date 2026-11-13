@@ -19,7 +19,7 @@ business and presentation areas are owned by the members who lead that work.
 | Member | Role |
 | --- | --- |
 | Alghaith Ahmed Ibrahim A | Agent lead: agent loop, model configuration and selection study, partner marketplace |
-| Alfallaj Abdulkarim Fahad | Tools lead: search and planning tools, offline test suite |
+| Alfallaj Abdulkarim Fahad | Tools & Optimization lead: search and planning tools, offline test suite, optimizations |
 | Aditya Tjitra Salim | Platform lead: AWS infrastructure, CI/CD, repository documentation and report integration |
 | Alshamrani Ahmed Abdullah A | Quality lead: functional testing on the live site and website review |
 | Lim Fang Eng | Business lead: business model, cost model and cloud vs on-premise analysis |
