@@ -1,11 +1,15 @@
-# IAM policies (paste as inline policies; replace every `<...>`)
+# IAM policies
 
-| File | Attach to | Runbook step |
+Least-privilege policies for each role in the system. Paste each file as an **inline policy** on the role shown and
+replace every `<...>`: `<account-id>` is your 12-digit account ID and `<suffix>` your bucket suffix.
+
+| File | Attach to | What it allows |
 | --- | --- | --- |
-| `lambda-tools-access-policy.json` | `tp-lambda-tools-role` (all 9 Lambdas) | Phase 4.1 |
-| `gateway-invoke-tools-policy.json` | the AgentCore Gateway service role | Phase 6.1 C |
-| `agent-access-policy.json` | the agent's execution role `AmazonBedrockAgentCoreSDKRuntime-ap-southeast-1-…` | Phase 6.3 C / 6.4 C |
-| `codebuild-deploy-policy.json` | `codebuild-tp-dev-deploy-service-role` | CI/CD Part E |
-| `codebuild-agent-deploy-policy.json` | the same CodeBuild role (only for automatic agent deploys) | CI/CD Part I |
+| `lambda-tools-access-policy.json` | `tp-lambda-tools-role` (the Lambda functions) | Read the API-key secret, read and write the DynamoDB tables, write PDFs to S3, call Amazon Location |
+| `gateway-invoke-tools-policy.json` | the AgentCore Gateway service role | Invoke the tool Lambdas |
+| `agent-access-policy.json` | the agent's execution role `AmazonBedrockAgentCoreSDKRuntime-ap-southeast-1-…` | Call Bedrock models, Guardrails and prompts, read the Gateway and model-provider secrets, use AgentCore Memory, save trips and read request receipts |
+| `codebuild-deploy-policy.json` | `codebuild-tp-dev-deploy-service-role` | Read the GitHub source, update Lambda code and Gateway schemas, upload the website, invalidate CloudFront, remember the last deploy |
+| `codebuild-agent-deploy-policy.json` | the same CodeBuild role (only when `DEPLOY_AGENT=true`) | Read the saved agent deploy config, launch the agent with the starter toolkit, pass the agent roles |
 
-`<account-id>` = your 12-digit account ID, `<suffix>` = your bucket suffix.
+The agent also needs `secretsmanager:GetSecretValue` on the secret named in `ALIBABA_SECRET_ID` for the website
+model configuration. No policy contains a secret value; secrets stay in AWS Secrets Manager.
