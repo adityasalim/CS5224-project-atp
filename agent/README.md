@@ -1,4 +1,4 @@
-# tp_travel_agent â€” the travel-planning agent (AgentCore Runtime)
+# tp_travel_agent the travel-planning agent (AgentCore Runtime)
 
 The agent follows the LLM-Modulo loop: models propose, code verifies, a reviewer from another provider judges, and
 failing plans are repaired and checked again. Prices never come from a model: every option is chosen by ID from the
