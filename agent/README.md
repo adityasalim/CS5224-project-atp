@@ -1,11 +1,30 @@
-# tp_travel_agent — the travel-planning agent (AgentCore Runtime)
+# tp_travel_agent â€” the travel-planning agent (AgentCore Runtime)
+
+The agent follows the LLM-Modulo loop: models propose, code verifies, a reviewer from another provider judges, and
+failing plans are repaired and checked again. Prices never come from a model: every option is chosen by ID from the
+candidate pool the search tools saved.
 
 | File | What it is |
 | --- | --- |
-| `tp_travel_agent.py` | The agent: Intake → Gather → Propose → Sequence → Verify → Judge → Repair (≤3) → Deliver |
+| `tp_travel_agent.py` | The main entry point: Intake â†’ Gather â†’ Propose â†’ Sequence â†’ Verify â†’ Judge â†’ Repair (â‰¤3) â†’ Deliver |
+| `prompts.py` | The system prompts for every model role (exported to `docs/prompt-management/`) |
 | `gateway_client.py` | Talks to AgentCore Gateway over MCP (gets a Cognito token, lists and calls tools) |
-| `prompts.py` | The system prompts (intake, gather, planner, repair, judge, narrative, router, chat, plus multi-city planner/repair) |
-| `requirements.txt` | Python packages the Runtime installs |
+| `model_adapter.py` | Role-based model calls through each provider's SDK (Alibaba Cloud Model Studio, Amazon Bedrock) |
+| `public-model-config.json` | The provider, model and reasoning options for each role (planner, executor, reviewer, evaluator) |
+| `model_configuration.py`, `public_models.py` | Validate the configuration; a role only runs if `PUBLIC_MODEL_CONFIGURATION` names an approved configuration |
+| `public_protocol.py` | The optimized, session-scoped planning protocol used by the website configuration (`executor-v6`) |
+| `model_budget.py`, `public-model-prices.json` | Per-configuration spending ledger in S3 and the price table used to estimate each call |
+| `acceptance.py` | Single source of truth for delivery rules: verifier-violation triage, judge-score validation, delivery states and stop reasons |
+| `package_gather.py`, `package_recommendations.py`, `package_cost.py` | Agency packages: search, evidence-bound selection (code owns eligibility and money) and cost comparison with the custom plan |
+| `trip_currency.py`, `price_normalization.py`, `display_currency.py` | Prices normalised into the trip currency before any budget arithmetic; display-only currency metadata |
+| `budget_candidates.py`, `hours_util.py` | Budget-bound pruning of candidates; opening-hours parser (shared with the Lambdas) |
+| `background_jobs.py`, `run_history.py` | Background planning that survives a browser disconnect, and durable request receipts so a request never runs twice |
+| `feedback_routing.py` | Bounded handling of narrative feedback; itinerary changes still go through the verified loop |
+| `final_evaluation.py` | Optional independent evaluation of a delivered plan (only when `FINAL_EVALUATOR_ENABLED=true`) |
+| `google_transport.py` | Google SDK transport used only in isolated experiments (low-cost chain) |
+| `launch.example.sh` | Deploy script template: copy to `launch.sh` (git-ignored) and fill in resource names |
+| `Dockerfile`, `requirements.txt` | Runtime container and Python packages |
+| `test_*.py` | Unit tests for the adapter, budget, packages, prices and evaluation (run by GitHub Actions) |
 
 ## Environment variables (set with `agentcore launch --env NAME=value`)
 
@@ -14,9 +33,9 @@
 | `GATEWAY_URL` | `https://<id>.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com/mcp` | yes |
 | `GATEWAY_TOKEN_URL` | `https://<domain>.auth.ap-southeast-1.amazoncognito.com/oauth2/token` | yes |
 | `GATEWAY_SECRET_ID` | `tp/dev/gateway-client` | yes |
-| `PLANNER_MODEL_ID` | `global.anthropic.claude-sonnet-5-5` (propose, repair, tool choice) | default shown |
-| `INTAKE_MODEL_ID` | `global.anthropic.claude-haiku-5-5` (intake, router, chat, narrative) | default shown |
-| `JUDGE_MODEL_ID` | `global.amazon.nova-2-lite-v1:0` (different family from the planner) | default shown |
+| `PLANNER_MODEL_ID` | legacy only: `global.anthropic.claude-sonnet-5-5` (propose, repair, tool choice) | default shown |
+| `INTAKE_MODEL_ID` | legacy only: `global.anthropic.claude-haiku-5-5` (intake, router, chat, narrative) | default shown |
+| `JUDGE_MODEL_ID` | legacy only: `global.amazon.nova-2-lite-v1:0` (different family from the planner) | default shown |
 | `PLANNER_EFFORT` | `medium` thinking effort for propose/repair: `low`, `medium`, `high`, or `off` | default shown |
 | `PLANNER_FALLBACK_MODEL_IDS` | `global.anthropic.claude-sonnet-5,global.anthropic.claude-sonnet-4-6` | default shown |
 | `INTAKE_FALLBACK_MODEL_IDS` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | default shown |
@@ -32,10 +51,12 @@
 | `PROMPT_CACHE` | `true` (default): prompt-cache checkpoints for Claude/Nova calls; `false` turns them off | no |
 | `MEMORY_ID` | `tp_dev_memory-AbCdEf1234` (Phase 6.4) | no; memory is off without it |
 | `MEMORY_PREFERENCES_NAMESPACE` | `/users/{actorId}/preferences` (must match the console) | default shown |
-| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (Qwen 3.8 Max planner, DeepSeek V4.1 Flash small jobs, Kimi K3 reviewer and evaluator). `claude_5_5`: the optional demonstration roles from `public-model-config-claude.json` | no; legacy defaults without it |
+| `PUBLIC_MODEL_CONFIGURATION` | `combo_19`: website roles from `public-model-config.json` (Qwen 3.8 Max planner, DeepSeek V4.1 Flash executor, Kimi K3 reviewer and evaluator) | yes for the website; legacy defaults without it (local and dev only) |
 | `ALIBABA_SECRET_ID` | name of the secret holding the Alibaba Model Studio key (runtime role needs `GetSecretValue` on it) | yes, with `combo_19` |
-| `ANTHROPIC_SECRET_ID` | `tp/dev/anthropic`, a secret holding `{"api_key": ...}` (runtime role needs `GetSecretValue` on it); read only with `claude_5_5` | default shown |
+| `MODEL_BUDGET_BUCKET` | S3 bucket for the spending ledger | yes, with `PUBLIC_MODEL_CONFIGURATION` |
 | `MODEL_BUDGET_LEDGER` | `public_combo_19`; one id per configuration, and a new id whenever the caps in `public_models.py` change | yes, with `PUBLIC_MODEL_CONFIGURATION` |
+| `FINAL_EVALUATOR_ENABLED` | `true` to score each verified plan with the independent evaluator | no (default `false`) |
+| `GATHER_MODE` | `code` (default): searches run directly in code. `model` keeps the older model-driven gather for comparison (legacy Bedrock models only) | no |
 
 ## Personal preferences
 
@@ -49,20 +70,19 @@ changes re-search places with the new filters, then the plan is repaired as a ne
 
 ## Robust to new requests in chat
 
-| The traveller says… | What happens |
+| The traveller saysâ€¦ | What happens |
 | --- | --- |
 | a specific place ("we must see teamLab Planets", "add dinner at Ichiran Dotonbori") | Intake/router put it in `mustInclude`; `find_places` is called with `names`; found places are **pinned** (`spec.pinned`), listed first in the pool, sent to the verifier as `mustVisit`, and the planner must include them. Names that can't be found are reported in the reply. |
-| a specific hotel ("stay at Park Hyatt"), or one they already booked | `preferences.hotel.name` / `booked` (per leg on multi-city trips). `search_stays` centres on that hotel and puts it first, or, if booked, returns it as `booked:…` with price 0 (or the price they give). Changing only the hotel re-searches hotels only. |
-| "let's go to Osaka instead" | Router: `modify` with the new destination. The destination airport is looked up (built-in list, else one short Haiku call), Tokyo-only things (named places, day trips, named hotel) are dropped, dates/budget/travellers stay, and a new trip (version 1) is planned. |
+| a specific hotel ("stay at Park Hyatt"), or one they already booked | `preferences.hotel.name` / `booked` (per leg on multi-city trips). `search_stays` centres on that hotel and puts it first, or, if booked, returns it as `booked:â€¦` with price 0 (or the price they give). Changing only the hotel re-searches hotels only. |
+| "let's go to Osaka instead" | Router: `modify` with the new destination. The destination airport is looked up (built-in list, else one short executor call), Tokyo-only things (named places, day trips, named hotel) are dropped, dates/budget/travellers stay, and a new trip (version 1) is planned. |
 | "now plan a separate trip to Seoul" | Router: `new_trip`. The previous dates, travellers, budget, origin and preferences are carried into intake unless the new message changes them. |
 | "a day trip to Nikko" | `spec.dayTrips`; places are searched in that town (tagged `dayTrip`), the planner gives it a full day, `sequence_day` starts from the town after the travel time, and the verifier checks the distance, travel time and that the day's places are in that town. |
 
 ## Token efficiency
 
-- **Prompt caching:** the trip + candidate pool is one system block shared by propose and every repair round,
-  followed by a cache checkpoint, so later calls read it from the cache (about 10% of the input price). The gather
-  loop caches its tool list, system prompt and the conversation so far. A model that rejects caching is remembered
-  and called without it. `cacheReadTokens` / `cacheWriteTokens` are in each `plan_completed` log line.
+- **Prompt caching:** the trip + candidate pool is one system block shared by propose and every repair round, so
+  providers that support caching read it from the cache on later calls. `cacheReadTokens` / `cacheWriteTokens` are
+  in each `plan_completed` log line.
 - **Slim prompts:** prompts get the trip spec without empty fields and defaults (`slim_spec`), and the gather model
   sees only IDs, names, prices and preference matches from each tool result (full results still go into the pool).
 - **Targeted re-searches:** a hotel, flight or transfer wish re-searches only that; a named place or day trip only
@@ -70,17 +90,20 @@ changes re-search places with the new filters, then the plan is repaired as a ne
 
 ## Models
 
-| Step | Model | Why |
-| --- | --- | --- |
-| Propose, Repair | Claude Sonnet 5.5, adaptive thinking at `PLANNER_EFFORT` | The hard reasoning step: fitting places, hotels and transfers into budget and time. Same price as Sonnet 5 and cheaper than Sonnet 4.6. |
-| Gather (tool choice) | Claude Sonnet 5.5, thinking off | Picking 3–6 tool calls doesn't need long thinking; off keeps it fast |
-| Intake, Router, Chat, Narrative | Claude Haiku 5.5, thinking off | Short, structured jobs; about 10x cheaper than Haiku 4.5 for prompts under 100K tokens |
-| Judge | Amazon Nova 2 Lite | A different model family, so the reviewer isn't grading its own family's plans |
+The website runs configuration `combo_19` from `public-model-config.json`, chosen from 20 compared configurations
+for the best judged quality per dollar (quality chain: 7.433/10 at USD 0.034 per plan in planning cost).
 
-If the account isn't allowed a model yet (AccessDenied or unknown model ID), the agent switches once to the next
-model in its fallback list and logs `model … unavailable … switching to …`. If a model rejects a request field
-(e.g. the effort setting), it retries with a simpler request and remembers what worked. The models actually used are
-in each `plan_completed` log line (`models`).
+| Role | Model | Jobs |
+| --- | --- | --- |
+| Planner | Qwen 3.8 Max (Alibaba Cloud Model Studio), thinking budget 4,000 tokens | Propose and repair: fitting flights, hotels, transfers and places into budget and time |
+| Executor | DeepSeek V4.1 Flash (Alibaba Cloud Model Studio), low reasoning effort | Intake, airport lookup, router, chat, narrative and single correction passes |
+| Reviewer | Kimi K3 (Amazon Bedrock) | Judge (1â€“5 scores), package selection, narrative review; a different provider from the planner so it does not favour its own style of answer |
+| Independent evaluator | Kimi K3 (Amazon Bedrock), off by default | Scores delivered plans out of 10 when `FINAL_EVALUATOR_ENABLED=true` |
+
+Changing a model means editing `public-model-config.json` (and starting a new `MODEL_BUDGET_LEDGER` id), not the
+agent code. The configuration names models explicitly, so there is no silent model substitution: if a call fails, the
+error is logged and the turn reports it. Without `PUBLIC_MODEL_CONFIGURATION` the legacy Bedrock defaults in the
+environment table run (local and dev only). The models actually used are in each `plan_completed` log line (`models`).
 
 ## Extra permissions for the Runtime's execution role
 
@@ -117,13 +140,13 @@ for that session. Each new message is routed:
 
 | Intent | What happens |
 | --- | --- |
-| first message / missing details | Intake → clarifying question, or a new plan |
-| `question` | Answered from the current plan's facts (Haiku), no re-planning |
-| `modify` | Small changes (budget, pace, hotel, food, a day) → repair with the change request → verify loop → **new version** of the same trip. Changes to dates, travellers, destination or interests → search again, then re-plan |
+| first message / missing details | Intake â†’ clarifying question, or a new plan |
+| `question` | Answered from the current plan's facts (executor), no re-planning |
+| `modify` | Small changes (budget, pace, hotel, food, a day) â†’ repair with the change request â†’ verify loop â†’ **new version** of the same trip. Changes to dates, travellers, destination or interests â†’ search again, then re-plan |
 | `new_trip` | Starts a fresh trip in the same chat |
 | `smalltalk` | Short friendly reply |
 
-Each version is saved to `tp-dev-itineraries` (version 1, 2, 3…) with its own PDF. The conversation memory
+Each version is saved to `tp-dev-itineraries` (version 1, 2, 3â€¦) with its own PDF. The conversation memory
 lives in the Runtime session, so it's lost after the session goes idle (about 15 minutes by default) or when the
 user clicks **New trip**. The saved trips stay in DynamoDB.
 
@@ -142,22 +165,24 @@ check-out dates, and asks which airport to use if the first or last city has non
 
 | Step | Single city | Multi-city |
 | --- | --- | --- |
-| Gather | Planner model chooses the tool calls | Done in code: 1 open-jaw flight search (`returnFrom` = last city's airport), hotels + places per city, `search_transfers` per hop |
+| Gather | Done in code: flights, hotels, places and agency packages searched in parallel | Done in code: 1 open-jaw flight search (`returnFrom` = last city's airport), hotels + places per city, `search_transfers` per hop |
 | Propose / Repair | `PLANNER` / `REPAIR` | `PLANNER_MULTI` / `REPAIR_MULTI`: one stay per city, one transfer per hop, each day tagged with its city |
 | Sequence | Hotel is the base every day | That night's hotel is the base; a moving day starts 60 min after the transfer arrives (no sightseeing if it arrives late) |
-| Verify / PDF / web | `stayId` | `stays` + `transfers`; the web card shows the route, the hotels and a ✈ / 🚆 line on moving days |
+| Verify / PDF / web | `stayId` | `stays` + `transfers`; the web card shows the route, the hotels and a âœˆ / ðŸš† line on moving days |
 
 Changing the route in chat ("skip Abisko", "add Stockholm for 2 nights") sends the full new `legs` list,
 which triggers a new search and a new version of the trip.
 
 ## Streamed events
 
-`{"type":"status"}` progress · `{"type":"question"}` clarifying question · `{"type":"message"}` a chat reply ·
-`{"type":"itinerary"}` a plan or a new version (title, summary, totals, days, caveats, pdfUrl, judge scores, version) ·
-`{"type":"error"}`. The chat page (`index.html`) understands all five.
+`{"type":"status"}` progress Â· `{"type":"question"}` clarifying question Â· `{"type":"message"}` a chat reply Â·
+`{"type":"itinerary"}` a plan or a new version (title, summary, totals, days, caveats, pdfUrl, judge scores, version) Â·
+`{"type":"error"}`. The chat page (`index.html`) understands all five. With `background=true` and a `requestId`, the
+request runs as a background task instead and the page polls the trips API for the result
+(see `docs/background-planning.md`).
 
 ## Metrics
 
 Each finished plan prints one log line `{"metric": "plan_completed", ...}` with latency, repair rounds,
 pass/fail, judge minimum score, token counts and which tools the model chose (`toolCalls`) versus
-calls the code had to make for it (`fallbackCalls`). That gives you the tool-selection accuracy for §5.1.1.
+calls the code had to make for it (`fallbackCalls`). That gives you the tool-selection accuracy for Â§5.1.1.
