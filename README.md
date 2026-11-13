@@ -7,8 +7,8 @@ A serverless SaaS on AWS that turns a plain-language trip request into a **check
 - **Live site:** https://d1xdiycimlc3a.cloudfront.net
 - **Region:** AWS ap-southeast-1 (Singapore)
 
-| Team member | Matric no. |
-|---|---|
+| Team member |
+|---|
 | Alghaith Ahmed Ibrahim A |
 | Alfallaj Abdulkarim Fahad |
 | Alshamrani Ahmed Abdullah A |
