@@ -187,7 +187,7 @@ Team workflow (branches, pull requests and reviews) is in [CONTRIBUTING.md](CONT
 
 ## Cost
 
-A plan costs **USD 0.046 (free tier) to 0.098 (paid tier)**, including model calls, flight searches and AWS services; flight search, not AI, is the largest cost. At 10,000 plans a month the cost of goods sold is about USD 541, with no up-front investment, against about USD 24,300 a month for an equivalent on-premise GPU deployment.
+A plan costs **USD 0.034 (free tier) to 0.098 (paid tier)**, including model calls, flight searches and AWS services; flight search, not AI, is the largest cost. At 10,000 plans a month the cost of goods sold is about USD 541, with no up-front investment, against about USD 24,300 a month for an equivalent on-premise GPU deployment.
 
 ## Limitations
 
